@@ -47,6 +47,8 @@ def _prepare_config(config: dict) -> dict:
 
 async def _quick_test_mcp_connection(config: dict) -> tuple[bool, str]:
     """Quick test MCP server connectivity"""
+    import os
+
     import aiohttp
 
     cfg = _prepare_config(config.copy())
@@ -62,6 +64,13 @@ async def _quick_test_mcp_connection(config: dict) -> tuple[bool, str]:
             transport_type = cfg["type"]
         else:
             raise Exception("MCP connection config missing transport or type field")
+
+        http_proxy = os.environ.get("http_proxy", "")
+        https_proxy = os.environ.get("https_proxy", "")
+        logger.debug(
+            f"MCP connection test - URL: {url}, transport: {transport_type}, "
+            f"http_proxy: {http_proxy}, https_proxy: {https_proxy}"
+        )
 
         async with aiohttp.ClientSession(trust_env=True) as session:
             if transport_type == "streamable_http":
