@@ -13,6 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'toggle-tool', tool: ToolItem): void;
+  (e: 'update-admin-only', tool: ToolItem, adminOnly: boolean): void;
 }>();
 
 const toolHeaders = computed(() => [
@@ -20,12 +21,21 @@ const toolHeaders = computed(() => [
   { title: tmTool('functionTools.description'), key: 'description' },
   { title: tmTool('functionTools.table.origin'), key: 'origin', sortable: false, width: '120px' },
   { title: tmTool('functionTools.table.originName'), key: 'origin_name', sortable: false, width: '160px' },
+  { title: tmTool('functionTools.table.permission'), key: 'admin_only', sortable: false, width: '120px' },
   { title: tmCommand('status.enabled'), key: 'active', sortable: false, width: '120px' },
   { title: tmTool('functionTools.table.actions'), key: 'actions', sortable: false, width: '120px' }
 ]);
 
 const parameterEntries = (tool: ToolItem) => Object.entries(tool.parameters?.properties || {});
 const isInternal = (tool: ToolItem) => tool.source === 'internal';
+
+const getPermissionColor = (adminOnly: boolean | undefined): string => {
+  return adminOnly ? 'error' : 'success';
+};
+
+const getPermissionLabel = (adminOnly: boolean | undefined): string => {
+  return adminOnly ? tmTool('functionTools.permission.admin') : tmTool('functionTools.permission.everyone');
+};
 </script>
 
 <template>
@@ -69,17 +79,46 @@ const isInternal = (tool: ToolItem) => tool.source === 'internal';
       </template>
 
       <template #item.active="{ item }">
-        <v-chip v-if="isInternal(item)" color="grey" size="small" class="font-weight-medium" variant="tonal">
-          内置
-        </v-chip>
-        <v-chip v-else :color="item.active ? 'success' : 'error'" size="small" class="font-weight-medium" :variant="item.active ? 'flat' : 'outlined'">
+        <v-chip :color="item.active ? 'success' : 'error'" size="small" class="font-weight-medium" :variant="item.active ? 'flat' : 'outlined'">
           {{ item.active ? tmCommand('status.enabled') : tmCommand('status.disabled') }}
         </v-chip>
       </template>
 
+      <template #item.admin_only="{ item }">
+        <v-menu location="bottom">
+          <template #activator="{ props: menuProps }">
+            <v-chip
+              v-bind="menuProps"
+              :color="getPermissionColor(item.admin_only)"
+              size="small"
+              class="font-weight-medium cursor-pointer"
+              link
+            >
+              {{ getPermissionLabel(item.admin_only) }}
+              <v-icon end size="14">mdi-chevron-down</v-icon>
+            </v-chip>
+          </template>
+          <v-list density="compact">
+            <v-list-item
+              :value="false"
+              @click="emit('update-admin-only', item, false)"
+              :active="!item.admin_only"
+            >
+              <v-list-item-title>{{ tmTool('functionTools.permission.everyone') }}</v-list-item-title>
+            </v-list-item>
+            <v-list-item
+              :value="true"
+              @click="emit('update-admin-only', item, true)"
+              :active="item.admin_only"
+            >
+              <v-list-item-title>{{ tmTool('functionTools.permission.admin') }}</v-list-item-title>
+            </v-list-item>
+          </v-list>
+        </v-menu>
+      </template>
+
       <template #item.actions="{ item }">
         <v-switch
-          v-if="!isInternal(item)"
           :model-value="item.active"
           color="primary"
           density="compact"
@@ -87,7 +126,6 @@ const isInternal = (tool: ToolItem) => tool.source === 'internal';
           inset
           @update:model-value="emit('toggle-tool', item)"
         />
-        <span v-else class="text-caption text-grey">—</span>
       </template>
 
       <template #no-data>
@@ -150,5 +188,11 @@ const isInternal = (tool: ToolItem) => tool.source === 'internal';
 
 .internal-tool-row {
   opacity: 0.65;
+}
+</style>
+
+<style>
+.cursor-pointer {
+  cursor: pointer;
 }
 </style>

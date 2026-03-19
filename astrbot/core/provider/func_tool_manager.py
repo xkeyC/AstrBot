@@ -315,9 +315,16 @@ class FunctionToolManager:
             if f.name == name:
                 return f
 
-    def get_full_tool_set(self) -> ToolSet:
-        """获取完整工具集"""
-        tool_set = ToolSet(self.func_list.copy())
+    def get_full_tool_set(self, is_admin: bool = True) -> ToolSet:
+        """获取完整工具集
+
+        Args:
+            is_admin: If False, tools marked as admin_only will be excluded.
+        """
+        tools = [
+            tool for tool in self.func_list if not (tool.admin_only and not is_admin)
+        ]
+        tool_set = ToolSet(tools)
         return tool_set
 
     @staticmethod
@@ -818,6 +825,106 @@ class FunctionToolManager:
             return True
         return False
 
+    def toggle_internal_tool(self, name: str, active: bool) -> bool:
+        """Toggle the active state of an internal tool.
+
+        Internal tools use a separate persistence key from plugin tools.
+
+        Returns:
+            True if the tool was found and updated, False otherwise.
+        """
+        func_tool = self.get_func(name)
+        if func_tool is None:
+            return False
+
+        if getattr(func_tool, "source", "") != "internal":
+            return False
+
+        func_tool.active = active
+
+        inactivated_internal_tools: list = sp.get(
+            "inactivated_internal_tools",
+            [],
+            scope="global",
+            scope_id="global",
+        )
+
+        if active:
+            if name in inactivated_internal_tools:
+                inactivated_internal_tools.remove(name)
+        else:
+            if name not in inactivated_internal_tools:
+                inactivated_internal_tools.append(name)
+
+        sp.put(
+            "inactivated_internal_tools",
+            inactivated_internal_tools,
+            scope="global",
+            scope_id="global",
+        )
+
+        return True
+
+    def set_tool_admin_only(self, name: str, admin_only: bool) -> bool:
+        """Set the admin_only flag for a tool.
+
+        Returns:
+            True if the tool was found and updated, False otherwise.
+        """
+        func_tool = self.get_func(name)
+        if func_tool is None:
+            return False
+
+        func_tool.admin_only = admin_only
+
+        admin_only_tools: list = sp.get(
+            "admin_only_tools",
+            [],
+            scope="global",
+            scope_id="global",
+        )
+
+        if admin_only:
+            if name not in admin_only_tools:
+                admin_only_tools.append(name)
+        else:
+            if name in admin_only_tools:
+                admin_only_tools.remove(name)
+
+        sp.put(
+            "admin_only_tools",
+            admin_only_tools,
+            scope="global",
+            scope_id="global",
+        )
+
+        return True
+
+    def _load_internal_tool_states(self) -> None:
+        """Load the active state for internal tools from persistence."""
+        inactivated_internal_tools: list = sp.get(
+            "inactivated_internal_tools",
+            [],
+            scope="global",
+            scope_id="global",
+        )
+        for tool in self.func_list:
+            if getattr(tool, "source", "") == "internal":
+                if tool.name in inactivated_internal_tools:
+                    tool.active = False
+
+    def _load_admin_only_states(self) -> None:
+        """Load the admin_only state for all tools from persistence."""
+        admin_only_tools: list = sp.get(
+            "admin_only_tools",
+            [],
+            scope="global",
+            scope_id="global",
+        )
+        for tool in self.func_list:
+            if tool.name in admin_only_tools:
+                tool.admin_only = True
+
     @property
     def mcp_config_path(self):
         data_dir = get_astrbot_data_path()
@@ -956,6 +1063,9 @@ class FunctionToolManager:
                     self.func_list.append(tool)
                     existing_names.add(tool.name)
                     logger.info("Registered internal tool: %s", tool.name)
+
+        self._load_internal_tool_states()
+        self._load_admin_only_states()
 
     def __str__(self) -> str:
         return str(self.func_list)

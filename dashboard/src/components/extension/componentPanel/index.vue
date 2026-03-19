@@ -110,7 +110,7 @@ const handleToggleTool = async (tool: ToolItem) => {
       activate: tool.active
     });
     if (res.data.status === 'ok') {
-      toast(res.data.message || tmTool('messages.toggleToolSuccess'));
+      toast(tmTool('messages.toggleToolSuccess'));
     } else {
       tool.active = previous;
       toast(res.data.message || tmTool('messages.toggleToolError', { error: '' }), 'error');
@@ -118,6 +118,26 @@ const handleToggleTool = async (tool: ToolItem) => {
   } catch (error: any) {
     tool.active = previous;
     toast(error?.response?.data?.message || error?.message || tmTool('messages.toggleToolError', { error: '' }), 'error');
+  }
+};
+
+const handleUpdateAdminOnly = async (tool: ToolItem, adminOnly: boolean) => {
+  const previous = tool.admin_only;
+  tool.admin_only = adminOnly;
+  try {
+    const res = await axios.post('/api/tools/update-admin-only', {
+      name: tool.name,
+      admin_only: adminOnly
+    });
+    if (res.data.status === 'ok') {
+      toast(tmTool('messages.updateSuccess'));
+    } else {
+      tool.admin_only = previous;
+      toast(res.data.message || tmTool('messages.updateError', { error: '' }), 'error');
+    }
+  } catch (error: any) {
+    tool.admin_only = previous;
+    toast(error?.response?.data?.message || error?.message || tmTool('messages.updateError', { error: '' }), 'error');
   }
 };
 
@@ -283,6 +303,7 @@ watch(viewMode, async (mode) => {
               :items="filteredTools"
               :loading="toolsLoading"
               @toggle-tool="handleToggleTool"
+              @update-admin-only="handleUpdateAdminOnly"
             />
           </div>
         </v-card-text>

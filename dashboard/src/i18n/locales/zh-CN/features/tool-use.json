@@ -38,6 +38,10 @@
     "description": "功能描述",
     "parameters": "参数列表",
     "noParameters": "此工具没有参数",
+    "permission": {
+      "admin": "管理员",
+      "everyone": "所有人"
+    },
     "table": {
       "paramName": "参数名",
       "type": "类型",
@@ -45,6 +49,7 @@
       "required": "必填",
       "origin": "来源",
       "originName": "来源名称",
+      "permission": "权限",
       "actions": "操作"
     }
   },

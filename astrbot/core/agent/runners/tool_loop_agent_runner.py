@@ -735,6 +735,23 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     )
                     continue
 
+                # Check admin permission for admin_only tools
+                if getattr(func_tool, "admin_only", False):
+                    event = getattr(self.run_context.context, "event", None)
+                    if event and not event.is_admin():
+                        sender_id = (
+                            event.get_sender_id()
+                            if hasattr(event, "get_sender_id")
+                            else "unknown"
+                        )
+                        _append_tool_call_result(
+                            func_tool_id,
+                            f"error: Permission denied. Tool '{func_tool_name}' is only allowed for admin users. "
+                            f"Tell user to set admins in `AstrBot WebUI -> Config -> General Config` by adding their user ID to the admins list if they need this feature. "
+                            f"User's ID is: {sender_id}.",
+                        )
+                        continue
+
                 valid_params = {}  # 参数过滤：只传递函数实际需要的参数
 
                 # 获取实际的 handler 函数

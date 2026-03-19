@@ -38,6 +38,10 @@
         "description": "Описание функции",
         "parameters": "Параметры",
         "noParameters": "У этого инструмента нет параметров",
+        "permission": {
+            "admin": "Админ",
+            "everyone": "Все"
+        },
         "table": {
             "paramName": "Параметр",
             "type": "Тип",
@@ -45,6 +49,7 @@
             "required": "Обяз.",
             "origin": "Источник",
             "originName": "Имя источника",
+            "permission": "Права",
             "actions": "Действия"
         }
     },

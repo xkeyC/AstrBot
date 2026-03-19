@@ -316,9 +316,11 @@ async def _ensure_persona_and_skills(
                 req.system_prompt += COMPUTER_USE_DISABLED_PROMPT
     tmgr = plugin_context.get_llm_tool_manager()
 
+    is_admin = event.is_admin()
+
     # inject toolset in the persona
     if (persona and persona.get("tools") is None) or not persona:
-        persona_toolset = tmgr.get_full_tool_set()
+        persona_toolset = tmgr.get_full_tool_set(is_admin=is_admin)
         for tool in list(persona_toolset):
             if not tool.active:
                 persona_toolset.remove_tool(tool.name)
@@ -327,7 +329,7 @@ async def _ensure_persona_and_skills(
         if persona["tools"]:
             for tool_name in persona["tools"]:
                 tool = tmgr.get_func(tool_name)
-                if tool and tool.active:
+                if tool and tool.active and not (tool.admin_only and not is_admin):
                     persona_toolset.add_tool(tool)
     if not req.func_tool:
         req.func_tool = persona_toolset

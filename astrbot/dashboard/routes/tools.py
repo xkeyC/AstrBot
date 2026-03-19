@@ -54,6 +54,7 @@ class ToolsRoute(Route):
             "/tools/mcp/test": ("POST", self.test_mcp_connection),
             "/tools/list": ("GET", self.get_tool_list),
             "/tools/toggle-tool": ("POST", self.toggle_tool),
+            "/tools/update-admin-only": ("POST", self.update_tool_admin_only),
             "/tools/mcp/sync-provider": ("POST", self.sync_provider),
         }
         self.register_routes()
@@ -458,6 +459,7 @@ class ToolsRoute(Route):
                     "origin": origin,
                     "origin_name": origin_name,
                     "source": source,
+                    "admin_only": getattr(tool, "admin_only", False),
                 }
                 tools_dict.append(tool_info)
             return Response().ok(data=tools_dict).__dict__
@@ -470,7 +472,7 @@ class ToolsRoute(Route):
         try:
             data = await request.json
             tool_name = data.get("name")
-            action = data.get("activate")  # True or False
+            action = data.get("activate")
 
             if not tool_name or action is None:
                 return (
@@ -479,12 +481,15 @@ class ToolsRoute(Route):
                     .__dict__
                 )
 
-            # Internal tools cannot be toggled by users
-            for t in self.tool_mgr.func_list:
-                if t.name == tool_name and getattr(t, "source", "") == "internal":
-                    return Response().error("内置工具不支持手动启用/停用").__dict__
+            tool = self.tool_mgr.get_func(tool_name)
+            if not tool:
+                return Response().error(f"Tool {tool_name} does not exist.").__dict__
 
-            if action:
+            is_internal = getattr(tool, "source", "") == "internal"
+
+            if is_internal:
+                ok = self.tool_mgr.toggle_internal_tool(tool_name, action)
+            elif action:
                 try:
                     ok = self.tool_mgr.activate_llm_tool(tool_name, star_map=star_map)
                 except ValueError as e:
@@ -493,7 +498,35 @@ class ToolsRoute(Route):
                 ok = self.tool_mgr.deactivate_llm_tool(tool_name)
 
             if ok:
-                return Response().ok(None, "Operation successful.").__dict__
+                return Response().ok(None).__dict__
+            return (
+                Response()
+                .error(f"Tool {tool_name} does not exist or the operation failed.")
+                .__dict__
+            )
+
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            return Response().error(f"Failed to operate tool: {e!s}").__dict__
+
+    async def update_tool_admin_only(self):
+        """Update the admin_only setting for a tool."""
+        try:
+            data = await request.json
+            tool_name = data.get("name")
+            admin_only = data.get("admin_only")
+
+            if not tool_name or admin_only is None:
+                return (
+                    Response()
+                    .error("Missing required parameters: name or admin_only")
+                    .__dict__
+                )
+
+            ok = self.tool_mgr.set_tool_admin_only(tool_name, admin_only)
+
+            if ok:
+                return Response().ok(None).__dict__
             return (
                 Response()
                 .error(f"Tool {tool_name} does not exist or the operation failed.")

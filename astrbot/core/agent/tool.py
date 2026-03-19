@@ -68,6 +68,11 @@ class FunctionTool(ToolSchema, Generic[TContext]):
     Origin of this tool: 'plugin' (from star plugins), 'internal' (AstrBot built-in),
     or 'mcp' (from MCP servers). Used by WebUI for display grouping.
     """
+    admin_only: bool = False
+    """
+    Whether the tool can only be used by admin users. When True, non-admin users
+    will not have this tool in their LLM context and execution will be blocked.
+    """
 
     def __repr__(self) -> str:
         return f"FuncTool(name={self.name}, parameters={self.parameters}, description={self.description})"
