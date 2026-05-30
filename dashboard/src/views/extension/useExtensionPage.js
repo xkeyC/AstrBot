@@ -117,6 +117,12 @@ export const useExtensionPage = () => {
     extensionName: "",
   });
 
+  const updateConfirmDialog = reactive({
+    show: false,
+    extensionName: "",
+    forceUpdate: false,
+  });
+
   // 更新全部插件确认对话框
   const updateAllConfirmDialog = reactive({
     show: false,
@@ -478,7 +484,7 @@ export const useExtensionPage = () => {
       const failRes = await axios.get("/api/plugin/source/get-failed-plugins");
       failedPluginsDict.value = failRes.data.data || {};
 
-      checkUpdate();
+      // checkUpdate() is called after pluginMarketData is loaded in onMounted
     } catch (err) {
       toast(err, "error");
     } finally {
@@ -596,22 +602,60 @@ export const useExtensionPage = () => {
     uninstall({ kind: "failed", id: dirName }, { skipConfirm: false });
   };
 
+  const normalizeInstallUrl = (value) =>
+    String(value || "")
+      .trim()
+      .replace(/\/+$/, "");
+
+  const isGithubRepoUrl = (value) =>
+    /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?(?:\/tree\/[^/\s]+)?$/i.test(
+      normalizeInstallUrl(value),
+    );
+
+  const getInstalledExtensionByName = (extensionName) => {
+    const data = Array.isArray(extension_data?.data) ? extension_data.data : [];
+    return data.find((extension) => extension.name === extensionName) || null;
+  };
+
+  const findMarketPluginForExtension = (extension) => {
+    if (!extension) return null;
+    const repo = normalizeInstallUrl(extension.repo).toLowerCase();
+    return (
+      pluginMarketData.value.find(
+        (plugin) =>
+          repo &&
+          normalizeInstallUrl(plugin?.repo).toLowerCase() === repo,
+      ) ||
+      pluginMarketData.value.find((plugin) => plugin.name === extension.name) ||
+      null
+    );
+  };
+
+  const getUpdateDownloadUrl = (extension) =>
+    String(findMarketPluginForExtension(extension)?.download_url || "").trim();
+
   const checkUpdate = () => {
     const onlinePluginsMap = new Map();
     const onlinePluginsNameMap = new Map();
 
     pluginMarketData.value.forEach((plugin) => {
       if (plugin.repo) {
-        onlinePluginsMap.set(plugin.repo.toLowerCase(), plugin);
+        onlinePluginsMap.set(normalizeInstallUrl(plugin.repo).toLowerCase(), plugin);
       }
-      onlinePluginsNameMap.set(plugin.name, plugin);
+      const normalizedName = normalizeStr(plugin.name);
+      onlinePluginsNameMap.set(normalizedName, plugin);
     });
 
     const data = Array.isArray(extension_data?.data) ? extension_data.data : [];
+    
     data.forEach((extension) => {
-      const repoKey = extension.repo?.toLowerCase();
+      const repoKey = extension.repo ? normalizeInstallUrl(extension.repo).toLowerCase() : undefined;
       const onlinePlugin = repoKey ? onlinePluginsMap.get(repoKey) : null;
-      const onlinePluginByName = onlinePluginsNameMap.get(extension.name);
+      
+      // 使用 marketplace_name 进行市场匹配（后端已统一为减号格式）
+      const normalizedExtensionName = normalizeStr(extension.marketplace_name);
+      const onlinePluginByName = onlinePluginsNameMap.get(normalizedExtensionName);
+      
       const matchedPlugin = onlinePlugin || onlinePluginByName;
 
       if (matchedPlugin) {
@@ -657,10 +701,20 @@ export const useExtensionPage = () => {
     }
   };
 
+  const openUpdateConfirmDialog = (extensionName, forceUpdate = false) => {
+    updateConfirmDialog.extensionName = extensionName;
+    updateConfirmDialog.forceUpdate = forceUpdate;
+    updateConfirmDialog.show = true;
+  };
+
+  const closeUpdateConfirmDialog = () => {
+    updateConfirmDialog.show = false;
+    updateConfirmDialog.extensionName = "";
+    updateConfirmDialog.forceUpdate = false;
+  };
+
   const updateExtension = async (extension_name, forceUpdate = false) => {
-    // 查找插件信息
-    const data = Array.isArray(extension_data?.data) ? extension_data.data : [];
-    const ext = data.find((e) => e.name === extension_name);
+    const ext = getInstalledExtensionByName(extension_name);
 
     // 如果没有检测到更新且不是强制更新，则弹窗确认
     if (!ext?.has_update && !forceUpdate) {
@@ -669,12 +723,28 @@ export const useExtensionPage = () => {
       return;
     }
 
+    openUpdateConfirmDialog(extension_name, forceUpdate);
+  };
+
+  const confirmUpdatePlugin = async () => {
+    const extensionName = updateConfirmDialog.extensionName;
+    const ext = getInstalledExtensionByName(extensionName);
+    if (!extensionName || !ext) {
+      closeUpdateConfirmDialog();
+      return;
+    }
+
+    const downloadUrl = getUpdateDownloadUrl(ext);
+    closeUpdateConfirmDialog();
     loadingDialog.title = tm("status.loading");
+    loadingDialog.statusCode = 0;
+    loadingDialog.result = "";
     loadingDialog.show = true;
     try {
       const res = await axios.post("/api/plugin/update", {
-        name: extension_name,
-        proxy: getSelectedGitHubProxy(),
+        name: extensionName,
+        download_url: downloadUrl,
+        proxy: downloadUrl ? "" : getSelectedGitHubProxy(),
       });
 
       if (res.data.status === "error") {
@@ -692,7 +762,7 @@ export const useExtensionPage = () => {
 
           // 更新完成后弹出更新日志
           viewChangelog({
-            name: extension_name,
+            name: extensionName,
             repo: ext?.repo || null,
           });
         } catch (error) {
@@ -731,7 +801,7 @@ export const useExtensionPage = () => {
     const name = forceUpdateDialog.extensionName;
     forceUpdateDialog.show = false;
     forceUpdateDialog.extensionName = "";
-    updateExtension(name, true);
+    openUpdateConfirmDialog(name, true);
   };
 
   const updateAllExtensions = async () => {
@@ -747,9 +817,15 @@ export const useExtensionPage = () => {
     loadingDialog.show = true;
 
     const targets = updatableExtensions.value.map((ext) => ext.name);
+    const downloadUrls = Object.fromEntries(
+      updatableExtensions.value
+        .map((ext) => [ext.name, getUpdateDownloadUrl(ext)])
+        .filter(([, downloadUrl]) => downloadUrl),
+    );
     try {
       const res = await axios.post("/api/plugin/update-all", {
         names: targets,
+        download_urls: downloadUrls,
         proxy: getSelectedGitHubProxy(),
       });
 
@@ -920,16 +996,6 @@ export const useExtensionPage = () => {
     dialog.value = false;
     resetInstallDialogState();
   };
-
-  const normalizeInstallUrl = (value) =>
-    String(value || "")
-      .trim()
-      .replace(/\/+$/, "");
-
-  const isGithubRepoUrl = (value) =>
-    /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+(?:\.git)?(?:\/tree\/[^/\s]+)?$/i.test(
-      normalizeInstallUrl(value),
-    );
 
   const selectedInstallDownloadUrl = computed(() => {
     const plugin = selectedInstallPlugin.value;
@@ -1173,21 +1239,26 @@ export const useExtensionPage = () => {
 
   const checkAlreadyInstalled = () => {
     const data = Array.isArray(extension_data?.data) ? extension_data.data : [];
-    const installedRepos = new Set(data.map((ext) => ext.repo?.toLowerCase()));
-    const installedNames = new Set(
-      data.map((ext) => normalizeStr(ext.name).replace(/_/g, "-")),
-    ); //统一格式，以防下面的匹配不生效
+    // repo 匹配：两边统一使用 normalizeInstallUrl
+    const installedRepos = new Set(
+      data
+        .filter((ext) => ext.repo)
+        .map((ext) => normalizeInstallUrl(ext.repo).toLowerCase()),
+    );
+    // 使用 marketplace_name 进行市场匹配（后端已统一为减号格式）
+    const installedNames = new Set(data.map((ext) => normalizeStr(ext.marketplace_name)));
+    // 创建映射用于查询已安装插件的详细信息
     const installedByRepo = new Map(
       data
         .filter((ext) => ext.repo)
-        .map((ext) => [ext.repo.toLowerCase(), ext]),
+        .map((ext) => [normalizeInstallUrl(ext.repo).toLowerCase(), ext]),
     );
-    const installedByName = new Map(data.map((ext) => [ext.name, ext]));
-
+    const installedByName = new Map(data.map((ext) => [ext.marketplace_name, ext]));
+    
     for (let i = 0; i < pluginMarketData.value.length; i++) {
       const plugin = pluginMarketData.value[i];
       const matchedInstalled =
-        (plugin.repo && installedByRepo.get(plugin.repo.toLowerCase())) ||
+        (plugin.repo && installedByRepo.get(normalizeInstallUrl(plugin.repo).toLowerCase())) ||
         installedByName.get(plugin.name);
 
       // 兜底：市场源未提供字段时，回填本地已安装插件中的元数据，便于在市场页直接展示
@@ -1205,8 +1276,8 @@ export const useExtensionPage = () => {
       }
 
       plugin.installed =
-        installedRepos.has(plugin.repo?.toLowerCase()) ||
-        installedNames.has(normalizeStr(plugin.name).replace(/_/g, "-")); //统一格式，防止匹配失败
+        installedRepos.has(normalizeInstallUrl(plugin.repo).toLowerCase()) ||
+        installedNames.has(normalizeStr(plugin.name));
     }
 
     let installed = [];
@@ -1417,6 +1488,7 @@ export const useExtensionPage = () => {
     selectedMarketInstallPlugin.value = null;
     await getExtensions();
     checkAlreadyInstalled();
+    checkUpdate();
 
     viewReadme({
       name: resData.data.name,
@@ -1481,6 +1553,30 @@ export const useExtensionPage = () => {
   };
 
   const selectedInstallPlugin = computed(() => resolveSelectedInstallPlugin());
+
+  const selectedUpdateExtension = computed(() =>
+    getInstalledExtensionByName(updateConfirmDialog.extensionName),
+  );
+
+  const selectedUpdateMarketPlugin = computed(() =>
+    findMarketPluginForExtension(selectedUpdateExtension.value),
+  );
+
+  const selectedUpdateDownloadUrl = computed(() =>
+    String(selectedUpdateMarketPlugin.value?.download_url || "").trim(),
+  );
+
+  const selectedUpdateSourceUrl = computed(
+    () =>
+      selectedUpdateDownloadUrl.value ||
+      String(selectedUpdateExtension.value?.repo || "").trim(),
+  );
+
+  const updateUsesGithubSource = computed(
+    () =>
+      !selectedUpdateDownloadUrl.value &&
+      isGithubRepoUrl(selectedUpdateSourceUrl.value),
+  );
 
   const checkInstallCompatibility = async () => {
     installCompat.checked = false;
@@ -1677,6 +1773,7 @@ export const useExtensionPage = () => {
     updatingAll,
     readmeDialog,
     forceUpdateDialog,
+    updateConfirmDialog,
     updateAllConfirmDialog,
     changelogDialog,
     pluginSearch,
@@ -1742,6 +1839,8 @@ export const useExtensionPage = () => {
     requestUninstallFailedPlugin,
     handleUninstallConfirm,
     updateExtension,
+    closeUpdateConfirmDialog,
+    confirmUpdatePlugin,
     showUpdateAllConfirm,
     confirmUpdateAll,
     cancelUpdateAll,
@@ -1783,6 +1882,11 @@ export const useExtensionPage = () => {
     selectedInstallDownloadUrl,
     selectedInstallSourceUrl,
     installUsesGithubSource,
+    selectedUpdateExtension,
+    selectedUpdateMarketPlugin,
+    selectedUpdateDownloadUrl,
+    selectedUpdateSourceUrl,
+    updateUsesGithubSource,
     checkInstallCompatibility,
     refreshPluginMarket,
     handleLocaleChange,
