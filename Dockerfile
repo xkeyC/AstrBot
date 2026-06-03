@@ -1,5 +1,22 @@
+FROM node:lts-bookworm-slim AS dashboard-builder
+
+WORKDIR /build
+
+COPY dashboard/package.json dashboard/pnpm-lock.yaml ./dashboard/
+WORKDIR /build/dashboard
+RUN npm install -g pnpm@9 \
+    && pnpm install --frozen-lockfile
+
+WORKDIR /build
+COPY dashboard ./dashboard
+COPY astrbot/core/utils/t2i/template/shiki_runtime.iife.js ./astrbot/core/utils/t2i/template/shiki_runtime.iife.js
+WORKDIR /build/dashboard
+RUN pnpm run build-prod
+
 FROM python:3.12-slim
 WORKDIR /AstrBot
+
+ENV ASTRBOT_USE_BUNDLED_DASHBOARD=1
 
 COPY . /AstrBot/
 
@@ -28,6 +45,20 @@ RUN python -m pip install uv \
     && uv export --format requirements.txt --output-file requirements.txt --frozen \
     && uv pip install -r requirements.txt --no-cache-dir --system \
     && uv pip install socksio uv pilk --no-cache-dir --system
+
+COPY --from=dashboard-builder /build/dashboard/dist /AstrBot/astrbot/dashboard/dist
+
+RUN python - <<'EOF'
+from pathlib import Path
+
+from astrbot.core.config.default import VERSION
+
+version_file = Path("/AstrBot/astrbot/dashboard/dist/assets/version")
+version_file.parent.mkdir(parents=True, exist_ok=True)
+version_file.write_text(VERSION, encoding="utf-8")
+EOF
+
+RUN rm -rf /AstrBot/dashboard
 
 EXPOSE 6185
 

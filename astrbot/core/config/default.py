@@ -172,12 +172,12 @@ DEFAULT_CONFIG = {
             "booter": "shipyard_neo",
             "shipyard_endpoint": "",
             "shipyard_access_token": "",
-            "shipyard_ttl": 3600,
+            "shipyard_ttl": 43200,
             "shipyard_max_sessions": 10,
             "shipyard_neo_endpoint": "",
             "shipyard_neo_access_token": "",
             "shipyard_neo_profile": "python-default",
-            "shipyard_neo_ttl": 3600,
+            "shipyard_neo_ttl": 43200,
             "cua_image": CUA_DEFAULT_CONFIG["image"],
             "cua_os_type": CUA_DEFAULT_CONFIG["os_type"],
             "cua_idle_timeout": CUA_DEFAULT_CONFIG["idle_timeout"],
@@ -3373,7 +3373,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.sandbox.shipyard_neo_ttl": {
                         "description": "Shipyard Neo Sandbox TTL",
                         "type": "int",
-                        "hint": "Shipyard Neo 沙箱生存时间（秒）。",
+                        "hint": "Shipyard Neo 沙箱生存时间（秒），默认 43200（12 小时）。",
                         "condition": {
                             "provider_settings.computer_use_runtime": "sandbox",
                             "provider_settings.sandbox.booter": "shipyard_neo",
@@ -3402,7 +3402,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.sandbox.cua_idle_timeout": {
                         "description": "CUA Idle Timeout",
                         "type": "int",
-                        "hint": "Idle timeout for CUA sandbox sessions in seconds. When greater than 0, AstrBot proactively shuts down an idle CUA sandbox after that amount of inactivity; 0 disables it.",
+                        "hint": "CUA 沙箱空闲超时时间（秒）。大于 0 时，AstrBot 会在会话空闲达到该时长后关闭 CUA 沙箱；0 表示禁用。",
                         "condition": {
                             "provider_settings.computer_use_runtime": "sandbox",
                             "provider_settings.sandbox.booter": "cua",

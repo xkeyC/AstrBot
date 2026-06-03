@@ -184,7 +184,7 @@
           },
           "shipyard_neo_ttl": {
             "description": "Shipyard Neo Sandbox TTL",
-            "hint": "Sandbox time-to-live in seconds."
+            "hint": "Sandbox time-to-live in seconds. Defaults to 43200 (12 hours)."
           },
           "cua_image": {
             "description": "CUA Image",
@@ -196,7 +196,7 @@
           },
           "cua_idle_timeout": {
             "description": "CUA Idle Timeout",
-            "hint": "Idle timeout for CUA sandbox sessions in seconds. When greater than 0, AstrBot proactively shuts down an idle CUA sandbox after that amount of inactivity; 0 disables it."
+            "hint": "Idle timeout for CUA sandbox sessions in seconds. When greater than 0, AstrBot shuts down an idle CUA sandbox after that amount of inactivity; 0 disables it."
           },
           "cua_telemetry_enabled": {
             "description": "CUA Telemetry",

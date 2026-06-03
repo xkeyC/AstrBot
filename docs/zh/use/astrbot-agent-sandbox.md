@@ -86,7 +86,7 @@ CUA 相关配置项包括：
 
 - `CUA Image`：要启动的 CUA 镜像。常见值为 `linux`、`macos`、`windows`、`android`。默认 `linux`。
 - `CUA OS Type`：镜像的操作系统类型。默认 `linux`。它会影响 AstrBot 对 POSIX Shell fallback 的判断。
-- `CUA Sandbox TTL`：沙盒生命周期，单位为秒。默认 `3600`。
+- `CUA Sandbox TTL`：沙盒生命周期，单位为秒。默认 `43200`（12 小时）。
 - `CUA Telemetry Enabled`：是否启用 CUA 侧遥测。默认关闭。
 - `CUA Local Runtime`：是否使用本地运行时。默认开启。关闭后会按 CUA SDK 的云端方式创建沙盒。
 - `CUA API Key`：云端 CUA 所需的 API Key。仅在使用云端运行时时填写。
@@ -99,7 +99,7 @@ Computer Use Runtime = sandbox
 CUA Image = linux
 CUA OS Type = linux
 CUA Local Runtime = true
-CUA Sandbox TTL = 3600
+CUA Sandbox TTL = 43200
 ```
 
 如果使用云端 CUA，可改为：
@@ -271,7 +271,7 @@ profiles:
       - shell
       - python
     # 空闲超时（秒）
-    idle_timeout: 1800
+    idle_timeout: 43200
     # 保持 1 个预热实例
     warm_pool_size: 1
     env: {}
@@ -292,7 +292,7 @@ profiles:
       - filesystem  # 包含 upload/download
       - shell
       - python
-    idle_timeout: 1800
+    idle_timeout: 43200
     warm_pool_size: 1
     env: {}
 
@@ -327,7 +327,7 @@ profiles:
         capabilities:
           - browser
         env: {}
-    idle_timeout: 1800
+    idle_timeout: 43200
     warm_pool_size: 1
 
 gc:
@@ -436,7 +436,7 @@ docker pull soulter/shipyard-ship:latest
   - 例如 `python-default`、`browser-python`
   - 如果留空，AstrBot 会优先尝试选择能力更完整、且优先带有 `browser` capability 的 profile，失败时再回退到 `python-default`
 - `Shipyard Neo Sandbox TTL`
-  - sandbox 生命周期上限，默认值为 3600 秒（1 小时）
+  - sandbox 生命周期上限，默认值为 43200 秒（12 小时）
 
 ### 配置 Shipyard（旧方案）
 
@@ -448,7 +448,7 @@ docker pull soulter/shipyard-ship:latest
 - `Shipyard Access Token`
   - 请填写部署 Shipyard 时配置的访问令牌
 - `Shipyard Ship 存活时间(秒)`
-  - 定义每个沙箱环境实例的存活时间，默认值为 3600 秒（1 小时）
+  - 定义每个沙箱环境实例的存活时间，默认值为 43200 秒（12 小时）
 - `Shipyard Ship 会话复用上限`
   - 定义每个沙箱环境实例可以复用的最大会话数，默认值为 10
 

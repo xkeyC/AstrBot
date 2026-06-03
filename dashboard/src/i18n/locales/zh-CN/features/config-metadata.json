@@ -186,7 +186,7 @@
           },
           "shipyard_neo_ttl": {
             "description": "Shipyard Neo Sandbox 存活时间(秒)",
-            "hint": "Shipyard Neo 沙箱的生存时间（秒）。"
+            "hint": "Shipyard Neo 沙箱的生存时间（秒），默认 43200（12 小时）。"
           },
           "cua_image": {
             "description": "CUA 镜像",
@@ -198,7 +198,7 @@
           },
           "cua_idle_timeout": {
             "description": "CUA 空闲超时(秒)",
-            "hint": "CUA 沙箱空闲超时时间（秒）。大于 0 时，AstrBot 会在会话空闲达到该时长后主动关闭 CUA 沙箱；0 表示禁用。"
+            "hint": "CUA 沙箱空闲超时时间（秒）。大于 0 时，AstrBot 会在会话空闲达到该时长后关闭 CUA 沙箱；0 表示禁用。"
           },
           "cua_telemetry_enabled": {
             "description": "CUA 遥测",

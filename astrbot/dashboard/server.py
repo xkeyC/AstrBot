@@ -26,6 +26,7 @@ from astrbot.core.utils.datetime_utils import to_utc_isoformat
 from astrbot.core.utils.io import (
     get_bundled_dashboard_dist_path,
     get_local_ip_addresses,
+    should_force_bundled_dashboard_dist,
     should_use_bundled_dashboard_dist,
 )
 
@@ -120,7 +121,10 @@ class AstrBotDashboard:
         else:
             user_dist = os.path.join(get_astrbot_data_path(), "dist")
             bundled_dist = get_bundled_dashboard_dist_path()
-            if os.path.exists(user_dist) and not should_use_bundled_dashboard_dist(
+            if should_force_bundled_dashboard_dist() and bundled_dist.exists():
+                self.data_path = str(bundled_dist)
+                logger.info("Using bundled dashboard dist: %s", self.data_path)
+            elif os.path.exists(user_dist) and not should_use_bundled_dashboard_dist(
                 user_dist,
                 VERSION,
             ):

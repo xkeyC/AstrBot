@@ -15,7 +15,8 @@ env/
 venv*/
 ENV/
 .conda/
-dashboard/
+dashboard/node_modules/
+dashboard/dist/
 data/
 tests/
 .ruff_cache/

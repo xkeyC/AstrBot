@@ -32,10 +32,10 @@
       "issueLink": "GitHub Issues"
     },
     "tip": "💡 TIP: ",
-    "tipContinue": "默认在切换版本时会下载对应版本的 WebUI 文件。WebUI 代码位于项目的 dashboard 目录，您可使用 npm 自行构建。",
-    "dockerTip": "切换版本时，会同时尝试更新机器人主程序和管理面板。如果您正在使用 Docker 部署，也可以重新拉取镜像或者使用",
+    "tipContinue": "非 Docker 部署切换版本时可能会下载对应版本的 WebUI 文件。若您魔改了 dashboard，请自行构建并使用本地构建产物。",
+    "dockerTip": "Docker 镜像默认使用构建时打包进镜像的 WebUI。若您魔改了 dashboard，请重新构建镜像；也可以使用",
     "dockerTipLink": "watchtower",
-    "dockerTipContinue": "来自动监控拉取。",
+    "dockerTipContinue": "来自动监控和拉取您发布的自定义镜像。",
     "table": {
       "tag": "标签",
       "publishDate": "发布时间",

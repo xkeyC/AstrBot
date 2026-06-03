@@ -338,6 +338,15 @@ def get_bundled_dashboard_dist_path() -> Path:
     return Path(get_astrbot_path()) / "astrbot" / "dashboard" / "dist"
 
 
+def should_force_bundled_dashboard_dist() -> bool:
+    return os.environ.get("ASTRBOT_USE_BUNDLED_DASHBOARD", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _normalize_dashboard_version(version: str) -> str:
     version = version.strip()
     if version[:1].lower() == "v":
@@ -373,6 +382,10 @@ def should_use_bundled_dashboard_dist(
 
 async def get_dashboard_version():
     # First check user data directory (manually updated / downloaded dashboard).
+    bundled = get_bundled_dashboard_dist_path()
+    if should_force_bundled_dashboard_dist() and bundled.exists():
+        return _read_dashboard_dist_version(bundled)
+
     dist_dir = os.path.join(get_astrbot_data_path(), "dist")
     if os.path.exists(dist_dir):
         from astrbot.core.config.default import VERSION
@@ -385,7 +398,6 @@ async def get_dashboard_version():
                 return bundled_version
         return _read_dashboard_dist_version(dist_dir)
 
-    bundled = get_bundled_dashboard_dist_path()
     if bundled.exists():
         return _read_dashboard_dist_version(bundled)
     return None
