@@ -7,6 +7,7 @@
     "dev": "node scripts/subset-mdi-font.mjs && vite --host",
     "build:t2i-shiki-runtime": "node scripts/build-t2i-shiki-runtime.mjs",
     "build": "node scripts/subset-mdi-font.mjs && vue-tsc --noEmit && vite build",
+    "build-local": "node scripts/subset-mdi-font.mjs && vue-tsc --noEmit && vite build --base=/",
     "build-stage": "node scripts/subset-mdi-font.mjs && vue-tsc --noEmit && vite build --base=/vue/free/stage/",
     "build-prod": "node scripts/subset-mdi-font.mjs && vue-tsc --noEmit && vite build --base=/vue/free/",
     "preview": "vite preview --port 5050",

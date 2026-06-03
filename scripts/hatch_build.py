@@ -54,22 +54,26 @@ class CustomBuildHook(BuildHookInterface):
             return
 
         uses_pnpm = (dashboard_src / "pnpm-lock.yaml").exists()
+        pnpm_command = ["pnpm"]
         if uses_pnpm and not self._has_command("pnpm"):
-            if not self._has_command("npm"):
+            if self._has_command("npx"):
+                pnpm_command = ["npx", "--yes", "pnpm@9"]
+            else:
                 raise RuntimeError(
-                    "pnpm is required to build dashboard, and npm is not available "
-                    "to install it. Install Node.js/npm first."
+                    "pnpm is required to build dashboard, and neither pnpm nor npx "
+                    "is available. Install Node.js/npm first."
                 )
-            self._run(["npm", "install", "-g", "pnpm@9"], cwd=dashboard_src)
 
-        package_manager = "pnpm" if uses_pnpm else "npm"
+        package_manager = " ".join(pnpm_command) if uses_pnpm else "npm"
         install_command = (
-            ["pnpm", "install", "--frozen-lockfile"]
+            [*pnpm_command, "install", "--frozen-lockfile"]
             if uses_pnpm
             else ["npm", "install"]
         )
         build_command = (
-            ["pnpm", "run", "build-prod"] if uses_pnpm else ["npm", "run", "build-prod"]
+            [*pnpm_command, "run", "build-local"]
+            if uses_pnpm
+            else ["npm", "run", "build-local"]
         )
 
         # ── Install Node dependencies if node_modules is absent ─────────────

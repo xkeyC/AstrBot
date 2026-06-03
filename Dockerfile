@@ -11,7 +11,7 @@ WORKDIR /build
 COPY dashboard ./dashboard
 COPY astrbot/core/utils/t2i/template/shiki_runtime.iife.js ./astrbot/core/utils/t2i/template/shiki_runtime.iife.js
 WORKDIR /build/dashboard
-RUN pnpm run build-prod
+RUN pnpm run build-local
 
 FROM python:3.12-slim
 WORKDIR /AstrBot
