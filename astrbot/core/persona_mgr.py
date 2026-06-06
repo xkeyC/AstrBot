@@ -1,5 +1,5 @@
 from astrbot import logger
-from astrbot.api import sp
+from astrbot.core import sp
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import Persona, PersonaFolder, Personality
@@ -79,6 +79,7 @@ class PersonaManager:
         conversation_persona_id: str | None,
         platform_name: str,
         provider_settings: dict | None = None,
+        selected_persona_id: str | None = None,
     ) -> tuple[str | None, Personality | None, str | None, bool]:
         """解析当前会话最终生效的人格。
 
@@ -100,7 +101,7 @@ class PersonaManager:
         )
 
         force_applied_persona_id = session_service_config.get("persona_id")
-        persona_id = force_applied_persona_id
+        persona_id = force_applied_persona_id or selected_persona_id
 
         if not persona_id:
             persona_id = conversation_persona_id

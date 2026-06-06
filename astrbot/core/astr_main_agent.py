@@ -29,6 +29,7 @@ from astrbot.core.astr_main_agent_resources import (
     TOOL_CALL_PROMPT_SKILLS_LIKE_MODE,
 )
 from astrbot.core.conversation_mgr import Conversation
+from astrbot.core.event_llm_overrides import get_event_selected_persona_id
 from astrbot.core.message.components import File, Image, Record, Reply, Video
 from astrbot.core.persona_error_reply import (
     extract_persona_custom_error_message_from_persona,
@@ -448,6 +449,7 @@ async def _ensure_persona_and_skills(
         conversation_persona_id=req.conversation.persona_id,
         platform_name=event.get_platform_name(),
         provider_settings=cfg,
+        selected_persona_id=get_event_selected_persona_id(event),
     )
 
     set_persona_custom_error_message_on_event(
@@ -1278,8 +1280,6 @@ async def build_main_agent(
             req.prompt = ""
             req.image_urls = []
             req.audio_urls = []
-            if sel_model := event.get_extra("selected_model"):
-                req.model = sel_model
             if config.provider_wake_prefix and not event.message_str.startswith(
                 config.provider_wake_prefix
             ):
@@ -1407,6 +1407,9 @@ async def build_main_agent(
             req.conversation = conversation
             req.contexts = json.loads(conversation.history)
             event.set_extra("provider_request", req)
+
+        if not req.model and (sel_model := event.get_extra("selected_model")):
+            req.model = sel_model
 
     if isinstance(req.contexts, str):
         req.contexts = json.loads(req.contexts)

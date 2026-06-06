@@ -48,6 +48,7 @@ This fork intentionally differs from upstream AstrBot in a few areas:
 3. Docker and git/wheel installs build and prefer the bundled dashboard from this repository, so local dashboard changes are used instead of an existing upstream `data/dist` with the same version.
 4. MCP server connection tests use the configured proxy settings where applicable.
 5. The dashboard persona manager supports cloning an existing persona.
+6. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
 
 These changes are maintained for this fork and may not match upstream behavior.
 

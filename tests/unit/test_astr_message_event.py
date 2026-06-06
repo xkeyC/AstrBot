@@ -384,6 +384,32 @@ class TestExtras:
         astr_message_event.clear_extra()
         assert astr_message_event._extras == {}
 
+    def test_set_llm_overrides(self, astr_message_event):
+        """Test event-level LLM override helpers."""
+        astr_message_event.set_llm_overrides(
+            persona_id=" persona_a ",
+            provider_id=" provider_a ",
+            model_name=" model_a ",
+        )
+
+        assert astr_message_event.get_selected_persona() == "persona_a"
+        assert astr_message_event.get_selected_provider() == "provider_a"
+        assert astr_message_event.get_selected_model() == "model_a"
+
+    def test_clear_llm_overrides(self, astr_message_event):
+        """Test clearing event-level LLM overrides."""
+        astr_message_event.set_llm_overrides(
+            persona_id="persona_a",
+            provider_id="provider_a",
+            model_name="model_a",
+        )
+
+        astr_message_event.set_llm_overrides()
+
+        assert astr_message_event.get_selected_persona() is None
+        assert astr_message_event.get_selected_provider() is None
+        assert astr_message_event.get_selected_model() is None
+
 
 class TestSetResult:
     """Tests for set_result method."""
