@@ -369,10 +369,27 @@ def should_use_bundled_dashboard_dist(
     if user_version is None or not bundled_dist.exists():
         return False
     try:
+        normalized_user_version = _normalize_dashboard_version(user_version)
+    except (TypeError, ValueError):
+        return False
+
+    bundled_version = _read_dashboard_dist_version(bundled_dist)
+    if bundled_version is not None:
+        try:
+            return (
+                VersionComparator.compare_version(
+                    _normalize_dashboard_version(bundled_version),
+                    normalized_user_version,
+                )
+                >= 0
+            )
+        except (TypeError, ValueError):
+            return False
+
+    try:
         return (
             VersionComparator.compare_version(
-                _normalize_dashboard_version(current_version),
-                _normalize_dashboard_version(user_version),
+                _normalize_dashboard_version(current_version), normalized_user_version
             )
             > 0
         )

@@ -1,8 +1,9 @@
 """
 Custom Hatchling build hook.
 
-Only runs when the environment variable ASTRBOT_BUILD_DASHBOARD=1 is set,
-so that `uv sync` / editable installs are never affected.
+Runs by default for wheel builds, including `uv tool install git+...`.
+Editable installs are skipped unless ASTRBOT_BUILD_DASHBOARD=1 is set,
+so that `uv sync` is not forced to run Node.js tooling.
 
 Usage:
     ASTRBOT_BUILD_DASHBOARD=1 uv build
@@ -20,6 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import tomllib
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 
@@ -35,10 +37,27 @@ class CustomBuildHook(BuildHookInterface):
     def _has_command(command: str) -> bool:
         return shutil.which(command) is not None
 
+    @staticmethod
+    def _should_build_dashboard(build_version: str) -> bool:
+        env_value = os.environ.get("ASTRBOT_BUILD_DASHBOARD", "").strip().lower()
+        if env_value in {"1", "true", "yes", "on"}:
+            return True
+        if env_value in {"0", "false", "no", "off"}:
+            return False
+        return build_version != "editable"
+
+    @staticmethod
+    def _read_project_version(root: Path) -> str:
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        project_version = pyproject.get("project", {}).get("version")
+        if not isinstance(project_version, str) or not project_version.strip():
+            raise RuntimeError("Unable to read project.version from pyproject.toml")
+        return project_version.strip()
+
     def initialize(self, version: str, build_data: dict) -> None:
-        # Only run when explicitly requested (e.g. during CI / release builds).
-        # This prevents `uv sync` / editable installs from triggering npm.
-        if os.environ.get("ASTRBOT_BUILD_DASHBOARD", "").strip() != "1":
+        del build_data
+
+        if not self._should_build_dashboard(version):
             return
 
         root = Path(self.root)
@@ -100,5 +119,5 @@ class CustomBuildHook(BuildHookInterface):
         shutil.copytree(dist_src, dist_target)
         version_file = dist_target / "assets" / "version"
         version_file.parent.mkdir(parents=True, exist_ok=True)
-        version_file.write_text(version, encoding="utf-8")
+        version_file.write_text(f"v{self._read_project_version(root).lstrip('v')}", encoding="utf-8")
         print(f"[hatch_build] Dashboard dist copied → {dist_target.relative_to(root)}")
