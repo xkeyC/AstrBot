@@ -2025,6 +2025,12 @@ CONFIG_METADATA_2 = {
                         "items": {},
                         "hint": "此处添加的键值对将被合并到 OpenAI SDK 的 default_headers 中，用于自定义 HTTP 请求头。",
                     },
+                    "api_mode": {
+                        "description": "OpenAI API 模式",
+                        "type": "string",
+                        "options": ["chat_completions", "responses"],
+                        "hint": "OpenAI 兼容服务请使用 chat_completions。仅在服务支持 OpenAI Responses API 时使用 responses；AstrBot 只会以流式模式发送 Responses API 请求。",
+                    },
                     "ollama_disable_thinking": {
                         "description": "关闭思考模式",
                         "type": "bool",
