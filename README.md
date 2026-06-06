@@ -39,6 +39,18 @@
 
 AstrBot is an open-source all-in-one Agent chatbot platform that integrates with mainstream instant messaging apps. It provides reliable and scalable conversational AI infrastructure for individuals, developers, and teams. Whether you're building a personal AI companion, intelligent customer service, automation assistant, or enterprise knowledge base, AstrBot enables you to quickly build production-ready AI applications within your IM platform workflows.
 
+## Fork Behavior Differences
+
+This fork intentionally differs from upstream AstrBot in a few areas:
+
+1. Chat model calls are forced through streaming internally, even when callers use the non-streaming chat API.
+2. OpenAI-compatible providers can opt into the OpenAI Responses API through the provider `api_mode` setting. The Responses path is streaming-only.
+3. Docker and git/wheel installs build and prefer the bundled dashboard from this repository, so local dashboard changes are used instead of an existing upstream `data/dist` with the same version.
+4. MCP server connection tests use the configured proxy settings where applicable.
+5. The dashboard persona manager supports cloning an existing persona.
+
+These changes are maintained for this fork and may not match upstream behavior.
+
 ![screenshot_1 5x_postspark_2026-02-27_22-37-45](https://github.com/user-attachments/assets/f17cdb90-52d7-4773-be2e-ff64b566af6b)
 
 ## Key Features
