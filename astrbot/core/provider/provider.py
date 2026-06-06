@@ -6,6 +6,9 @@ from typing import Literal, TypeAlias, Union
 
 from astrbot.core.agent.message import ContentPart, Message, is_checkpoint_message
 from astrbot.core.agent.tool import ToolSet
+from astrbot.core.exceptions import EmptyModelOutputError
+from astrbot.core.message.components import Plain
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import (
     LLMResponse,
     ProviderMeta,
@@ -14,6 +17,14 @@ from astrbot.core.provider.entities import (
 )
 from astrbot.core.provider.register import provider_cls_map
 from astrbot.core.utils.astrbot_path import get_astrbot_path
+
+ENABLE_ALL_STREAMING_MODE = True
+"""Force text_chat() to consume text_chat_stream() internally.
+
+Keep this as a single global compatibility switch to make future upstream merges easy:
+provider-specific non-streaming implementations remain intact and can be re-enabled by
+turning this off without reverting call sites.
+"""
 
 Providers: TypeAlias = Union[
     "Provider",
@@ -73,6 +84,87 @@ class Provider(AbstractProvider):
     ) -> None:
         super().__init__(provider_config)
         self.provider_settings = provider_settings
+
+    def _should_force_streaming_text_chat(self) -> bool:
+        return ENABLE_ALL_STREAMING_MODE
+
+    async def _text_chat_from_stream_blocking(self, **kwargs) -> LLMResponse:
+        """Consume text_chat_stream() and return a regular LLMResponse."""
+        final_response: LLMResponse | None = None
+        role = "assistant"
+        reasoning_parts: list[str] = []
+        result_chain = MessageChain()
+        has_result_chain = False
+        tools_call_args = []
+        tools_call_name = []
+        tools_call_ids = []
+        tools_call_extra_content = {}
+        reasoning_signature = None
+        response_id = None
+        usage = None
+
+        def append_text(text: str) -> None:
+            if result_chain.chain and isinstance(result_chain.chain[-1], Plain):
+                result_chain.chain[-1].text += text
+            else:
+                result_chain.message(text)
+
+        def append_chain(chain: MessageChain) -> None:
+            for comp in chain.chain:
+                if (
+                    isinstance(comp, Plain)
+                    and result_chain.chain
+                    and isinstance(result_chain.chain[-1], Plain)
+                ):
+                    result_chain.chain[-1].text += comp.text
+                else:
+                    result_chain.chain.append(comp)
+
+        async for response in self.text_chat_stream(**kwargs):
+            if not response.is_chunk:
+                final_response = response
+                continue
+
+            role = response.role or role
+            response_id = response.id or response_id
+            usage = response.usage or usage
+            reasoning_signature = response.reasoning_signature or reasoning_signature
+
+            if response.reasoning_content:
+                reasoning_parts.append(response.reasoning_content)
+            if response.result_chain:
+                has_result_chain = True
+                append_chain(response.result_chain)
+            elif response.completion_text:
+                has_result_chain = True
+                append_text(response.completion_text)
+
+            if response.tools_call_name:
+                tools_call_args.extend(response.tools_call_args)
+                tools_call_name.extend(response.tools_call_name)
+                tools_call_ids.extend(response.tools_call_ids)
+                tools_call_extra_content.update(response.tools_call_extra_content)
+
+        if final_response is not None:
+            return final_response
+
+        if not has_result_chain and not reasoning_parts and not tools_call_name:
+            raise EmptyModelOutputError(
+                "Streaming text_chat produced no usable output before completion."
+            )
+
+        return LLMResponse(
+            role="tool" if tools_call_name else role,
+            result_chain=result_chain if has_result_chain else None,
+            tools_call_args=tools_call_args,
+            tools_call_name=tools_call_name,
+            tools_call_ids=tools_call_ids,
+            tools_call_extra_content=tools_call_extra_content,
+            reasoning_content="".join(reasoning_parts) or None,
+            reasoning_signature=reasoning_signature,
+            id=response_id,
+            usage=usage,
+        )
 
     @abc.abstractmethod
     def get_current_key(self) -> str:

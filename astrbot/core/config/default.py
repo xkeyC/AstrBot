@@ -1161,6 +1161,7 @@ CONFIG_METADATA_2 = {
                         "enable": True,
                         "key": [],
                         "api_base": "https://api.openai.com/v1",
+                        "api_mode": "chat_completions",
                         "timeout": 120,
                         "proxy": "",
                         "custom_headers": {},

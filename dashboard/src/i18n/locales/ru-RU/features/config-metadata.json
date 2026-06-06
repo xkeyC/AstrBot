@@ -1253,6 +1253,10 @@
                 "description": "Заголовки запроса",
                 "hint": "Пары ключ/значение будут добавлены в заголовки запроса (default_headers). Значения должны быть строками."
             },
+            "api_mode": {
+                "description": "Режим OpenAI API",
+                "hint": "Используйте chat_completions для OpenAI-совместимых провайдеров. Используйте responses только для провайдеров с поддержкой OpenAI Responses API; AstrBot отправляет Responses API запросы только в потоковом режиме."
+            },
             "custom_extra_body": {
                 "description": "Параметры тела запроса",
                 "hint": "Добавление дополнительных параметров в запрос (temperature, top_p и др.).",

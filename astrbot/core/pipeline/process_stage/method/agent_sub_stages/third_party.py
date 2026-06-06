@@ -3,6 +3,7 @@ import inspect
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import TYPE_CHECKING
 
+import astrbot.core.provider.provider as provider_core
 from astrbot.core import astrbot_config, logger
 from astrbot.core.agent.runners.coze.coze_agent_runner import CozeAgentRunner
 from astrbot.core.agent.runners.dashscope.dashscope_agent_runner import (
@@ -57,6 +58,17 @@ RUNNER_NO_FINAL_RESPONSE_LOG = (
     "Agent Runner returned no final response, fallback to streamed error/result chain."
 )
 RUNNER_NO_RESULT_LOG = "Agent Runner did not return final result."
+
+
+def _resolve_third_party_streaming_mode(
+    streaming_response: bool,
+    stream_to_general: bool,
+) -> tuple[bool, bool]:
+    all_streaming = provider_core.ENABLE_ALL_STREAMING_MODE
+    streaming_used = streaming_response and not stream_to_general
+    runner_streaming = streaming_response or all_streaming
+    suppress_streaming_deltas = stream_to_general or (all_streaming and not streaming_used)
+    return runner_streaming, suppress_streaming_deltas
 
 
 async def run_third_party_agent(
@@ -358,6 +370,9 @@ class ThirdPartyAgentSubStage(Stage):
             and not event.platform_meta.support_streaming_message
         )
         streaming_used = streaming_response and not stream_to_general
+        runner_streaming, suppress_streaming_deltas = (
+            _resolve_third_party_streaming_mode(streaming_response, stream_to_general)
+        )
 
         runner_closed = False
         stream_consumed = False
@@ -385,7 +400,7 @@ class ThirdPartyAgentSubStage(Stage):
                 ),
                 agent_hooks=MAIN_AGENT_HOOKS,
                 provider_config=self.prov_cfg,
-                streaming=streaming_response,
+                streaming=runner_streaming,
             )
 
             if streaming_used:
@@ -406,7 +421,7 @@ class ThirdPartyAgentSubStage(Stage):
                 async for _ in self._handle_non_streaming_response(
                     runner=runner,
                     event=event,
-                    stream_to_general=stream_to_general,
+                    stream_to_general=suppress_streaming_deltas,
                     custom_error_message=custom_error_message,
                 ):
                     yield

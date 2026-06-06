@@ -20,6 +20,7 @@ from openai.lib.streaming.chat._completions import ChatCompletionStreamState
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
+from openai.types.responses import ResponseUsage
 from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
 
@@ -56,6 +57,8 @@ from ..register import register_provider_adapter
 )
 class ProviderOpenAIOfficial(Provider):
     _ERROR_TEXT_CANDIDATE_MAX_CHARS = 4096
+    _API_MODE_CHAT_COMPLETIONS = "chat_completions"
+    _API_MODE_RESPONSES = "responses"
     # 部分 OpenAI 兼容中转站会校验 data URL 的 MIME 类型是否和图片字节一致。
     # 这里统一维护格式映射，确保本地文件和 `base64://` 图片引用使用相同声明。
     _IMAGE_FORMAT_MIME_TYPES = {
@@ -497,6 +500,7 @@ class ProviderOpenAIOfficial(Provider):
         self.chosen_api_key = None
         self.api_keys: list = super().get_keys()
         self.chosen_api_key = self.api_keys[0] if len(self.api_keys) > 0 else None
+        self.api_mode = provider_config.get("api_mode", self._API_MODE_CHAT_COMPLETIONS)
         self.timeout = provider_config.get("timeout", 120)
         self.custom_headers = provider_config.get("custom_headers", {})
         if isinstance(self.timeout, str):
@@ -531,11 +535,17 @@ class ProviderOpenAIOfficial(Provider):
         self.default_params = inspect.signature(
             self.client.chat.completions.create,
         ).parameters.keys()
+        self.responses_default_params = inspect.signature(
+            self.client.responses.create,
+        ).parameters.keys()
 
         model = provider_config.get("model", "unknown")
         self.set_model(model)
 
         self.reasoning_key = "reasoning_content"
+
+    def _use_responses_api(self) -> bool:
+        return self.api_mode == self._API_MODE_RESPONSES
 
     def _ollama_disable_thinking_enabled(self) -> bool:
         value = self.provider_config.get("ollama_disable_thinking", False)
@@ -606,6 +616,9 @@ class ProviderOpenAIOfficial(Provider):
         payloads["messages"] = cleaned
 
     async def _query(self, payloads: dict, tools: ToolSet | None) -> LLMResponse:
+        if self._use_responses_api():
+            raise RuntimeError("OpenAI Responses API only supports streaming in AstrBot.")
+
         if tools:
             model = payloads.get("model", "").lower()
             omit_empty_param_field = "gemini" in model
@@ -659,6 +672,11 @@ class ProviderOpenAIOfficial(Provider):
         tools: ToolSet | None,
     ) -> AsyncGenerator[LLMResponse, None]:
         """流式查询API，逐步返回结果"""
+        if self._use_responses_api():
+            async for response in self._query_responses_stream(payloads, tools):
+                yield response
+            return
+
         if tools:
             model = payloads.get("model", "").lower()
             omit_empty_param_field = "gemini" in model
@@ -676,6 +694,7 @@ class ProviderOpenAIOfficial(Provider):
         custom_extra_body = self.provider_config.get("custom_extra_body", {})
         if isinstance(custom_extra_body, dict):
             extra_body.update(custom_extra_body)
+        self._apply_provider_specific_extra_body_overrides(extra_body)
 
         to_del = []
         for key in payloads:
@@ -758,6 +777,290 @@ class ProviderOpenAIOfficial(Provider):
             # 流式内容已通过 yield 发出，记录错误后正常结束即可
             return
 
+    @staticmethod
+    def _convert_openai_tool_to_responses(tool: dict) -> dict:
+        function = tool.get("function", {})
+        return {
+            "type": "function",
+            "name": function.get("name", ""),
+            "description": function.get("description", ""),
+            "parameters": function.get("parameters") or {"type": "object", "properties": {}},
+            "strict": None,
+        }
+
+    def _convert_responses_content(self, content: Any) -> Any:
+        if not isinstance(content, list):
+            return content
+
+        converted = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                converted.append({"type": "input_text", "text": str(part.get("text", ""))})
+            elif part.get("type") == "image_url":
+                image_url = part.get("image_url", {})
+                if isinstance(image_url, dict):
+                    image_url = image_url.get("url")
+                if image_url:
+                    converted.append(
+                        {
+                            "type": "input_image",
+                            "image_url": str(image_url),
+                            "detail": "auto",
+                        }
+                    )
+            elif part.get("type") == "audio_url":
+                logger.warning(
+                    "OpenAI Responses API input audio is not mapped yet; audio part ignored."
+                )
+
+        return converted or ""
+
+    def _convert_messages_to_responses_input(self, messages: list[dict]) -> list[dict]:
+        responses_input = []
+        for message in messages:
+            role = message.get("role")
+            if role == "tool":
+                responses_input.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": message.get("tool_call_id", ""),
+                        "output": self._normalize_content(message.get("content", "")),
+                    }
+                )
+                continue
+
+            if role == "assistant" and message.get("tool_calls"):
+                content = self._normalize_content(message.get("content", ""))
+                if content:
+                    responses_input.append({"role": "assistant", "content": content})
+                for tool_call in message.get("tool_calls", []):
+                    function = tool_call.get("function", {})
+                    responses_input.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tool_call.get("id", ""),
+                            "name": function.get("name", ""),
+                            "arguments": function.get("arguments") or "{}",
+                        }
+                    )
+                continue
+
+            if role in ("system", "user", "assistant", "developer"):
+                responses_input.append(
+                    {
+                        "role": role,
+                        "content": self._convert_responses_content(
+                            message.get("content", "")
+                        ),
+                    }
+                )
+
+        return responses_input
+
+    async def _query_responses_stream(
+        self,
+        payloads: dict,
+        tools: ToolSet | None,
+    ) -> AsyncGenerator[LLMResponse, None]:
+        if tools:
+            tool_list = tools.openai_schema()
+            if tool_list:
+                payloads["tools"] = [
+                    self._convert_openai_tool_to_responses(tool) for tool in tool_list
+                ]
+                payloads["tool_choice"] = payloads.get("tool_choice", "auto")
+
+        self._sanitize_assistant_messages(payloads)
+
+        responses_payload = {
+            "model": payloads.get("model", self.get_model()),
+            "input": self._convert_messages_to_responses_input(
+                payloads.get("messages", [])
+            ),
+        }
+        for key, value in payloads.items():
+            if key in ("messages", "model"):
+                continue
+            responses_payload[key] = value
+
+        extra_body = {}
+        custom_extra_body = self.provider_config.get("custom_extra_body", {})
+        if isinstance(custom_extra_body, dict):
+            extra_body.update(custom_extra_body)
+
+        to_del = []
+        for key in responses_payload:
+            if key not in self.responses_default_params:
+                extra_body[key] = responses_payload[key]
+                to_del.append(key)
+        for key in to_del:
+            del responses_payload[key]
+
+        stream = await self.client.responses.create(
+            **responses_payload,
+            stream=True,
+            extra_body=extra_body,
+        )
+
+        final_text = ""
+        reasoning_content = ""
+        response_id = None
+        usage = None
+        tool_calls_by_id: dict[str, dict[str, Any]] = {}
+        tool_call_id_aliases: dict[str, str] = {}
+
+        async for event in stream:
+            event_type = getattr(event, "type", "")
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", "")
+                if delta:
+                    final_text += delta
+                    response_id = getattr(event, "item_id", None) or response_id
+                    yield LLMResponse(
+                        role="assistant",
+                        result_chain=MessageChain(chain=[Comp.Plain(delta)]),
+                        is_chunk=True,
+                        id=response_id,
+                    )
+            elif event_type in (
+                "response.reasoning_text.delta",
+                "response.reasoning_summary_text.delta",
+            ):
+                delta = getattr(event, "delta", "")
+                if delta:
+                    reasoning_content += delta
+                    yield LLMResponse(
+                        role="assistant",
+                        reasoning_content=delta,
+                        is_chunk=True,
+                        id=response_id,
+                    )
+            elif event_type == "response.output_item.done":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    self._merge_response_tool_call(
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                        item_id=getattr(item, "id", None),
+                        call_id=getattr(item, "call_id", None),
+                        name=getattr(item, "name", ""),
+                        arguments=getattr(item, "arguments", "{}") or "{}",
+                    )
+            elif event_type == "response.function_call_arguments.done":
+                item_id = getattr(event, "item_id", None)
+                if item_id:
+                    self._merge_response_tool_call(
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                        item_id=item_id,
+                        call_id=None,
+                        name=getattr(event, "name", ""),
+                        arguments=getattr(event, "arguments", "{}") or "{}",
+                    )
+            elif event_type == "response.completed":
+                response = getattr(event, "response", None)
+                if response is not None:
+                    response_id = getattr(response, "id", None) or response_id
+                    if getattr(response, "usage", None):
+                        usage = self._extract_response_usage(response.usage)
+                    if not final_text:
+                        final_text = self._collect_response_output_text(response)
+                    self._collect_response_tool_calls(
+                        response,
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                    )
+            elif event_type in ("response.failed", "response.error"):
+                error = getattr(event, "error", None)
+                raise Exception(f"OpenAI Responses API streaming failed: {error or event}")
+
+        final_response = LLMResponse(
+            role="tool" if tool_calls_by_id else "assistant",
+            result_chain=MessageChain(chain=[Comp.Plain(final_text)]) if final_text else None,
+            reasoning_content=reasoning_content or None,
+            id=response_id,
+            usage=usage,
+        )
+        for call_id, call in tool_calls_by_id.items():
+            final_response.tools_call_ids.append(call_id)
+            final_response.tools_call_name.append(call.get("name", ""))
+            try:
+                final_response.tools_call_args.append(json.loads(call.get("arguments") or "{}"))
+            except json.JSONDecodeError:
+                logger.error(
+                    "Failed to parse Responses API tool arguments: %s",
+                    call.get("arguments"),
+                )
+                final_response.tools_call_args.append({})
+
+        if not final_text and not reasoning_content and not tool_calls_by_id:
+            raise EmptyModelOutputError(
+                f"OpenAI Responses API stream has no usable output. response_id={response_id}"
+            )
+
+        yield final_response
+
+    def _collect_response_tool_calls(
+        self,
+        response: Any,
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        tool_call_id_aliases: dict[str, str],
+    ) -> None:
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "function_call":
+                continue
+            self._merge_response_tool_call(
+                tool_calls_by_id,
+                tool_call_id_aliases,
+                item_id=getattr(item, "id", None),
+                call_id=getattr(item, "call_id", None),
+                name=getattr(item, "name", ""),
+                arguments=getattr(item, "arguments", "{}") or "{}",
+            )
+
+    @staticmethod
+    def _merge_response_tool_call(
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        tool_call_id_aliases: dict[str, str],
+        *,
+        item_id: str | None,
+        call_id: str | None,
+        name: str,
+        arguments: str,
+    ) -> None:
+        stable_id = call_id or (tool_call_id_aliases.get(item_id) if item_id else None)
+        stable_id = stable_id or item_id
+        if not stable_id:
+            return
+
+        if item_id and call_id:
+            tool_call_id_aliases[item_id] = call_id
+            if item_id != call_id and item_id in tool_calls_by_id:
+                existing = tool_calls_by_id.pop(item_id)
+                target = tool_calls_by_id.setdefault(call_id, {})
+                target.update({k: v for k, v in existing.items() if v})
+            stable_id = call_id
+
+        tool_call = tool_calls_by_id.setdefault(stable_id, {})
+        if name:
+            tool_call["name"] = name
+        if arguments:
+            tool_call["arguments"] = arguments
+
+    def _collect_response_output_text(self, response: Any) -> str:
+        text_parts = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "message":
+                continue
+            for content_part in getattr(item, "content", []) or []:
+                if getattr(content_part, "type", None) == "output_text":
+                    text = getattr(content_part, "text", "")
+                    if text:
+                        text_parts.append(text)
+        return "".join(text_parts)
+
     def _extract_reasoning_content(
         self,
         completion: ChatCompletion | ChatCompletionChunk,
@@ -799,6 +1102,18 @@ class ProviderOpenAIOfficial(Provider):
             input_other=prompt_tokens - cached,
             input_cached=cached,
             output=completion_tokens,
+        )
+
+    def _extract_response_usage(self, usage: ResponseUsage) -> TokenUsage:
+        input_details = getattr(usage, "input_tokens_details", None)
+        cached = getattr(input_details, "cached_tokens", 0) if input_details else 0
+        cached = cached if isinstance(cached, int) else 0
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        return TokenUsage(
+            input_other=input_tokens - cached,
+            input_cached=cached,
+            output=output_tokens,
         )
 
     @staticmethod
@@ -1246,6 +1561,22 @@ class ProviderOpenAIOfficial(Provider):
         tool_choice: Literal["auto", "required"] = "auto",
         **kwargs,
     ) -> LLMResponse:
+        if self._should_force_streaming_text_chat():
+            return await self._text_chat_from_stream_blocking(
+                prompt=prompt,
+                session_id=session_id,
+                image_urls=image_urls,
+                audio_urls=audio_urls,
+                func_tool=func_tool,
+                contexts=contexts,
+                system_prompt=system_prompt,
+                tool_calls_result=tool_calls_result,
+                model=model,
+                extra_user_content_parts=extra_user_content_parts,
+                tool_choice=tool_choice,
+                **kwargs,
+            )
+
         payloads, context_query = await self._prepare_chat_payload(
             prompt,
             image_urls,

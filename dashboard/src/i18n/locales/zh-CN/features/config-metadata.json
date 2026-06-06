@@ -1254,6 +1254,10 @@
         "description": "自定义请求头",
         "hint": "此处添加的键值对将被合并到 OpenAI SDK 的 default_headers 中，用于自定义 HTTP 请求头。值必须为字符串。"
       },
+      "api_mode": {
+        "description": "OpenAI API 模式",
+        "hint": "OpenAI 兼容服务请使用 chat_completions。仅在服务支持 OpenAI Responses API 时使用 responses；AstrBot 只会以流式模式发送 Responses API 请求。"
+      },
       "ollama_disable_thinking": {
         "description": "关闭思考模式",
         "hint": "关闭 Ollama 思考模式。"
