@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import tarfile
 from typing import Any
 
@@ -28,6 +29,21 @@ BAY_LABEL = "astrbot.bay.managed"
 BAY_PORT = 8114
 HEALTH_TIMEOUT_S = 60
 HEALTH_POLL_INTERVAL_S = 2
+PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+MANAGED_PROXY_ENV_KEYS = (
+    *PROXY_ENV_KEYS,
+    "BAY_PROXY__ENABLED",
+    "BAY_PROXY__HTTP_PROXY",
+    "BAY_PROXY__HTTPS_PROXY",
+    "BAY_PROXY__NO_PROXY",
+)
 
 
 class BayContainerManager:
@@ -63,16 +79,27 @@ class BayContainerManager:
                 "an explicit Bay endpoint instead of auto-start mode."
             ) from exc
 
+        env = self._build_bay_env()
+
         # 1. Look for an existing managed container
         existing = await self._find_managed_container()
         if existing is not None:
-            state = existing["State"]
-            if state.get("Running"):
+            if not self._proxy_env_matches(existing, env):
                 cid = existing["Id"][:12]
-                logger.info("[BayManager] Reusing existing Bay container: %s", cid)
-                self._container = await self._docker.containers.get(existing["Id"])
-                return f"http://127.0.0.1:{self._host_port}"
+                logger.info(
+                    "[BayManager] Recreating Bay container with updated proxy env: %s",
+                    cid,
+                )
+                container = await self._docker.containers.get(existing["Id"])
+                await container.delete(force=True)
             else:
+                state = existing["State"]
+                if state.get("Running"):
+                    cid = existing["Id"][:12]
+                    logger.info("[BayManager] Reusing existing Bay container: %s", cid)
+                    self._container = await self._docker.containers.get(existing["Id"])
+                    return f"http://127.0.0.1:{self._host_port}"
+
                 # Container exists but stopped — restart it
                 logger.info("[BayManager] Restarting stopped Bay container")
                 container = await self._docker.containers.get(existing["Id"])
@@ -92,13 +119,7 @@ class BayContainerManager:
         config = {
             "Image": self._image,
             "Labels": {BAY_LABEL: "true"},
-            "Env": [
-                "BAY_SERVER__HOST=0.0.0.0",
-                f"BAY_SERVER__PORT={BAY_PORT}",
-                "BAY_DATA_DIR=/app/data",
-                # allow_anonymous=false → auto-provisions API key
-                "BAY_SECURITY__ALLOW_ANONYMOUS=false",
-            ],
+            "Env": env,
             "HostConfig": {
                 "PortBindings": {
                     f"{BAY_PORT}/tcp": [{"HostPort": str(self._host_port)}],
@@ -229,6 +250,61 @@ class BayContainerManager:
                 self._container = None
 
         await self.close_client()
+
+    def _build_bay_env(self) -> list[str]:
+        env = [
+            "BAY_SERVER__HOST=0.0.0.0",
+            f"BAY_SERVER__PORT={BAY_PORT}",
+            "BAY_DATA_DIR=/app/data",
+            # allow_anonymous=false -> auto-provisions API key
+            "BAY_SECURITY__ALLOW_ANONYMOUS=false",
+        ]
+        env.extend(self._build_proxy_env())
+        return env
+
+    def _proxy_env_matches(self, container_info: dict, desired_env: list[str]) -> bool:
+        existing = self._env_list_to_dict(
+            container_info.get("Config", {}).get("Env", [])
+        )
+        desired = self._env_list_to_dict(desired_env)
+        return all(
+            existing.get(key) == desired.get(key) for key in MANAGED_PROXY_ENV_KEYS
+        )
+
+    @staticmethod
+    def _env_list_to_dict(env: list[str]) -> dict[str, str]:
+        return {
+            key: value
+            for item in env
+            if "=" in item
+            for key, value in [item.split("=", 1)]
+        }
+
+    def _build_proxy_env(self) -> list[str]:
+        """Convert AstrBot process proxy env into Bay settings env."""
+        env: list[str] = []
+        proxy_values = {
+            key: value for key in PROXY_ENV_KEYS if (value := os.environ.get(key))
+        }
+        if not proxy_values:
+            return env
+
+        env.extend(f"{key}={value}" for key, value in proxy_values.items())
+
+        http_proxy = proxy_values.get("HTTP_PROXY") or proxy_values.get("http_proxy")
+        https_proxy = proxy_values.get("HTTPS_PROXY") or proxy_values.get("https_proxy")
+        no_proxy = proxy_values.get("NO_PROXY") or proxy_values.get("no_proxy")
+
+        if http_proxy or https_proxy:
+            env.append("BAY_PROXY__ENABLED=true")
+        if http_proxy:
+            env.append(f"BAY_PROXY__HTTP_PROXY={http_proxy}")
+        if https_proxy:
+            env.append(f"BAY_PROXY__HTTPS_PROXY={https_proxy}")
+        if no_proxy:
+            env.append(f"BAY_PROXY__NO_PROXY={no_proxy}")
+
+        return env
 
     # ------------------------------------------------------------------
     # Private helpers

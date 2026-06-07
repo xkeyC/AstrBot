@@ -49,6 +49,7 @@ This fork intentionally differs from upstream AstrBot in a few areas:
 4. MCP server connection tests use the configured proxy settings where applicable.
 5. The dashboard persona manager supports cloning an existing persona.
 6. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
+7. Shipyard Neo auto-start mode propagates AstrBot's global proxy settings into the managed Bay container and recreates that container when the managed proxy environment changes, so new sandbox Python/Shell sessions inherit the updated proxy.
 
 These changes are maintained for this fork and may not match upstream behavior.
 
