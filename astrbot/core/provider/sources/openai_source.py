@@ -910,6 +910,7 @@ class ProviderOpenAIOfficial(Provider):
         usage = None
         tool_calls_by_id: dict[str, dict[str, Any]] = {}
         tool_call_id_aliases: dict[str, str] = {}
+        tool_call_argument_deltas: dict[str, list[str]] = {}
 
         async for event in stream:
             event_type = getattr(event, "type", "")
@@ -940,24 +941,45 @@ class ProviderOpenAIOfficial(Provider):
             elif event_type == "response.output_item.done":
                 item = getattr(event, "item", None)
                 if getattr(item, "type", None) == "function_call":
+                    arguments = getattr(item, "arguments", None)
                     self._merge_response_tool_call(
                         tool_calls_by_id,
                         tool_call_id_aliases,
                         item_id=getattr(item, "id", None),
                         call_id=getattr(item, "call_id", None),
                         name=getattr(item, "name", ""),
-                        arguments=getattr(item, "arguments", "{}") or "{}",
+                        arguments=arguments if arguments is not None else None,
                     )
+            elif event_type == "response.output_item.added":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    arguments = getattr(item, "arguments", None)
+                    self._merge_response_tool_call(
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                        item_id=getattr(item, "id", None),
+                        call_id=getattr(item, "call_id", None),
+                        name=getattr(item, "name", ""),
+                        arguments=arguments if arguments is not None else None,
+                    )
+            elif event_type == "response.function_call_arguments.delta":
+                item_id = getattr(event, "item_id", None)
+                delta = getattr(event, "delta", "")
+                if item_id and delta:
+                    tool_call_argument_deltas.setdefault(item_id, []).append(str(delta))
             elif event_type == "response.function_call_arguments.done":
                 item_id = getattr(event, "item_id", None)
                 if item_id:
+                    arguments = getattr(event, "arguments", None)
+                    if arguments is None:
+                        arguments = "".join(tool_call_argument_deltas.get(item_id, []))
                     self._merge_response_tool_call(
                         tool_calls_by_id,
                         tool_call_id_aliases,
                         item_id=item_id,
                         call_id=None,
                         name=getattr(event, "name", ""),
-                        arguments=getattr(event, "arguments", "{}") or "{}",
+                        arguments=arguments if arguments is not None else None,
                     )
             elif event_type == "response.completed":
                 response = getattr(event, "response", None)
@@ -1011,13 +1033,14 @@ class ProviderOpenAIOfficial(Provider):
         for item in getattr(response, "output", []) or []:
             if getattr(item, "type", None) != "function_call":
                 continue
+            arguments = getattr(item, "arguments", None)
             self._merge_response_tool_call(
                 tool_calls_by_id,
                 tool_call_id_aliases,
                 item_id=getattr(item, "id", None),
                 call_id=getattr(item, "call_id", None),
                 name=getattr(item, "name", ""),
-                arguments=getattr(item, "arguments", "{}") or "{}",
+                arguments=arguments if arguments is not None else None,
             )
 
     @staticmethod
@@ -1028,7 +1051,7 @@ class ProviderOpenAIOfficial(Provider):
         item_id: str | None,
         call_id: str | None,
         name: str,
-        arguments: str,
+        arguments: str | None,
     ) -> None:
         stable_id = call_id or (tool_call_id_aliases.get(item_id) if item_id else None)
         stable_id = stable_id or item_id
@@ -1046,7 +1069,7 @@ class ProviderOpenAIOfficial(Provider):
         tool_call = tool_calls_by_id.setdefault(stable_id, {})
         if name:
             tool_call["name"] = name
-        if arguments:
+        if arguments is not None:
             tool_call["arguments"] = arguments
 
     def _collect_response_output_text(self, response: Any) -> str:

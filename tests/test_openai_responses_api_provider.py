@@ -192,6 +192,56 @@ async def test_responses_api_merges_tool_item_id_and_call_id():
 
 
 @pytest.mark.asyncio
+async def test_responses_api_accumulates_tool_argument_deltas():
+    tool_item_added = SimpleNamespace(
+        type="function_call",
+        id="fc_item_1",
+        call_id="call_1",
+        name="lookup",
+    )
+    tool_item_done = SimpleNamespace(
+        type="function_call",
+        id="fc_item_1",
+        call_id="call_1",
+        name="lookup",
+    )
+    provider, _ = _make_provider(
+        [
+            SimpleNamespace(type="response.output_item.added", item=tool_item_added),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                item_id="fc_item_1",
+                delta='{"q":',
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                item_id="fc_item_1",
+                delta='"abc"}',
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.done",
+                item_id="fc_item_1",
+            ),
+            SimpleNamespace(type="response.output_item.done", item=tool_item_done),
+            _completed_event(output=[tool_item_done]),
+        ]
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            None,
+        )
+    ]
+
+    final = responses[-1]
+    assert final.tools_call_ids == ["call_1"]
+    assert final.tools_call_name == ["lookup"]
+    assert final.tools_call_args == [{"q": "abc"}]
+
+
+@pytest.mark.asyncio
 async def test_responses_api_uses_completed_output_text_when_no_delta():
     output_message = SimpleNamespace(
         type="message",
