@@ -25,6 +25,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 import urllib.parse
 import uuid
@@ -475,6 +476,50 @@ class Image(BaseMessageComponent):
     def fromIO(IO):
         return Image.fromBytes(IO.read())
 
+    @staticmethod
+    def _decode_file_uri(uri: str) -> str:
+        parsed = urllib.parse.urlparse(uri)
+        if parsed.scheme != "file":
+            return uri
+
+        netloc = urllib.parse.unquote(parsed.netloc or "")
+        path = urllib.parse.unquote(parsed.path or "").replace("\\", "/")
+        localhost_drive = re.fullmatch(
+            r"localhost([A-Za-z]:)", netloc, flags=re.IGNORECASE
+        )
+        if localhost_drive:
+            netloc = localhost_drive.group(1)
+        elif netloc.lower() == "localhost":
+            netloc = ""
+
+        if re.fullmatch(r"[A-Za-z]:", netloc):
+            return f"{netloc}{path}".replace("\\", "/")
+        if re.match(r"^/[A-Za-z]:/", path):
+            path = path[1:]
+        if netloc:
+            path = f"//{netloc}{path}"
+        return path.replace("\\", "/")
+
+    def _resolve_file_source(self) -> str:
+        fallback = ""
+        for source in (self.url, self.file, self.path):
+            if source:
+                if source.startswith(
+                    ("http://", "https://", "base64://", "data:image/")
+                ):
+                    return source
+                if source.startswith("file://"):
+                    if os.path.exists(self._decode_file_uri(source)):
+                        return source
+                    fallback = fallback or source
+                    continue
+                if os.path.exists(source):
+                    return source
+                fallback = fallback or source
+        if fallback:
+            return fallback
+        raise ValueError("No valid file or URL provided")
+
     async def convert_to_file_path(self) -> str:
         """将这个图片统一转换为本地文件路径。这个方法避免了手动判断图片数据类型，直接返回图片数据的本地路径（如果是网络 URL, 则会自动进行下载）。
 
@@ -482,11 +527,22 @@ class Image(BaseMessageComponent):
             str: 图片的本地路径，以绝对路径表示。
 
         """
-        url = self.url or self.file
-        if not url:
-            raise ValueError("No valid file or URL provided")
+        url = self._resolve_file_source()
         if url.startswith("file:///"):
-            return url[8:]
+            return self._decode_file_uri(url)
+        if url.startswith("file://"):
+            return self._decode_file_uri(url)
+        if url.startswith("data:image/"):
+            _, separator, bs64_data = url.partition(",")
+            if not separator:
+                raise Exception(f"not a valid image data url: {url[:64]}")
+            image_bytes = base64.b64decode(bs64_data)
+            image_file_path = os.path.join(
+                get_astrbot_temp_path(), f"imgseg_{uuid.uuid4()}.jpg"
+            )
+            with open(image_file_path, "wb") as f:
+                f.write(image_bytes)
+            return os.path.abspath(image_file_path)
         if url.startswith("http"):
             image_file_path = await download_image_by_url(url)
             return os.path.abspath(image_file_path)
@@ -511,11 +567,13 @@ class Image(BaseMessageComponent):
 
         """
         # convert to base64
-        url = self.url or self.file
-        if not url:
-            raise ValueError("No valid file or URL provided")
-        if url.startswith("file:///"):
-            bs64_data = file_to_base64(url[8:])
+        url = self._resolve_file_source()
+        if url.startswith("file://"):
+            bs64_data = file_to_base64(self._decode_file_uri(url))
+        elif url.startswith("data:image/"):
+            _, separator, bs64_data = url.partition(",")
+            if not separator:
+                raise Exception(f"not a valid image data url: {url[:64]}")
         elif url.startswith("http"):
             image_file_path = await download_image_by_url(url)
             bs64_data = file_to_base64(image_file_path)

@@ -272,13 +272,21 @@ class ProviderOpenAIOfficial(Provider):
 
         netloc = unquote(parsed.netloc or "")
         path = unquote(parsed.path or "")
+        localhost_drive = re.fullmatch(
+            r"localhost([A-Za-z]:)", netloc, flags=re.IGNORECASE
+        )
+        if localhost_drive:
+            netloc = localhost_drive.group(1)
+        elif netloc.lower() == "localhost":
+            netloc = ""
+
         if re.fullmatch(r"[A-Za-z]:", netloc):
-            return str(Path(f"{netloc}{path}"))
+            return f"{netloc}{path}".replace("\\", "/")
         if re.match(r"^/[A-Za-z]:/", path):
             path = path[1:]
-        if netloc and netloc != "localhost":
+        if netloc:
             path = f"//{netloc}{path}"
-        return str(Path(path))
+        return path.replace("\\", "/")
 
     async def _image_ref_to_data_url(
         self,
@@ -617,7 +625,9 @@ class ProviderOpenAIOfficial(Provider):
 
     async def _query(self, payloads: dict, tools: ToolSet | None) -> LLMResponse:
         if self._use_responses_api():
-            raise RuntimeError("OpenAI Responses API only supports streaming in AstrBot.")
+            raise RuntimeError(
+                "OpenAI Responses API only supports streaming in AstrBot."
+            )
 
         if tools:
             model = payloads.get("model", "").lower()
@@ -784,9 +794,21 @@ class ProviderOpenAIOfficial(Provider):
             "type": "function",
             "name": function.get("name", ""),
             "description": function.get("description", ""),
-            "parameters": function.get("parameters") or {"type": "object", "properties": {}},
+            "parameters": function.get("parameters")
+            or {"type": "object", "properties": {}},
             "strict": None,
         }
+
+    @staticmethod
+    def _order_responses_tools(tools: list[dict]) -> list[dict]:
+        if len(tools) <= 1:
+            return tools
+        kb_tools = [tool for tool in tools if tool.get("name") == "astr_kb_search"]
+        if not kb_tools:
+            return tools
+        return [
+            tool for tool in tools if tool.get("name") != "astr_kb_search"
+        ] + kb_tools
 
     def _convert_responses_content(self, content: Any) -> Any:
         if not isinstance(content, list):
@@ -797,7 +819,9 @@ class ProviderOpenAIOfficial(Provider):
             if not isinstance(part, dict):
                 continue
             if part.get("type") == "text":
-                converted.append({"type": "input_text", "text": str(part.get("text", ""))})
+                converted.append(
+                    {"type": "input_text", "text": str(part.get("text", ""))}
+                )
             elif part.get("type") == "image_url":
                 image_url = part.get("image_url", {})
                 if isinstance(image_url, dict):
@@ -867,10 +891,14 @@ class ProviderOpenAIOfficial(Provider):
         if tools:
             tool_list = tools.openai_schema()
             if tool_list:
-                payloads["tools"] = [
-                    self._convert_openai_tool_to_responses(tool) for tool in tool_list
-                ]
+                payloads["tools"] = self._order_responses_tools(
+                    [self._convert_openai_tool_to_responses(tool) for tool in tool_list]
+                )
                 payloads["tool_choice"] = payloads.get("tool_choice", "auto")
+                logger.debug(
+                    "OpenAI Responses API tools: %s",
+                    [tool.get("name", "") for tool in payloads["tools"]],
+                )
 
         self._sanitize_assistant_messages(payloads)
 
@@ -908,6 +936,7 @@ class ProviderOpenAIOfficial(Provider):
         reasoning_content = ""
         response_id = None
         usage = None
+        output_images: list[Comp.Image] = []
         tool_calls_by_id: dict[str, dict[str, Any]] = {}
         tool_call_id_aliases: dict[str, str] = {}
         tool_call_argument_deltas: dict[str, list[str]] = {}
@@ -940,7 +969,8 @@ class ProviderOpenAIOfficial(Provider):
                     )
             elif event_type == "response.output_item.done":
                 item = getattr(event, "item", None)
-                if getattr(item, "type", None) == "function_call":
+                item_type = self._response_field(item, "type")
+                if item_type == "function_call":
                     arguments = getattr(item, "arguments", None)
                     self._merge_response_tool_call(
                         tool_calls_by_id,
@@ -950,6 +980,12 @@ class ProviderOpenAIOfficial(Provider):
                         name=getattr(item, "name", ""),
                         arguments=arguments if arguments is not None else None,
                     )
+                elif item_type == "image_generation_call":
+                    image = self._image_output_to_component(
+                        self._response_field(item, "result")
+                    )
+                    if image:
+                        output_images.append(image)
             elif event_type == "response.output_item.added":
                 item = getattr(event, "item", None)
                 if getattr(item, "type", None) == "function_call":
@@ -989,6 +1025,9 @@ class ProviderOpenAIOfficial(Provider):
                         usage = self._extract_response_usage(response.usage)
                     if not final_text:
                         final_text = self._collect_response_output_text(response)
+                    completed_images = self._collect_response_output_images(response)
+                    if completed_images:
+                        output_images = completed_images
                     self._collect_response_tool_calls(
                         response,
                         tool_calls_by_id,
@@ -996,11 +1035,19 @@ class ProviderOpenAIOfficial(Provider):
                     )
             elif event_type in ("response.failed", "response.error"):
                 error = getattr(event, "error", None)
-                raise Exception(f"OpenAI Responses API streaming failed: {error or event}")
+                raise Exception(
+                    f"OpenAI Responses API streaming failed: {error or event}"
+                )
+
+        result_chain = None
+        if final_text or output_images:
+            result_chain = MessageChain(
+                chain=([Comp.Plain(final_text)] if final_text else []) + output_images
+            )
 
         final_response = LLMResponse(
             role="tool" if tool_calls_by_id else "assistant",
-            result_chain=MessageChain(chain=[Comp.Plain(final_text)]) if final_text else None,
+            result_chain=result_chain,
             reasoning_content=reasoning_content or None,
             id=response_id,
             usage=usage,
@@ -1009,7 +1056,9 @@ class ProviderOpenAIOfficial(Provider):
             final_response.tools_call_ids.append(call_id)
             final_response.tools_call_name.append(call.get("name", ""))
             try:
-                final_response.tools_call_args.append(json.loads(call.get("arguments") or "{}"))
+                final_response.tools_call_args.append(
+                    json.loads(call.get("arguments") or "{}")
+                )
             except json.JSONDecodeError:
                 logger.error(
                     "Failed to parse Responses API tool arguments: %s",
@@ -1017,7 +1066,12 @@ class ProviderOpenAIOfficial(Provider):
                 )
                 final_response.tools_call_args.append({})
 
-        if not final_text and not reasoning_content and not tool_calls_by_id:
+        if (
+            not final_text
+            and not output_images
+            and not reasoning_content
+            and not tool_calls_by_id
+        ):
             raise EmptyModelOutputError(
                 f"OpenAI Responses API stream has no usable output. response_id={response_id}"
             )
@@ -1083,6 +1137,61 @@ class ProviderOpenAIOfficial(Provider):
                     if text:
                         text_parts.append(text)
         return "".join(text_parts)
+
+    @staticmethod
+    def _response_field(value: Any, field: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(field)
+        return getattr(value, field, None)
+
+    @classmethod
+    def _image_output_to_component(cls, value: Any) -> Comp.Image | None:
+        if isinstance(value, dict):
+            nested_url = value.get("url")
+            if nested_url is not None:
+                value = nested_url
+
+        if not isinstance(value, str):
+            return None
+
+        image_data = value.strip()
+        if not image_data:
+            return None
+        if image_data.startswith("http://") or image_data.startswith("https://"):
+            return Comp.Image.fromURL(image_data)
+        if image_data.startswith("base64://"):
+            image_data = image_data.removeprefix("base64://")
+        elif image_data.startswith("data:image/"):
+            _, separator, image_data = image_data.partition(",")
+            if not separator:
+                return None
+        return Comp.Image.fromBase64(image_data)
+
+    def _collect_response_output_images(self, response: Any) -> list[Comp.Image]:
+        images: list[Comp.Image] = []
+        for item in self._response_field(response, "output") or []:
+            item_type = self._response_field(item, "type")
+            if item_type == "image_generation_call":
+                image = self._image_output_to_component(
+                    self._response_field(item, "result")
+                )
+                if image:
+                    images.append(image)
+                continue
+
+            if item_type != "message":
+                continue
+            for content_part in self._response_field(item, "content") or []:
+                if self._response_field(content_part, "type") != "output_image":
+                    continue
+                for field in ("image_url", "url", "b64_json", "base64", "data"):
+                    image = self._image_output_to_component(
+                        self._response_field(content_part, field)
+                    )
+                    if image:
+                        images.append(image)
+                        break
+        return images
 
     def _extract_reasoning_content(
         self,

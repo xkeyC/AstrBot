@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import astrbot.core.message.components as Comp
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
@@ -94,7 +95,11 @@ async def test_responses_api_streaming_text_and_usage():
         )
     ]
 
-    assert [response.completion_text for response in responses] == ["hel", "lo", "hello"]
+    assert [response.completion_text for response in responses] == [
+        "hel",
+        "lo",
+        "hello",
+    ]
     assert responses[-1].usage.input_other == 7
     assert responses[-1].usage.input_cached == 3
     assert responses[-1].usage.output == 2
@@ -152,6 +157,38 @@ async def test_responses_api_streaming_tool_call():
             },
             "strict": None,
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_api_orders_kb_tool_after_other_tools():
+    kb_tool = FunctionTool(
+        name="astr_kb_search",
+        description="Search knowledge base",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    shell_tool = FunctionTool(
+        name="astrbot_execute_shell",
+        description="Execute shell command",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    provider, fake_responses = _make_provider([_completed_event(output=[])])
+
+    with pytest.raises(EmptyModelOutputError):
+        responses = [
+            response
+            async for response in provider._query_responses_stream(
+                {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+                ToolSet([kb_tool, shell_tool]),
+            )
+        ]
+        assert responses
+
+    assert [tool["name"] for tool in fake_responses.payload["tools"]] == [
+        "astrbot_execute_shell",
+        "astr_kb_search",
     ]
 
 
@@ -259,6 +296,93 @@ async def test_responses_api_uses_completed_output_text_when_no_delta():
 
     assert len(responses) == 1
     assert responses[0].completion_text == "completed text"
+
+
+@pytest.mark.asyncio
+async def test_responses_api_returns_image_generation_result():
+    image_item = SimpleNamespace(
+        type="image_generation_call",
+        result="iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+    )
+    provider, _ = _make_provider([_completed_event(output=[image_item])])
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "draw an image"}],
+            },
+            None,
+        )
+    ]
+
+    assert len(responses) == 1
+    assert responses[0].result_chain is not None
+    assert len(responses[0].result_chain.chain) == 1
+    image = responses[0].result_chain.chain[0]
+    assert isinstance(image, Comp.Image)
+    assert image.file == "base64://iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+
+
+@pytest.mark.asyncio
+async def test_responses_api_returns_streamed_image_generation_item():
+    image_item = SimpleNamespace(
+        type="image_generation_call",
+        result="iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+    )
+    provider, _ = _make_provider(
+        [
+            SimpleNamespace(type="response.output_item.done", item=image_item),
+            _completed_event(output=[]),
+        ]
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "draw an image"}],
+            },
+            None,
+        )
+    ]
+
+    assert len(responses) == 1
+    assert responses[0].result_chain is not None
+    image = responses[0].result_chain.chain[0]
+    assert isinstance(image, Comp.Image)
+    assert image.file == "base64://iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+
+
+@pytest.mark.asyncio
+async def test_responses_api_ignores_builtin_search_call_when_text_is_returned():
+    search_item = SimpleNamespace(type="web_search_call", status="completed")
+    output_message = SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text="search summary")],
+    )
+    provider, _ = _make_provider(
+        [
+            SimpleNamespace(type="response.output_item.done", item=search_item),
+            _completed_event(output=[search_item, output_message]),
+        ]
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {
+                "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "search the web"}],
+            },
+            None,
+        )
+    ]
+
+    assert len(responses) == 1
+    assert responses[0].completion_text == "search summary"
 
 
 def test_responses_api_converts_tool_history_to_response_items():
