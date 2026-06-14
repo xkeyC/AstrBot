@@ -123,6 +123,58 @@ class ResultDecorateStage(Stage):
                 result.append(seg)
         return result if result else [text]
 
+    @staticmethod
+    def _first_non_empty(*values) -> str:
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    async def _get_forward_node_name(self, event: AstrMessageEvent) -> str:
+        fallback_name = "AstrBot"
+        bot = getattr(event, "bot", None)
+        self_id = event.get_self_id()
+        if bot is None or not self_id:
+            return fallback_name
+
+        user_id = int(self_id) if self_id.isdigit() else self_id
+
+        group_id = event.get_group_id()
+        if group_id:
+            try:
+                group_id_arg = int(group_id) if group_id.isdigit() else group_id
+                member_info = await bot.call_action(
+                    action="get_group_member_info",
+                    group_id=group_id_arg,
+                    user_id=user_id,
+                    no_cache=False,
+                )
+                name = self._first_non_empty(
+                    member_info.get("card") if member_info else None,
+                    member_info.get("nickname") if member_info else None,
+                    member_info.get("nick") if member_info else None,
+                )
+                if name:
+                    return name
+            except BaseException as e:
+                logger.debug(f"Failed to get bot group nickname: {e}")
+
+        try:
+            login_info = await bot.call_action(action="get_login_info")
+            name = self._first_non_empty(
+                login_info.get("nickname") if login_info else None,
+                login_info.get("nick") if login_info else None,
+            )
+            if name:
+                return name
+        except BaseException as e:
+            logger.debug(f"Failed to get bot login nickname: {e}")
+
+        return fallback_name
+
     async def process(
         self,
         event: AstrMessageEvent,
@@ -394,7 +446,7 @@ class ResultDecorateStage(Stage):
                 if word_cnt > self.forward_threshold:
                     node = Node(
                         uin=event.get_self_id(),
-                        name="AstrBot",
+                        name=await self._get_forward_node_name(event),
                         content=[*result.chain],
                     )
                     result.chain = [node]
