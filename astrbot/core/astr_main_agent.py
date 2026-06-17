@@ -116,6 +116,7 @@ from astrbot.core.utils.quoted_message_parser import (
 from astrbot.core.utils.string_utils import normalize_and_dedupe_strings
 
 LLM_ERROR_MESSAGE_EXTRA_KEY = "_llm_error_message"
+PERSONA_ALLOWED_TOOLS_EXTRA_KEY = "_persona_allowed_tools"
 WEB_SEARCH_CITATION_TOOL_NAMES = frozenset(
     {
         "web_search_baidu",
@@ -202,6 +203,45 @@ class MainAgentBuildResult:
 
 def _set_llm_error_message(event: AstrMessageEvent, message: str) -> None:
     event.set_extra(LLM_ERROR_MESSAGE_EXTRA_KEY, message)
+
+
+def _set_persona_allowed_tools(
+    event: AstrMessageEvent,
+    persona: dict | None,
+) -> None:
+    if persona and persona.get("tools") is not None:
+        event.set_extra(
+            PERSONA_ALLOWED_TOOLS_EXTRA_KEY,
+            {
+                str(tool_name).strip()
+                for tool_name in persona.get("tools", [])
+                if str(tool_name).strip()
+            },
+        )
+    else:
+        event.set_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY, None)
+
+
+def _filter_mcp_tools_by_persona_scope(
+    event: AstrMessageEvent,
+    req: ProviderRequest,
+) -> None:
+    if not req.func_tool:
+        return
+
+    allowed_tools = event.get_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY)
+    if allowed_tools is None:
+        return
+    if not isinstance(allowed_tools, set):
+        allowed_tools = {
+            str(tool_name).strip()
+            for tool_name in allowed_tools
+            if str(tool_name).strip()
+        }
+
+    for tool in list(req.func_tool.tools):
+        if isinstance(tool, MCPTool) and tool.name not in allowed_tools:
+            req.func_tool.remove_tool(tool.name)
 
 
 def _select_provider(
@@ -469,6 +509,7 @@ async def _ensure_persona_and_skills(
     set_persona_custom_error_message_on_event(
         event, extract_persona_custom_error_message_from_persona(persona)
     )
+    _set_persona_allowed_tools(event, persona)
 
     if req.system_prompt is None:
         req.system_prompt = ""
@@ -1507,6 +1548,8 @@ async def build_main_agent(
                 SendMessageToUserTool
             )
         )
+
+    _filter_mcp_tools_by_persona_scope(event, req)
 
     fallback_providers = _get_fallback_chat_providers(
         provider, plugin_context, config.provider_settings

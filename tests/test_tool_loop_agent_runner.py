@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from astrbot.core.agent.agent import Agent
 from astrbot.core.agent.handoff import HandoffTool
 from astrbot.core.agent.hooks import BaseAgentRunHooks
+from astrbot.core.agent.mcp_client import MCPTool
 from astrbot.core.agent.message import ImageURLPart, Message, TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
@@ -344,9 +345,18 @@ class MockEvent:
     def __init__(self, umo: str, sender_id: str):
         self.unified_msg_origin = umo
         self._sender_id = sender_id
+        self._extras = {}
 
     def get_sender_id(self):
         return self._sender_id
+
+    def set_extra(self, key, value) -> None:
+        self._extras[key] = value
+
+    def get_extra(self, key=None, default=None):
+        if key is None:
+            return self._extras
+        return self._extras.get(key, default)
 
 
 class MockAgentContext:
@@ -1621,6 +1631,52 @@ async def test_follow_up_merged_into_tool_result_before_stop(
     # Tickets should be marked as consumed
     assert ticket1.consumed is True
     assert ticket2.consumed is True
+
+
+@pytest.mark.asyncio
+async def test_persona_denied_mcp_tool_call_is_rejected(runner, mock_hooks):
+    event = MockEvent("test:FriendMessage:mcp_denied", "u1")
+    event.set_extra("_persona_allowed_tools", {"allowed_mcp"})
+
+    registered_mcp_tool = MCPTool.__new__(MCPTool)
+    registered_mcp_tool.name = "blocked_mcp"
+    tool_manager = SimpleNamespace(
+        get_func=lambda name: registered_mcp_tool if name == "blocked_mcp" else None
+    )
+    app_context = SimpleNamespace(get_llm_tool_manager=lambda: tool_manager)
+    run_context = ContextWrapper(
+        context=SimpleNamespace(event=event, context=app_context)
+    )
+    local_tool = FunctionTool(
+        name="local_tool",
+        description="local",
+        parameters={"type": "object", "properties": {}},
+    )
+    request = ProviderRequest(
+        prompt="call blocked mcp",
+        func_tool=ToolSet(tools=[local_tool]),
+        contexts=[],
+    )
+    provider = SingleToolThenFinalProvider("blocked_mcp")
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=run_context,
+        tool_executor=MockToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    async for _ in runner.step():
+        pass
+
+    assert request.tool_calls_result is not None
+    assert isinstance(request.tool_calls_result, list)
+    tool_result = str(request.tool_calls_result[0].tool_calls_result[0].content)
+    assert "Permission denied" in tool_result
+    assert "blocked_mcp" in tool_result
+    assert mock_hooks.tool_start_called is False
 
 
 @pytest.mark.asyncio

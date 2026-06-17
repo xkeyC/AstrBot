@@ -26,6 +26,7 @@ from tenacity import (
 )
 
 from astrbot import logger
+from astrbot.core.agent.mcp_client import MCPTool
 from astrbot.core.agent.message import ImageURLPart, TextPart, ThinkPart
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.agent.tool_image_cache import tool_image_cache
@@ -63,6 +64,8 @@ from ..response import AgentResponseData, AgentStats
 from ..run_context import ContextWrapper, TContext
 from ..tool_executor import BaseFunctionToolExecutor
 from .base import AgentResponse, AgentState, BaseAgentRunner
+
+PERSONA_ALLOWED_TOOLS_EXTRA_KEY = "_persona_allowed_tools"
 
 if sys.version_info >= (3, 12):
     from typing import override
@@ -991,6 +994,40 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 ),
             )
 
+        def _get_persona_allowed_tools() -> set[str] | None:
+            event = getattr(self.run_context.context, "event", None)
+            if event is None or not hasattr(event, "get_extra"):
+                return None
+            allowed_tools = event.get_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY)
+            if allowed_tools is None:
+                return None
+            return {
+                str(tool_name).strip()
+                for tool_name in allowed_tools
+                if str(tool_name).strip()
+            }
+
+        def _is_persona_denied_mcp_tool(
+            tool_name: str,
+            func_tool: FunctionTool | None,
+        ) -> bool:
+            allowed_tools = _get_persona_allowed_tools()
+            if allowed_tools is None or tool_name in allowed_tools:
+                return False
+            if isinstance(func_tool, MCPTool):
+                return True
+
+            context = getattr(self.run_context.context, "context", None)
+            get_tool_manager = getattr(context, "get_llm_tool_manager", None)
+            if not callable(get_tool_manager):
+                return False
+            try:
+                tool_manager = get_tool_manager()
+                registered_tool = tool_manager.get_func(tool_name)
+            except Exception:
+                return False
+            return isinstance(registered_tool, MCPTool)
+
         # 执行函数调用
         for func_tool_name, func_tool_args, func_tool_id in zip(
             llm_response.tools_call_name,
@@ -1034,6 +1071,16 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 if func_tool_args is None:
                     func_tool_args = {}
                 logger.info(f"使用工具：{func_tool_name}，参数：{func_tool_args}")
+
+                if _is_persona_denied_mcp_tool(func_tool_name, func_tool):
+                    logger.warning(
+                        "拒绝未被当前人格允许的 MCP 工具调用: %s", func_tool_name
+                    )
+                    _append_tool_call_result(
+                        func_tool_id,
+                        f"error: Permission denied. MCP tool {func_tool_name} is not allowed by the current persona.",
+                    )
+                    continue
 
                 if not func_tool:
                     logger.warning(f"未找到指定的工具: {func_tool_name}，将跳过。")
