@@ -808,7 +808,7 @@ class TestEnsurePersonaAndSkills:
 
         assert req.func_tool is not None
 
-    def test_filter_mcp_tools_by_persona_scope_removes_unallowed_mcp(self, mock_event):
+    def test_filter_tools_by_persona_scope_removes_unallowed_tools(self, mock_event):
         module = ama
         allowed_mcp = MagicMock(spec=MCPTool)
         allowed_mcp.name = "allowed_mcp"
@@ -826,33 +826,36 @@ class TestEnsurePersonaAndSkills:
         tool_set.add_tool(local_tool)
         req = ProviderRequest(func_tool=tool_set)
         mock_event.get_extra.side_effect = lambda key=None, default=None: {
-            module.PERSONA_ALLOWED_TOOLS_EXTRA_KEY: {"allowed_mcp"},
+            module.PERSONA_ALLOWED_TOOLS_EXTRA_KEY: {"allowed_mcp", "local_tool"},
         }.get(key, default)
 
-        module._filter_mcp_tools_by_persona_scope(mock_event, req)
+        module._filter_tools_by_persona_scope(mock_event, req)
 
         assert req.func_tool is not None
         assert req.func_tool.names() == ["allowed_mcp", "local_tool"]
 
-    def test_filter_mcp_tools_by_persona_scope_empty_scope_removes_all_mcp(
+    def test_filter_tools_by_persona_scope_empty_scope_removes_all_tools(
         self, mock_event
     ):
         module = ama
-        mcp_tool = MagicMock(spec=MCPTool)
-        mcp_tool.name = "mcp_tool"
+        tool = FunctionTool(
+            name="local_tool",
+            description="local",
+            parameters={"type": "object", "properties": {}},
+        )
         tool_set = ToolSet()
-        tool_set.add_tool(mcp_tool)
+        tool_set.add_tool(tool)
         req = ProviderRequest(func_tool=tool_set)
         mock_event.get_extra.side_effect = lambda key=None, default=None: {
             module.PERSONA_ALLOWED_TOOLS_EXTRA_KEY: set(),
         }.get(key, default)
 
-        module._filter_mcp_tools_by_persona_scope(mock_event, req)
+        module._filter_tools_by_persona_scope(mock_event, req)
 
         assert req.func_tool is not None
         assert req.func_tool.names() == []
 
-    def test_filter_mcp_tools_by_persona_scope_none_allows_mcp(self, mock_event):
+    def test_filter_tools_by_persona_scope_none_allows_tools(self, mock_event):
         module = ama
         mcp_tool = MagicMock(spec=MCPTool)
         mcp_tool.name = "mcp_tool"
@@ -863,7 +866,7 @@ class TestEnsurePersonaAndSkills:
             module.PERSONA_ALLOWED_TOOLS_EXTRA_KEY: None,
         }.get(key, default)
 
-        module._filter_mcp_tools_by_persona_scope(mock_event, req)
+        module._filter_tools_by_persona_scope(mock_event, req)
 
         assert req.func_tool is not None
         assert req.func_tool.names() == ["mcp_tool"]

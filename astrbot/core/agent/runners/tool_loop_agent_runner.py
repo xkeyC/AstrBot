@@ -26,7 +26,6 @@ from tenacity import (
 )
 
 from astrbot import logger
-from astrbot.core.agent.mcp_client import MCPTool
 from astrbot.core.agent.message import ImageURLPart, TextPart, ThinkPart
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.agent.tool_image_cache import tool_image_cache
@@ -1007,14 +1006,14 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 if str(tool_name).strip()
             }
 
-        def _is_persona_denied_mcp_tool(
+        def _is_persona_denied_tool_call(
             tool_name: str,
             func_tool: FunctionTool | None,
         ) -> bool:
             allowed_tools = _get_persona_allowed_tools()
             if allowed_tools is None or tool_name in allowed_tools:
                 return False
-            if isinstance(func_tool, MCPTool):
+            if func_tool is not None:
                 return True
 
             context = getattr(self.run_context.context, "context", None)
@@ -1026,7 +1025,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 registered_tool = tool_manager.get_func(tool_name)
             except Exception:
                 return False
-            return isinstance(registered_tool, MCPTool)
+            return registered_tool is not None
 
         # 执行函数调用
         for func_tool_name, func_tool_args, func_tool_id in zip(
@@ -1052,6 +1051,16 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
             )
             try:
+                if _is_persona_denied_tool_call(func_tool_name, None):
+                    logger.warning(
+                        "拒绝未被当前人格允许的工具调用: %s", func_tool_name
+                    )
+                    _append_tool_call_result(
+                        func_tool_id,
+                        f"error: Permission denied. Tool {func_tool_name} is not allowed by the current persona.",
+                    )
+                    continue
+
                 if not req.func_tool:
                     return
 
@@ -1072,13 +1081,13 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     func_tool_args = {}
                 logger.info(f"使用工具：{func_tool_name}，参数：{func_tool_args}")
 
-                if _is_persona_denied_mcp_tool(func_tool_name, func_tool):
+                if _is_persona_denied_tool_call(func_tool_name, func_tool):
                     logger.warning(
-                        "拒绝未被当前人格允许的 MCP 工具调用: %s", func_tool_name
+                        "拒绝未被当前人格允许的工具调用: %s", func_tool_name
                     )
                     _append_tool_call_result(
                         func_tool_id,
-                        f"error: Permission denied. MCP tool {func_tool_name} is not allowed by the current persona.",
+                        f"error: Permission denied. Tool {func_tool_name} is not allowed by the current persona.",
                     )
                     continue
 

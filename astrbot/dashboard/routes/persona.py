@@ -125,7 +125,9 @@ class PersonaRoute(Route):
             persona_id = data.get("persona_id", "").strip()
             system_prompt = data.get("system_prompt", "").strip()
             begin_dialogs = data.get("begin_dialogs", [])
+            has_tools = "tools" in data
             tools = data.get("tools")
+            has_skills = "skills" in data
             skills = data.get("skills")
             custom_error_message = data.get("custom_error_message")
             folder_id = data.get("folder_id")  # None 表示根目录
@@ -154,8 +156,8 @@ class PersonaRoute(Route):
                 persona_id=persona_id,
                 system_prompt=system_prompt,
                 begin_dialogs=begin_dialogs if begin_dialogs else None,
-                tools=tools if tools else None,
-                skills=skills if skills else None,
+                tools=tools if has_tools else None,
+                skills=skills if has_skills else None,
                 custom_error_message=custom_error_message,
                 folder_id=folder_id,
                 sort_order=sort_order,

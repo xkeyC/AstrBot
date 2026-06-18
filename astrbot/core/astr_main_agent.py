@@ -222,7 +222,7 @@ def _set_persona_allowed_tools(
         event.set_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY, None)
 
 
-def _filter_mcp_tools_by_persona_scope(
+def _filter_tools_by_persona_scope(
     event: AstrMessageEvent,
     req: ProviderRequest,
 ) -> None:
@@ -240,7 +240,7 @@ def _filter_mcp_tools_by_persona_scope(
         }
 
     for tool in list(req.func_tool.tools):
-        if isinstance(tool, MCPTool) and tool.name not in allowed_tools:
+        if tool.name not in allowed_tools:
             req.func_tool.remove_tool(tool.name)
 
 
@@ -1549,7 +1549,7 @@ async def build_main_agent(
             )
         )
 
-    _filter_mcp_tools_by_persona_scope(event, req)
+    _filter_tools_by_persona_scope(event, req)
 
     fallback_providers = _get_fallback_chat_providers(
         provider, plugin_context, config.provider_settings

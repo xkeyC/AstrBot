@@ -91,7 +91,7 @@
                                         <v-virtual-scroll :items="filteredTools" height="300" item-height="72">
                                             <template v-slot:default="{ item }">
                                                 <v-tooltip
-                                                    :disabled="!isBuiltinTool(item)"
+                                                    disabled
                                                     location="top"
                                                 >
                                                     <template v-slot:activator="{ props: tooltipProps }">
@@ -99,18 +99,12 @@
                                                             <v-list-item
                                                                 :key="item.name"
                                                                 density="comfortable"
-                                                                :disabled="isBuiltinTool(item)"
                                                                 @click="toggleTool(item.name)"
                                                             >
                                                                 <template v-slot:prepend>
                                                                     <v-checkbox-btn
-                                                                        v-if="!isBuiltinTool(item)"
                                                                         :model-value="isToolSelected(item.name)"
                                                                         @click.stop="toggleTool(item.name)"
-                                                                    />
-                                                                    <div
-                                                                        v-else
-                                                                        class="builtin-tool-checkbox-placeholder"
                                                                     />
                                                                 </template>
 
@@ -179,7 +173,7 @@
                                             <v-tooltip
                                                 v-for="toolName in personaForm.tools"
                                                 :key="toolName"
-                                                :disabled="!isBuiltinToolName(toolName)"
+                                                disabled
                                                 location="top"
                                             >
                                                 <template v-slot:activator="{ props: tooltipProps }">
@@ -188,7 +182,7 @@
                                                         size="small"
                                                         color="primary"
                                                         variant="tonal"
-                                                        :closable="!isBuiltinToolName(toolName)"
+                                                        closable
                                                         @click:close="removeTool(toolName)"
                                                     >
                                                         {{ toolName }}
@@ -409,8 +403,8 @@ export default {
                 system_prompt: '',
                 custom_error_message: '',
                 begin_dialogs: [],
-                tools: [],
-                skills: [],
+                tools: null,
+                skills: null,
                 folder_id: null
             },
             personaIdRules: [
@@ -530,8 +524,8 @@ export default {
                 system_prompt: '',
                 custom_error_message: '',
                 begin_dialogs: [],
-                tools: [],
-                skills: [],
+                tools: null,
+                skills: null,
                 folder_id: this.currentFolderId
             };
             this.toolSelectValue = '0';
@@ -748,9 +742,6 @@ export default {
         },
 
         toggleTool(toolName) {
-            if (this.isBuiltinToolName(toolName)) {
-                return;
-            }
             // 如果当前是全选状态，需要先转换为具体的工具列表
             if (this.personaForm.tools === null) {
                 // 如果是全选状态，点击某个工具表示要取消选择该工具
@@ -774,9 +765,6 @@ export default {
         },
 
         removeTool(toolName) {
-            if (this.isBuiltinToolName(toolName)) {
-                return;
-            }
             // 如果当前是全选状态，需要先转换为具体的工具列表
             if (this.personaForm.tools === null) {
                 // 创建一个包含所有工具的数组，然后移除指定工具
@@ -824,14 +812,6 @@ export default {
         truncateText(text, maxLength) {
             if (!text) return '';
             return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
-        },
-
-        isBuiltinTool(tool) {
-            return tool?.origin === 'builtin' || tool?.readonly === true;
-        },
-
-        isBuiltinToolName(toolName) {
-            return this.availableTools.some(tool => tool.name === toolName && this.isBuiltinTool(tool));
         },
 
         getDialogRules(index) {

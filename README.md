@@ -50,6 +50,7 @@ This fork intentionally differs from upstream AstrBot in a few areas:
 5. The dashboard persona manager supports cloning an existing persona.
 6. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
 7. Shipyard Neo auto-start mode propagates AstrBot's global proxy settings into the managed Bay container and recreates that container when the managed proxy environment changes, so new sandbox Python/Shell sessions inherit the updated proxy.
+8. Persona tool allowlists cover all exposed tools, including builtin tools, MCP tools, scheduled task tools, web search tools, local/sandbox computer tools, and subagent handoff tools. Tool calls that are not allowed by the active persona are rejected even if the LLM constructs them manually.
 
 These changes are maintained for this fork and may not match upstream behavior.
 

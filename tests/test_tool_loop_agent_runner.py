@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from astrbot.core.agent.agent import Agent
 from astrbot.core.agent.handoff import HandoffTool
 from astrbot.core.agent.hooks import BaseAgentRunHooks
-from astrbot.core.agent.mcp_client import MCPTool
 from astrbot.core.agent.message import ImageURLPart, Message, TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
@@ -1634,14 +1633,17 @@ async def test_follow_up_merged_into_tool_result_before_stop(
 
 
 @pytest.mark.asyncio
-async def test_persona_denied_mcp_tool_call_is_rejected(runner, mock_hooks):
-    event = MockEvent("test:FriendMessage:mcp_denied", "u1")
-    event.set_extra("_persona_allowed_tools", {"allowed_mcp"})
+async def test_persona_denied_tool_call_is_rejected(runner, mock_hooks):
+    event = MockEvent("test:FriendMessage:tool_denied", "u1")
+    event.set_extra("_persona_allowed_tools", {"allowed_tool"})
 
-    registered_mcp_tool = MCPTool.__new__(MCPTool)
-    registered_mcp_tool.name = "blocked_mcp"
+    registered_tool = FunctionTool(
+        name="blocked_tool",
+        description="blocked",
+        parameters={"type": "object", "properties": {}},
+    )
     tool_manager = SimpleNamespace(
-        get_func=lambda name: registered_mcp_tool if name == "blocked_mcp" else None
+        get_func=lambda name: registered_tool if name == "blocked_tool" else None
     )
     app_context = SimpleNamespace(get_llm_tool_manager=lambda: tool_manager)
     run_context = ContextWrapper(
@@ -1653,11 +1655,11 @@ async def test_persona_denied_mcp_tool_call_is_rejected(runner, mock_hooks):
         parameters={"type": "object", "properties": {}},
     )
     request = ProviderRequest(
-        prompt="call blocked mcp",
+        prompt="call blocked tool",
         func_tool=ToolSet(tools=[local_tool]),
         contexts=[],
     )
-    provider = SingleToolThenFinalProvider("blocked_mcp")
+    provider = SingleToolThenFinalProvider("blocked_tool")
 
     await runner.reset(
         provider=provider,
@@ -1675,7 +1677,7 @@ async def test_persona_denied_mcp_tool_call_is_rejected(runner, mock_hooks):
     assert isinstance(request.tool_calls_result, list)
     tool_result = str(request.tool_calls_result[0].tool_calls_result[0].content)
     assert "Permission denied" in tool_result
-    assert "blocked_mcp" in tool_result
+    assert "blocked_tool" in tool_result
     assert mock_hooks.tool_start_called is False
 
 
