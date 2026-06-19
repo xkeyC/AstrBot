@@ -134,6 +134,8 @@ class RespondStage(Stage):
 
         if (result := event.get_result()) is None:
             return False
+        if result.disable_segment_reply:
+            return False
         if self.only_llm_result and not result.is_model_result():
             return False
 

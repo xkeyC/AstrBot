@@ -255,11 +255,16 @@ class ResultDecorateStage(Stage):
                         break
 
             # 分段回复
-            if self.enable_segmented_reply and event.get_platform_name() not in [
-                "qq_official",
-                "weixin_official_account",
-                "dingtalk",
-            ]:
+            if (
+                self.enable_segmented_reply
+                and event.get_platform_name()
+                not in [
+                    "qq_official",
+                    "weixin_official_account",
+                    "dingtalk",
+                ]
+                and not result.disable_segment_reply
+            ):
                 if (
                     self.only_llm_result and result.is_model_result()
                 ) or not self.only_llm_result:

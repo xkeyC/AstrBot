@@ -33,6 +33,11 @@ class MessageChain:
     type: str | None = None
     """消息链承载的消息的类型。可选，用于让消息平台区分不同业务场景的消息链。"""
 
+    disable_segment_reply: bool = False
+    """When True, bypass segmented-reply splitting for this chain. Plugins can
+    set this to keep multi-component chains (e.g. text + image + text) as a
+    single message instead of being split into one message per component."""
+
     def derive(self, chain: list[BaseMessageComponent] | None = None) -> "MessageChain":
         """基于当前消息链创建一个新的 MessageChain，继承元数据（use_t2i_、use_markdown_ 等）。
 
@@ -44,6 +49,7 @@ class MessageChain:
         new.use_t2i_ = self.use_t2i_
         new.use_markdown_ = self.use_markdown_
         new.type = self.type
+        new.disable_segment_reply = self.disable_segment_reply
         return new
 
     def message(self, message: str):
