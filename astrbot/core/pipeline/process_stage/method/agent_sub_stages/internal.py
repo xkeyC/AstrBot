@@ -353,18 +353,16 @@ class InternalAgentSubStage(Stage):
                         if agent_runner.done():
                             if final_llm_resp := agent_runner.get_final_llm_resp():
                                 if final_llm_resp.completion_text:
-                                    chain = (
-                                        MessageChain()
-                                        .message(final_llm_resp.completion_text)
-                                        .chain
+                                    chain = MessageChain().message(
+                                        final_llm_resp.completion_text
                                     )
                                 elif final_llm_resp.result_chain:
-                                    chain = final_llm_resp.result_chain.chain
+                                    chain = final_llm_resp.result_chain
                                 else:
-                                    chain = MessageChain().chain
+                                    chain = MessageChain()
                                 event.set_result(
-                                    MessageEventResult(
-                                        chain=chain,
+                                    MessageEventResult.from_chain(
+                                        chain,
                                         result_content_type=ResultContentType.STREAMING_FINISH,
                                     ),
                                 )

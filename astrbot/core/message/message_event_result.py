@@ -38,6 +38,21 @@ class MessageChain:
     set this to keep multi-component chains (e.g. text + image + text) as a
     single message instead of being split into one message per component."""
 
+    def inherit_metadata(self, source: "MessageChain") -> "MessageChain":
+        """Copy message-chain metadata from another chain.
+
+        Args:
+            source: Chain whose metadata should be preserved.
+
+        Returns:
+            The current chain for fluent use.
+        """
+        self.use_t2i_ = source.use_t2i_
+        self.use_markdown_ = source.use_markdown_
+        self.type = source.type
+        self.disable_segment_reply = source.disable_segment_reply
+        return self
+
     def derive(self, chain: list[BaseMessageComponent] | None = None) -> "MessageChain":
         """基于当前消息链创建一个新的 MessageChain，继承元数据（use_t2i_、use_markdown_ 等）。
 
@@ -45,12 +60,9 @@ class MessageChain:
             chain: 新消息链的组件列表。如果为 None，则使用空列表。
 
         """
-        new = MessageChain(chain=chain if chain is not None else [])
-        new.use_t2i_ = self.use_t2i_
-        new.use_markdown_ = self.use_markdown_
-        new.type = self.type
-        new.disable_segment_reply = self.disable_segment_reply
-        return new
+        return MessageChain(chain=chain if chain is not None else []).inherit_metadata(
+            self,
+        )
 
     def message(self, message: str):
         """添加一条文本消息到消息链 `chain` 中。
@@ -248,6 +260,55 @@ class MessageEventResult(MessageChain):
 
     async_stream: AsyncGenerator | None = None
     """异步流"""
+
+    def __post_init__(self) -> None:
+        """Normalize MessageChain constructor input while preserving metadata."""
+        if isinstance(self.chain, MessageChain):
+            source = self.chain
+            self.chain = source.chain
+            self.inherit_metadata(source)
+            if isinstance(source, MessageEventResult):
+                self.result_type = source.result_type
+                self.result_content_type = source.result_content_type
+                self.async_stream = source.async_stream
+
+    @classmethod
+    def from_chain(
+        cls,
+        chain: MessageChain | list[BaseMessageComponent],
+        *,
+        result_type: EventResultType | None = None,
+        result_content_type: ResultContentType | None = None,
+        async_stream: AsyncGenerator | None = None,
+    ) -> "MessageEventResult":
+        """Create a result from a chain while preserving chain metadata.
+
+        Args:
+            chain: MessageChain or raw component list to wrap.
+            result_type: Optional event result type override.
+            result_content_type: Optional content type override.
+            async_stream: Optional async stream override.
+
+        Returns:
+            A MessageEventResult carrying the same components and metadata.
+        """
+        if isinstance(chain, MessageChain):
+            result = cls(chain=chain.chain)
+            result.inherit_metadata(chain)
+            if isinstance(chain, MessageEventResult):
+                result.result_type = chain.result_type
+                result.result_content_type = chain.result_content_type
+                result.async_stream = chain.async_stream
+        else:
+            result = cls(chain=chain)
+
+        if result_type is not None:
+            result.result_type = result_type
+        if result_content_type is not None:
+            result.result_content_type = result_content_type
+        if async_stream is not None:
+            result.async_stream = async_stream
+        return result
 
     def stop_event(self) -> "MessageEventResult":
         """终止事件传播。"""

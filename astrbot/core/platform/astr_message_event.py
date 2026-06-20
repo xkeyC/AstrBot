@@ -464,11 +464,12 @@ class AstrMessageEvent(abc.ABC):
             return MessageEventResult().url_image(url_or_path)
         return MessageEventResult().file_image(url_or_path)
 
-    def chain_result(self, chain: list[BaseMessageComponent]) -> MessageEventResult:
+    def chain_result(
+        self,
+        chain: MessageChain | list[BaseMessageComponent],
+    ) -> MessageEventResult:
         """创建一个空的消息事件结果，包含指定的消息链。"""
-        mer = MessageEventResult()
-        mer.chain = chain
-        return mer
+        return MessageEventResult.from_chain(chain)
 
     """LLM 请求相关"""
 

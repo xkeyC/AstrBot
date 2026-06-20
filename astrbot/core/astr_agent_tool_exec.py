@@ -24,7 +24,6 @@ from astrbot.core.cron.events import CronMessageEvent
 from astrbot.core.message.components import Image
 from astrbot.core.message.message_event_result import (
     CommandResult,
-    MessageChain,
     MessageEventResult,
 )
 from astrbot.core.platform.message_session import MessageSession
@@ -673,11 +672,10 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
                     if res := run_context.context.event.get_result():
                         if res.chain:
                             try:
+                                chain = res.derive(res.chain)
+                                chain.type = "tool_direct_result"
                                 await event.send(
-                                    MessageChain(
-                                        chain=res.chain,
-                                        type="tool_direct_result",
-                                    )
+                                    chain,
                                 )
                             except Exception as e:
                                 logger.error(

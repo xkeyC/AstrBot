@@ -14,7 +14,7 @@ from astrbot.core.message.components import (
     Plain,
     Reply,
 )
-from astrbot.core.message.message_event_result import MessageEventResult
+from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -582,6 +582,39 @@ class TestResultHelpers:
         assert len(result.chain) == 1
         assert isinstance(result.chain[0], Image)
 
+    def test_chain_result_preserves_message_chain_metadata(self, astr_message_event):
+        """Test chain_result preserves MessageChain metadata."""
+        chain = MessageChain([Plain("Hello")])
+        chain.disable_segment_reply = True
+        chain.use_t2i(False)
+        chain.use_markdown(True)
+        chain.type = "custom"
+
+        result = astr_message_event.chain_result(chain)
+
+        assert isinstance(result, MessageEventResult)
+        assert result.chain is chain.chain
+        assert result.disable_segment_reply is True
+        assert result.use_t2i_ is False
+        assert result.use_markdown_ is True
+        assert result.type == "custom"
+
+    def test_message_event_result_constructor_accepts_message_chain(self):
+        """Test MessageEventResult constructor preserves MessageChain metadata."""
+        chain = MessageChain([Plain("Hello")])
+        chain.disable_segment_reply = True
+        chain.use_t2i(False)
+        chain.use_markdown(True)
+        chain.type = "custom"
+
+        result = MessageEventResult(chain=chain)
+
+        assert result.chain is chain.chain
+        assert result.disable_segment_reply is True
+        assert result.use_t2i_ is False
+        assert result.use_markdown_ is True
+        assert result.type == "custom"
+
 
 class TestGetResult:
     """Tests for get_result and clear_result methods."""
@@ -603,6 +636,34 @@ class TestGetResult:
         astr_message_event.clear_result()
 
         assert astr_message_event.get_result() is None
+
+
+class TestRespondStageMetadata:
+    """Tests for metadata-aware response sending."""
+
+    @pytest.mark.asyncio
+    async def test_segmented_reply_bypassed_when_chain_disables_it(
+        self,
+        astr_message_event,
+    ):
+        """Test segmented reply sends one chain when disabled by metadata."""
+        from astrbot.core.pipeline.respond.stage import RespondStage
+
+        stage = RespondStage()
+        stage.enable_seg = True
+        stage.only_llm_result = False
+        stage.platform_settings = {}
+        chain = MessageChain([Plain("first"), Plain("second")])
+        chain.disable_segment_reply = True
+        astr_message_event.set_result(MessageEventResult.from_chain(chain))
+        astr_message_event.send = AsyncMock()
+
+        await stage.process(astr_message_event)
+
+        astr_message_event.send.assert_awaited_once()
+        sent_chain = astr_message_event.send.await_args.args[0]
+        assert [comp.text for comp in sent_chain.chain] == ["first", "second"]
+        assert sent_chain.disable_segment_reply is True
 
 
 class TestShouldCallLlm:

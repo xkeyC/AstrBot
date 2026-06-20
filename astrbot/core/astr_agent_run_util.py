@@ -105,9 +105,18 @@ def _merge_buffered_llm_chains(
     if not buffered_llm_chains:
         return None
 
-    merged_chain = MessageChain()
+    merged_chain = buffered_llm_chains[0].derive([])
     for chain in buffered_llm_chains:
         merged_chain.chain.extend(chain.chain)
+        if chain.use_t2i_ is not None and merged_chain.use_t2i_ is None:
+            merged_chain.use_t2i_ = chain.use_t2i_
+        if chain.use_markdown_ is not None and merged_chain.use_markdown_ is None:
+            merged_chain.use_markdown_ = chain.use_markdown_
+        if chain.type is not None and merged_chain.type is None:
+            merged_chain.type = chain.type
+        merged_chain.disable_segment_reply = (
+            merged_chain.disable_segment_reply or chain.disable_segment_reply
+        )
     buffered_llm_chains.clear()
     return merged_chain
 
@@ -162,8 +171,8 @@ async def run_agent(
                         merged_chain = _merge_buffered_llm_chains(buffered_llm_chains)
                         if merged_chain:
                             astr_event.set_result(
-                                MessageEventResult(
-                                    chain=merged_chain.chain,
+                                MessageEventResult.from_chain(
+                                    merged_chain,
                                     result_content_type=ResultContentType.LLM_RESULT,
                                 ),
                             )
@@ -256,8 +265,8 @@ async def run_agent(
                         else ResultContentType.GENERAL_RESULT
                     )
                     astr_event.set_result(
-                        MessageEventResult(
-                            chain=resp.data["chain"].chain,
+                        MessageEventResult.from_chain(
+                            resp.data["chain"],
                             result_content_type=content_typ,
                         ),
                     )
@@ -274,8 +283,8 @@ async def run_agent(
                 merged_chain = _merge_buffered_llm_chains(buffered_llm_chains)
                 if merged_chain:
                     astr_event.set_result(
-                        MessageEventResult(
-                            chain=merged_chain.chain,
+                        MessageEventResult.from_chain(
+                            merged_chain,
                             result_content_type=ResultContentType.LLM_RESULT,
                         ),
                     )
