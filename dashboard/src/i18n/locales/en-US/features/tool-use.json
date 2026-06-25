@@ -82,12 +82,15 @@
         "name": "Server Name",
         "nameRequired": "Name is required",
         "enable": "Enable Server",
+        "toolPrefix": "Tool Prefix",
+        "toolPrefixHint": "Optional. Prepended to exposed tool names as-is. Up to 64 letters, digits, underscores, or hyphens.",
         "config": "Server Configuration"
       },
       "errors": {
         "configEmpty": "Configuration cannot be empty",
         "jsonFormat": "JSON format error: {error}",
-        "jsonParse": "JSON parse error: {error}"
+        "jsonParse": "JSON parse error: {error}",
+        "toolPrefixInvalid": "Tool prefix must be 64 characters or fewer and contain only letters, digits, underscore, or hyphen."
       },
       "buttons": {
         "cancel": "Cancel",

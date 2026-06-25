@@ -92,6 +92,7 @@ _DENIED_DOCKER_ARGS = frozenset(
     }
 )
 _STDIO_ALLOWLIST_ENV = "ASTRBOT_MCP_STDIO_ALLOWED_COMMANDS"
+_MCP_TOOL_PREFIX_RE = re.compile(r"^[A-Za-z0-9_-]{0,64}$")
 
 try:
     import anyio
@@ -118,7 +119,21 @@ def _prepare_config(config: dict) -> dict:
     else:
         config = dict(config)
     config.pop("active", None)
+    config.pop("tool_prefix", None)
     return config
+
+
+def validate_mcp_tool_prefix(tool_prefix: object) -> str:
+    """Validate and normalize an MCP tool prefix."""
+    if tool_prefix is None:
+        return ""
+    if not isinstance(tool_prefix, str):
+        raise ValueError("MCP tool prefix must be a string.")
+    if not _MCP_TOOL_PREFIX_RE.fullmatch(tool_prefix):
+        raise ValueError(
+            "MCP tool prefix must be 64 characters or fewer and contain only letters, digits, underscore, or hyphen."
+        )
+    return tool_prefix
 
 
 def _normalize_stdio_command_name(command: str) -> str:
@@ -653,16 +668,23 @@ class MCPTool(FunctionTool, Generic[TContext]):
     """A function tool that calls an MCP service."""
 
     def __init__(
-        self, mcp_tool: mcp.Tool, mcp_client: MCPClient, mcp_server_name: str, **kwargs
+        self,
+        mcp_tool: mcp.Tool,
+        mcp_client: MCPClient,
+        mcp_server_name: str,
+        tool_prefix: str = "",
+        **kwargs,
     ) -> None:
+        validated_tool_prefix = validate_mcp_tool_prefix(tool_prefix)
         super().__init__(
-            name=mcp_tool.name,
+            name=f"{validated_tool_prefix}{mcp_tool.name}",
             description=mcp_tool.description or "",
             parameters=_normalize_mcp_input_schema(mcp_tool.inputSchema),
         )
         self.mcp_tool = mcp_tool
         self.mcp_client = mcp_client
         self.mcp_server_name = mcp_server_name
+        self.tool_prefix = validated_tool_prefix
 
     async def call(
         self, context: ContextWrapper[TContext], **kwargs

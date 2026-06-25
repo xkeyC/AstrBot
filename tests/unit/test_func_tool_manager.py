@@ -1,4 +1,5 @@
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -345,3 +346,152 @@ def test_firecrawl_tools_are_registered_as_builtin_tools():
     assert extract_tool.name == "firecrawl_extract_web_page"
     assert manager.is_builtin_tool("web_search_firecrawl") is True
     assert manager.is_builtin_tool("firecrawl_extract_web_page") is True
+
+
+@pytest.mark.asyncio
+async def test_sync_modelscope_mcp_servers_preserves_valid_tool_prefix(monkeypatch):
+    manager = FunctionToolManager()
+    config = {
+        "mcpServers": {
+            "same-name": {
+                "url": "https://old.example.test/mcp",
+                "transport": "sse",
+                "active": True,
+                "tool_prefix": "kept_",
+            }
+        }
+    }
+    saved_configs = []
+    enabled_configs = []
+
+    manager.load_mcp_config = lambda: config
+    manager.save_mcp_config = lambda saved_config: (
+        saved_configs.append(saved_config) or True
+    )
+
+    async def fake_enable_mcp_server(name, config, **kwargs):
+        enabled_configs.append((name, config))
+
+    manager.enable_mcp_server = fake_enable_mcp_server
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {
+                "data": {
+                    "mcp_server_list": [
+                        {
+                            "name": "same-name",
+                            "operational_urls": [
+                                {"url": "https://new.example.test/mcp"}
+                            ],
+                        }
+                    ]
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "astrbot.core.provider.func_tool_manager.aiohttp.ClientSession",
+        FakeSession,
+    )
+
+    await manager.sync_modelscope_mcp_servers("token")
+
+    synced_config = saved_configs[0]["mcpServers"]["same-name"]
+    assert synced_config["url"] == "https://new.example.test/mcp"
+    assert synced_config["tool_prefix"] == "kept_"
+    assert enabled_configs == [("same-name", synced_config)]
+
+
+@pytest.mark.asyncio
+async def test_sync_modelscope_mcp_servers_defaults_invalid_or_missing_prefix(
+    monkeypatch,
+):
+    manager = FunctionToolManager()
+    config = {
+        "mcpServers": {
+            "invalid-prefix": {
+                "url": "https://old.example.test/mcp",
+                "transport": "sse",
+                "tool_prefix": "bad prefix",
+            }
+        }
+    }
+    saved_configs = []
+
+    manager.load_mcp_config = lambda: config
+    manager.save_mcp_config = lambda saved_config: (
+        saved_configs.append(saved_config) or True
+    )
+    manager.enable_mcp_server = AsyncMock()
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {
+                "data": {
+                    "mcp_server_list": [
+                        {
+                            "name": "invalid-prefix",
+                            "operational_urls": [
+                                {"url": "https://invalid.example.test"}
+                            ],
+                        },
+                        {
+                            "name": "new-server",
+                            "operational_urls": [{"url": "https://new.example.test"}],
+                        },
+                    ]
+                }
+            }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "astrbot.core.provider.func_tool_manager.aiohttp.ClientSession",
+        FakeSession,
+    )
+
+    await manager.sync_modelscope_mcp_servers("token")
+
+    synced_servers = saved_configs[0]["mcpServers"]
+    assert synced_servers["invalid-prefix"]["tool_prefix"] == ""
+    assert synced_servers["new-server"]["tool_prefix"] == ""

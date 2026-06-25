@@ -82,12 +82,15 @@
         "name": "服务器名称",
         "nameRequired": "名称是必填项",
         "enable": "启用服务器",
+        "toolPrefix": "工具前缀",
+        "toolPrefixHint": "可选。会原样添加到暴露的工具名前。最多 64 个字母、数字、下划线或连字符。",
         "config": "服务器配置"
       },
       "errors": {
         "configEmpty": "配置不能为空",
         "jsonFormat": "JSON 格式错误: {error}",
-        "jsonParse": "JSON 解析错误: {error}"
+        "jsonParse": "JSON 解析错误: {error}",
+        "toolPrefixInvalid": "工具前缀最多 64 个字符，且只能包含字母、数字、下划线或连字符。"
       },
       "buttons": {
         "cancel": "取消",

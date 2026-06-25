@@ -4,7 +4,11 @@ from quart import request
 
 from astrbot.core import logger
 from astrbot.core.agent.handoff import HandoffTool
-from astrbot.core.agent.mcp_client import MCPTool, validate_mcp_stdio_config
+from astrbot.core.agent.mcp_client import (
+    MCPTool,
+    validate_mcp_stdio_config,
+    validate_mcp_tool_prefix,
+)
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.star import star_map
 from astrbot.core.tools.registry import get_builtin_tool_config_statuses
@@ -37,6 +41,8 @@ def _extract_mcp_server_config(mcp_servers_value: object) -> dict:
             "Invalid mcpServers format. Ensure each key in mcpServers is a server name, "
             "and each value is an object containing fields like command/url."
         )
+    extracted = dict(extracted)
+    extracted.pop("tool_prefix", None)
     return extracted
 
 
@@ -95,18 +101,30 @@ class ToolsRoute(Route):
                 server_info = {
                     "name": name,
                     "active": server_config.get("active", True),
+                    "tool_prefix": "",
                 }
+                try:
+                    server_info["tool_prefix"] = validate_mcp_tool_prefix(
+                        server_config.get("tool_prefix", "")
+                    )
+                except ValueError as e:
+                    logger.warning(
+                        f"Invalid tool_prefix for MCP server '{name}': {e!s}"
+                    )
 
                 # 复制所有配置字段
                 for key, value in server_config.items():
-                    if key != "active":  # active 已经处理
+                    if key not in ["active", "tool_prefix"]:  # active 已经处理
                         server_info[key] = value
 
                 # 如果MCP客户端已初始化，从客户端获取工具名称
                 for name_key, runtime in self.tool_mgr.mcp_server_runtime_view.items():
                     if name_key == name:
                         mcp_client = runtime.client
-                        server_info["tools"] = [tool.name for tool in mcp_client.tools]
+                        server_info["tools"] = [
+                            f"{server_info['tool_prefix']}{tool.name}"
+                            for tool in mcp_client.tools
+                        ]
                         server_info["errlogs"] = mcp_client.server_errlogs
                         break
                 else:
@@ -135,7 +153,13 @@ class ToolsRoute(Route):
 
             # 复制所有配置字段
             for key, value in server_data.items():
-                if key not in ["name", "active", "tools", "errlogs"]:  # 排除特殊字段
+                if key not in [
+                    "name",
+                    "active",
+                    "tools",
+                    "errlogs",
+                    "tool_prefix",
+                ]:  # 排除特殊字段
                     if key == "mcpServers":
                         try:
                             server_config = _extract_mcp_server_config(
@@ -146,6 +170,16 @@ class ToolsRoute(Route):
                     else:
                         server_config[key] = value
                     has_valid_config = True
+
+            server_config["active"] = server_data.get(
+                "active", server_config.get("active", True)
+            )
+            try:
+                server_config["tool_prefix"] = validate_mcp_tool_prefix(
+                    server_data.get("tool_prefix", "")
+                )
+            except ValueError as e:
+                return Response().error(f"{e!s}").__dict__
 
             if not has_valid_config:
                 return (
@@ -226,9 +260,12 @@ class ToolsRoute(Route):
             old_config = config["mcpServers"][old_name]
             if isinstance(old_config, dict):
                 old_active = old_config.get("active", True)
+                old_tool_prefix = old_config.get("tool_prefix", "")
             else:
                 old_active = True
+                old_tool_prefix = ""
             active = server_data.get("active", old_active)
+            has_top_level_tool_prefix = "tool_prefix" in server_data
 
             # 创建新的配置对象
             server_config = {"active": active}
@@ -244,6 +281,7 @@ class ToolsRoute(Route):
                     "tools",
                     "errlogs",
                     "oldName",
+                    "tool_prefix",
                 ]:  # 排除特殊字段
                     if key == "mcpServers":
                         try:
@@ -261,6 +299,21 @@ class ToolsRoute(Route):
                 for key, value in old_config.items():
                     if key != "active":  # 除了active之外的所有字段都保留
                         server_config[key] = value
+
+            server_config["active"] = active
+            try:
+                server_config["tool_prefix"] = validate_mcp_tool_prefix(
+                    server_data["tool_prefix"]
+                    if has_top_level_tool_prefix
+                    else old_tool_prefix
+                )
+            except ValueError as e:
+                return Response().error(f"{e!s}").__dict__
+            if (
+                has_top_level_tool_prefix
+                and server_config["tool_prefix"] != old_tool_prefix
+            ):
+                only_update_active = False
 
             try:
                 validate_mcp_stdio_config(server_config)
@@ -425,6 +478,13 @@ class ToolsRoute(Route):
                     .error("MCP server configuration cannot be empty")
                     .__dict__
                 )
+
+            try:
+                config["tool_prefix"] = validate_mcp_tool_prefix(
+                    server_data.get("tool_prefix", config.get("tool_prefix", ""))
+                )
+            except ValueError as e:
+                return Response().error(f"{e!s}").__dict__
 
             try:
                 validate_mcp_stdio_config(config)

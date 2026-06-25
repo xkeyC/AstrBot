@@ -15,7 +15,11 @@ import aiohttp
 
 from astrbot import logger
 from astrbot.core import sp
-from astrbot.core.agent.mcp_client import MCPClient, MCPTool
+from astrbot.core.agent.mcp_client import (
+    MCPClient,
+    MCPTool,
+    validate_mcp_tool_prefix,
+)
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.tools.registry import (
     ensure_builtin_tools_loaded,
@@ -150,8 +154,11 @@ def _prepare_config(config: dict) -> dict:
     """准备配置，处理嵌套格式"""
     if config.get("mcpServers"):
         first_key = next(iter(config["mcpServers"]))
-        config = config["mcpServers"][first_key]
+        config = dict(config["mcpServers"][first_key])
+    else:
+        config = dict(config)
     config.pop("active", None)
+    config.pop("tool_prefix", None)
     return config
 
 
@@ -649,6 +656,7 @@ class FunctionToolManager:
         """初始化单个MCP客户端"""
         mcp_client = MCPClient()
         mcp_client.name = name
+        tool_prefix = validate_mcp_tool_prefix(config.get("tool_prefix", ""))
         try:
             await mcp_client.connect_to_server(config, name)
             tools_res = await mcp_client.list_tools_and_save()
@@ -674,6 +682,7 @@ class FunctionToolManager:
                 mcp_tool=tool,
                 mcp_client=mcp_client,
                 mcp_server_name=name,
+                tool_prefix=tool_prefix,
             )
             self.func_list.append(func_tool)
 
@@ -711,17 +720,21 @@ class FunctionToolManager:
 
     @staticmethod
     async def test_mcp_server_connection(config: dict) -> list[str]:
-        if "url" in config:
-            success, error_msg = await _quick_test_mcp_connection(config)
+        tool_prefix = validate_mcp_tool_prefix(config.get("tool_prefix", ""))
+        connection_config = _prepare_config(config)
+        if "url" in connection_config:
+            success, error_msg = await _quick_test_mcp_connection(connection_config)
             if not success:
                 raise Exception(error_msg)
 
         mcp_client = MCPClient()
         try:
-            logger.debug(f"testing MCP server connection with config: {config}")
-            await mcp_client.connect_to_server(config, "test")
+            logger.debug(
+                f"testing MCP server connection with config: {connection_config}"
+            )
+            await mcp_client.connect_to_server(connection_config, "test")
             tools_res = await mcp_client.list_tools_and_save()
-            tool_names = [tool.name for tool in tools_res.tools]
+            tool_names = [f"{tool_prefix}{tool.name}" for tool in tools_res.tools]
         finally:
             logger.debug("Cleaning up MCP client after testing connection.")
             await mcp_client.cleanup()
@@ -946,12 +959,25 @@ class FunctionToolManager:
                             server_url = url_info.get("url")
                             if not server_url:
                                 continue
+                            existing_config = local_mcp_config["mcpServers"].get(
+                                server_name,
+                                {},
+                            )
+                            try:
+                                tool_prefix = validate_mcp_tool_prefix(
+                                    existing_config.get("tool_prefix", "")
+                                    if isinstance(existing_config, dict)
+                                    else ""
+                                )
+                            except ValueError:
+                                tool_prefix = ""
                             # 添加到配置中(同名会覆盖)
                             local_mcp_config["mcpServers"][server_name] = {
                                 "url": server_url,
                                 "transport": "sse",
                                 "active": True,
                                 "provider": "modelscope",
+                                "tool_prefix": tool_prefix,
                             }
                             synced_count += 1
 

@@ -174,6 +174,16 @@
             <v-text-field v-model="currentServer.name" :label="tm('dialogs.addServer.fields.name')" variant="outlined"
               :rules="[v => !!v || tm('dialogs.addServer.fields.nameRequired')]" required class="mb-3"></v-text-field>
 
+            <v-text-field
+              v-model="currentServer.tool_prefix"
+              :label="tm('dialogs.addServer.fields.toolPrefix')"
+              :hint="tm('dialogs.addServer.fields.toolPrefixHint')"
+              :rules="[validateToolPrefix]"
+              persistent-hint
+              variant="outlined"
+              class="mb-3"
+            ></v-text-field>
+
             <div class="mb-2 d-flex align-center">
               <span class="text-subtitle-1">{{ tm('dialogs.addServer.fields.config') }}</span>
               <v-spacer></v-spacer>
@@ -339,6 +349,7 @@ export default {
       currentServer: {
         name: '',
         active: true,
+        tool_prefix: '',
         tools: []
       },
       originalServerName: '',
@@ -349,7 +360,7 @@ export default {
   },
   computed: {
     isServerFormValid() {
-      return !!this.currentServer.name && !this.jsonError;
+      return !!this.currentServer.name && !this.jsonError && this.validateToolPrefix(this.currentServer.tool_prefix) === true;
     },
     getServerConfigSummary() {
       return (server) => {
@@ -360,7 +371,7 @@ export default {
           return `${server.command} ${(server.args || []).join(' ')}`;
         }
         const configKeys = Object.keys(server).filter(key =>
-          !['name', 'active', 'tools'].includes(key)
+          !['name', 'active', 'tools', 'errlogs', 'tool_prefix'].includes(key)
         );
         if (configKeys.length > 0) {
           return this.tm('mcpServers.status.configSummary', { keys: configKeys.join(', ') });
@@ -435,6 +446,16 @@ export default {
         return false;
       }
     },
+    validateToolPrefix(value) {
+      const prefix = value || '';
+      if (typeof prefix !== 'string') {
+        return this.tm('dialogs.addServer.errors.toolPrefixInvalid');
+      }
+      if (prefix.length > 64 || !/^[A-Za-z0-9_-]*$/.test(prefix)) {
+        return this.tm('dialogs.addServer.errors.toolPrefixInvalid');
+      }
+      return true;
+    },
     setConfigTemplate(type = 'stdio') {
       let template = {};
       if (type === 'streamable_http') {
@@ -465,13 +486,19 @@ export default {
       if (!this.validateJson()) {
         return;
       }
+      const prefixValidation = this.validateToolPrefix(this.currentServer.tool_prefix);
+      if (prefixValidation !== true) {
+        this.showError(prefixValidation);
+        return;
+      }
       this.loading = true;
       try {
         const configObj = JSON.parse(this.serverConfigJson);
         const serverData = {
           name: this.currentServer.name,
           active: this.currentServer.active,
-          ...configObj
+          ...configObj,
+          tool_prefix: this.currentServer.tool_prefix || ''
         };
         if (this.isEditMode && this.originalServerName) {
           serverData.oldName = this.originalServerName;
@@ -521,9 +548,11 @@ export default {
       delete configCopy.active;
       delete configCopy.tools;
       delete configCopy.errlogs;
+      delete configCopy.tool_prefix;
       this.currentServer = {
         name: server.name,
         active: server.active,
+        tool_prefix: server.tool_prefix || '',
         tools: server.tools || []
       };
       this.originalServerName = server.name;
@@ -556,6 +585,11 @@ export default {
       if (!this.validateJson()) {
         return;
       }
+      const prefixValidation = this.validateToolPrefix(this.currentServer.tool_prefix);
+      if (prefixValidation !== true) {
+        this.showError(prefixValidation);
+        return;
+      }
       this.loading = true;
       let configObj;
       try {
@@ -566,7 +600,8 @@ export default {
         return;
       }
       axios.post('/api/tools/mcp/test', {
-        mcp_server_config: configObj
+        mcp_server_config: configObj,
+        tool_prefix: this.currentServer.tool_prefix || ''
       })
         .then(response => {
           this.loading = false;
@@ -581,6 +616,7 @@ export default {
       this.currentServer = {
         name: '',
         active: true,
+        tool_prefix: '',
         tools: []
       };
       this.serverConfigJson = '';
