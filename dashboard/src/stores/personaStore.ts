@@ -3,6 +3,7 @@
  */
 import { defineStore } from 'pinia';
 import { personaApi } from '@/api/v1';
+import { httpClient } from '@/api/http';
 
 // 类型定义
 export interface PersonaFolder {
@@ -290,7 +291,7 @@ export const usePersonaStore = defineStore("persona", {
      * 克隆 Persona
      */
     async clonePersona(sourcePersonaId: string, newPersonaId: string): Promise<Persona> {
-      const response = await axios.post('/api/persona/clone', {
+      const response = await httpClient.post('/api/persona/clone', {
         source_persona_id: sourcePersonaId,
         new_persona_id: newPersonaId
       });

@@ -95,12 +95,11 @@ class CustomBuildHook(BuildHookInterface):
             else ["npm", "run", "build-local"]
         )
 
-        # ── Install Node dependencies if node_modules is absent ─────────────
-        if not (dashboard_src / "node_modules").exists():
-            print(
-                f"[hatch_build] Installing dashboard Node dependencies with {package_manager}..."
-            )
-            self._run(install_command, cwd=dashboard_src)
+        # ── Sync Node dependencies before building ───────────────────────────
+        print(
+            f"[hatch_build] Installing dashboard Node dependencies with {package_manager}..."
+        )
+        self._run(install_command, cwd=dashboard_src)
 
         # ── Build the Vue/Vite dashboard ──────────────────────────────────────
         print(f"[hatch_build] Building Vue dashboard ({' '.join(build_command)})...")
