@@ -309,8 +309,8 @@
 </template>
 
 <script>
-import axios from 'axios';
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor';
+import { mcpApi } from '@/api/v1';
 import { useI18n, useModuleI18n } from '@/i18n/composables';
 import OutlinedActionListItem from '@/components/shared/OutlinedActionListItem.vue';
 import {
@@ -413,7 +413,7 @@ export default {
     },
     getServers() {
       this.loadingGettingServers = true;
-      axios.get('/api/tools/mcp/servers')
+      mcpApi.list()
         .then(response => {
           if (response.data.status === 'error') {
             this.showError(response.data.message || this.tm('messages.getServersError', { error: 'Unknown error' }));
@@ -503,8 +503,10 @@ export default {
         if (this.isEditMode && this.originalServerName) {
           serverData.oldName = this.originalServerName;
         }
-        const endpoint = this.isEditMode ? '/api/tools/mcp/update' : '/api/tools/mcp/add';
-        axios.post(endpoint, serverData)
+        const request = this.isEditMode
+          ? mcpApi.update(this.originalServerName || serverData.name, serverData)
+          : mcpApi.create(serverData);
+        request
           .then(response => {
             this.loading = false;
             if (response.data.status === 'error') {
@@ -533,7 +535,7 @@ export default {
         return;
       }
 
-      axios.post('/api/tools/mcp/delete', { name: serverName })
+      mcpApi.delete(serverName)
         .then(response => {
           this.getServers();
           this.showSuccess(response.data.message || this.tm('messages.deleteSuccess'));
@@ -563,7 +565,7 @@ export default {
     updateServerStatus(server) {
       this.mcpServerUpdateLoaders[server.name] = true;
       server.active = !server.active;
-      axios.post('/api/tools/mcp/update', server)
+      mcpApi.setEnabled(server.name, server.active)
         .then(response => {
           this.getServers();
           this.showSuccess(response.data.message || this.tm('messages.updateSuccess'));
@@ -599,8 +601,8 @@ export default {
         this.showError(this.tm('dialogs.addServer.errors.jsonParse', { error: e.message }));
         return;
       }
-      axios.post('/api/tools/mcp/test', {
-        mcp_server_config: configObj,
+      mcpApi.test(this.currentServer.name || 'draft', {
+        ...configObj,
         tool_prefix: this.currentServer.tool_prefix || ''
       })
         .then(response => {
@@ -652,7 +654,9 @@ export default {
           }
           requestData.access_token = this.mcpProviderToken.trim();
         }
-        const response = await axios.post('/api/tools/mcp/sync-provider', requestData);
+        const response = await mcpApi.syncModelScope({
+          access_token: requestData.access_token || ''
+        });
         if (response.data.status === 'ok') {
           this.showSuccess(response.data.message || this.tm('syncProvider.messages.syncSuccess'));
           this.showSyncMcpServerDialog = false;

@@ -201,18 +201,13 @@ class TestMCPConfigMetadata:
 
 
 class TestMCPToolPrefixRouteMetadata:
-    def _build_route_client(self, tool_mgr):
-        from quart import Quart
+    def _build_service(self, tool_mgr):
+        from astrbot.dashboard.services.tools_service import ToolsService
 
-        from astrbot.dashboard.routes.tools import ToolsRoute
-
-        app = Quart(__name__)
-        context = SimpleNamespace(app=app, config={})
         lifecycle = SimpleNamespace(
             provider_manager=SimpleNamespace(llm_tools=tool_mgr)
         )
-        ToolsRoute(context, lifecycle)
-        return app.test_client()
+        return ToolsService(lifecycle)
 
     @pytest.mark.asyncio
     async def test_add_mcp_server_ignores_nested_tool_prefix(self):
@@ -222,10 +217,9 @@ class TestMCPToolPrefixRouteMetadata:
         tool_mgr.test_mcp_server_connection = AsyncMock(return_value=[])
         tool_mgr.enable_mcp_server = AsyncMock()
 
-        client = self._build_route_client(tool_mgr)
-        response = await client.post(
-            "/api/tools/mcp/add",
-            json={
+        service = self._build_service(tool_mgr)
+        result = await service.add_mcp_server(
+            {
                 "name": "nested",
                 "active": True,
                 "mcpServers": {
@@ -238,7 +232,7 @@ class TestMCPToolPrefixRouteMetadata:
             },
         )
 
-        assert (await response.get_json())["status"] == "ok"
+        assert result == "Successfully added MCP server nested"
         saved_config = tool_mgr.save_mcp_config.call_args.args[0]
         assert saved_config["mcpServers"]["nested"]["tool_prefix"] == ""
 
@@ -250,10 +244,9 @@ class TestMCPToolPrefixRouteMetadata:
         tool_mgr.test_mcp_server_connection = AsyncMock(return_value=[])
         tool_mgr.enable_mcp_server = AsyncMock()
 
-        client = self._build_route_client(tool_mgr)
-        response = await client.post(
-            "/api/tools/mcp/add",
-            json={
+        service = self._build_service(tool_mgr)
+        result = await service.add_mcp_server(
+            {
                 "name": "nested",
                 "active": True,
                 "tool_prefix": "top_",
@@ -267,7 +260,7 @@ class TestMCPToolPrefixRouteMetadata:
             },
         )
 
-        assert (await response.get_json())["status"] == "ok"
+        assert result == "Successfully added MCP server nested"
         saved_config = tool_mgr.save_mcp_config.call_args.args[0]
         assert saved_config["mcpServers"]["nested"]["tool_prefix"] == "top_"
 
@@ -289,10 +282,9 @@ class TestMCPToolPrefixRouteMetadata:
         tool_mgr.disable_mcp_server = AsyncMock()
         tool_mgr.enable_mcp_server = AsyncMock()
 
-        client = self._build_route_client(tool_mgr)
-        response = await client.post(
-            "/api/tools/mcp/update",
-            json={
+        service = self._build_service(tool_mgr)
+        result = await service.update_mcp_server(
+            {
                 "name": "nested",
                 "active": False,
                 "mcpServers": {
@@ -305,6 +297,6 @@ class TestMCPToolPrefixRouteMetadata:
             },
         )
 
-        assert (await response.get_json())["status"] == "ok"
+        assert result == "Successfully updated MCP server nested"
         saved_config = tool_mgr.save_mcp_config.call_args.args[0]
         assert saved_config["mcpServers"]["nested"]["tool_prefix"] == "old_"
