@@ -118,5 +118,7 @@ class CustomBuildHook(BuildHookInterface):
         shutil.copytree(dist_src, dist_target)
         version_file = dist_target / "assets" / "version"
         version_file.parent.mkdir(parents=True, exist_ok=True)
-        version_file.write_text(f"v{self._read_project_version(root).lstrip('v')}", encoding="utf-8")
+        version_file.write_text(
+            f"v{self._read_project_version(root).lstrip('v')}", encoding="utf-8"
+        )
         print(f"[hatch_build] Dashboard dist copied → {dist_target.relative_to(root)}")

@@ -5,8 +5,11 @@ from typing import Any
 
 from astrbot.core import logger, sp
 from astrbot.core.agent.handoff import HandoffTool
-from astrbot.core.agent.mcp_client import MCPTool, validate_mcp_stdio_config
-from astrbot.core.agent.mcp_client import validate_mcp_tool_prefix
+from astrbot.core.agent.mcp_client import (
+    MCPTool,
+    validate_mcp_stdio_config,
+    validate_mcp_tool_prefix,
+)
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.star import star_map
 from astrbot.core.tools.registry import get_builtin_tool_config_statuses
@@ -243,7 +246,9 @@ class ToolsService:
 
             if not isinstance(config, dict) or not config:
                 raise ToolsServiceError("Invalid MCP server configuration")
-            submitted_tool_prefix = server_data.get("tool_prefix", config.get("tool_prefix"))
+            submitted_tool_prefix = server_data.get(
+                "tool_prefix", config.get("tool_prefix")
+            )
 
             if "mcpServers" in config:
                 mcp_servers = config["mcpServers"]
@@ -478,7 +483,10 @@ class ToolsService:
             )
         except ValueError as exc:
             raise ToolsServiceError(f"{exc!s}") from exc
-        if has_top_level_tool_prefix and server_config["tool_prefix"] != old_tool_prefix:
+        if (
+            has_top_level_tool_prefix
+            and server_config["tool_prefix"] != old_tool_prefix
+        ):
             only_update_active = False
 
         return only_update_active, server_config

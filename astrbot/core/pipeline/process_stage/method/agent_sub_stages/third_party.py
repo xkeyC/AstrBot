@@ -67,7 +67,9 @@ def _resolve_third_party_streaming_mode(
     all_streaming = provider_core.ENABLE_ALL_STREAMING_MODE
     streaming_used = streaming_response and not stream_to_general
     runner_streaming = streaming_response or all_streaming
-    suppress_streaming_deltas = stream_to_general or (all_streaming and not streaming_used)
+    suppress_streaming_deltas = stream_to_general or (
+        all_streaming and not streaming_used
+    )
     return runner_streaming, suppress_streaming_deltas
 
 
