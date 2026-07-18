@@ -262,7 +262,6 @@ class ResultDecorateStage(Stage):
                 self.enable_segmented_reply
                 and event.get_platform_name()
                 not in [
-                    "qq_official",
                     "qq_official_webhook",
                     "weixin_official_account",
                     "dingtalk",

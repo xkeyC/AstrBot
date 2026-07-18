@@ -159,12 +159,12 @@ async def test_text_chat_passes_request_max_retries_to_query():
     async def fake_prepare_chat_payload(*args, **kwargs):
         return {"messages": [], "model": "gpt-4o-mini"}, []
 
-    async def fake_query(payloads, func_tool, *, request_max_retries=None):
+    async def fake_query_stream(payloads, func_tool, *, request_max_retries=None):
         captured["request_max_retries"] = request_max_retries
-        return LLMResponse(role="assistant", completion_text="ok")
+        yield LLMResponse(role="assistant", completion_text="ok")
 
     provider._prepare_chat_payload = fake_prepare_chat_payload
-    provider._query = fake_query
+    provider._query_stream = fake_query_stream
 
     await provider.text_chat(prompt="hello", request_max_retries=2)
 

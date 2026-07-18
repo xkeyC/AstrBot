@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 
 import astrbot.core.provider.provider as provider_core
@@ -8,6 +10,9 @@ from astrbot.core.pipeline.process_stage.method.agent_sub_stages.third_party imp
 )
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.provider import Provider
+from astrbot.core.provider.sources.anthropic_source import ProviderAnthropic
+from astrbot.core.provider.sources.gemini_source import ProviderGoogleGenAI
+from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 
 
 class _StreamingOnlyProvider(Provider):
@@ -73,6 +78,27 @@ async def test_text_chat_raises_when_streaming_has_no_usable_output(monkeypatch)
 
     with pytest.raises(EmptyModelOutputError):
         await provider.text_chat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_class",
+    [ProviderOpenAIOfficial, ProviderAnthropic, ProviderGoogleGenAI],
+)
+async def test_forced_streaming_forwards_request_max_retries(
+    monkeypatch,
+    provider_class,
+):
+    monkeypatch.setattr(provider_core, "ENABLE_ALL_STREAMING_MODE", True)
+    provider = provider_class.__new__(provider_class)
+    consume_stream = AsyncMock(
+        return_value=LLMResponse(role="assistant", completion_text="ok")
+    )
+    provider._text_chat_from_stream_blocking = consume_stream
+
+    await provider.text_chat(request_max_retries=3)
+
+    assert consume_stream.await_args.kwargs["request_max_retries"] == 3
 
 
 def test_third_party_forces_upstream_streaming_but_suppresses_downstream_deltas(

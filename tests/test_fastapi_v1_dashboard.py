@@ -3051,6 +3051,7 @@ async def test_v1_safe_mcp_routes_accept_slash_server_names(
     assert test_response.json()["data"] == ["demo_tool"]
     assert fake_tools.tested_configs[-1] == {
         "active": False,
+        "tool_prefix": "",
         "url": "https://example.com/modelscope-demo",
     }
 

@@ -532,7 +532,7 @@ class Image(BaseMessageComponent):
 
     @staticmethod
     def _decode_file_uri(uri: str) -> str:
-        return file_uri_to_path(uri)
+        return file_uri_to_path(uri).replace("\\", "/")
 
     def _resolve_file_source(self) -> str:
         fallback = ""

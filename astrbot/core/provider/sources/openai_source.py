@@ -631,7 +631,6 @@ class ProviderOpenAIOfficial(Provider):
         custom_extra_body = self.provider_config.get("custom_extra_body", {})
         if isinstance(custom_extra_body, dict):
             extra_body.update(custom_extra_body)
-        self._apply_provider_specific_extra_body_overrides(extra_body)
 
         to_del = []
         for key in payloads:
@@ -1641,6 +1640,7 @@ class ProviderOpenAIOfficial(Provider):
                 model=model,
                 extra_user_content_parts=extra_user_content_parts,
                 tool_choice=tool_choice,
+                request_max_retries=request_max_retries,
                 **kwargs,
             )
 

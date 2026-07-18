@@ -842,6 +842,7 @@ class ProviderGoogleGenAI(Provider):
                 model=model,
                 extra_user_content_parts=extra_user_content_parts,
                 tool_choice=tool_choice,
+                request_max_retries=request_max_retries,
                 **kwargs,
             )
 
