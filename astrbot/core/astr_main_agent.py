@@ -21,6 +21,7 @@ from astrbot.core.astr_agent_hooks import MAIN_AGENT_HOOKS
 from astrbot.core.astr_agent_run_util import AgentRunner
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.astr_main_agent_resources import (
+    CHATUI_INLINE_GENUI_SYSTEM_PROMPT,
     CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT,
     LIVE_MODE_SYSTEM_PROMPT,
     LLM_SAFETY_MODE_SYSTEM_PROMPT,
@@ -529,6 +530,12 @@ async def _ensure_persona_and_skills(
     event: AstrMessageEvent,
 ) -> None:
     """Ensure persona and skills are applied to the request's system prompt or user prompt."""
+    if req.system_prompt is None:
+        req.system_prompt = ""
+
+    if event.get_extra("enable_inline_genui"):
+        req.system_prompt += CHATUI_INLINE_GENUI_SYSTEM_PROMPT
+
     if not req.conversation:
         return
 
@@ -550,16 +557,16 @@ async def _ensure_persona_and_skills(
     )
     _set_persona_allowed_tools(event, persona)
 
-    if req.system_prompt is None:
-        req.system_prompt = ""
-
     if persona:
         # Inject persona system prompt
         if prompt := persona["prompt"]:
             req.system_prompt += f"\n# Persona Instructions\n\n{prompt}\n"
         if begin_dialogs := copy.deepcopy(persona.get("_begin_dialogs_processed")):
             req.contexts[:0] = begin_dialogs
-    elif use_webchat_special_default:
+    elif (
+        use_webchat_special_default
+        and event.get_extra("enable_default_system_prompt") is not False
+    ):
         req.system_prompt += CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT
 
     # Inject skills prompt
@@ -1031,9 +1038,9 @@ async def _decorate_llm_request(
     img_cap_prov_id: str = cfg.get("default_image_caption_provider_id") or ""
     quote_images_already_captioned = False
 
-    if req.conversation:
-        await _ensure_persona_and_skills(req, cfg, plugin_context, event)
+    await _ensure_persona_and_skills(req, cfg, plugin_context, event)
 
+    if req.conversation:
         if img_cap_prov_id and req.image_urls and not main_provider_supports_image:
             await _ensure_img_caption(
                 event,

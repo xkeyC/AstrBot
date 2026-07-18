@@ -84,8 +84,8 @@ class RespondStage(Stage):
             try:
                 self.interval = [float(t) for t in interval_str_ls]
             except BaseException as e:
-                logger.error(f"解析分段回复的间隔时间失败。{e}")
-            logger.info(f"分段回复间隔时间：{self.interval}")
+                logger.error(f"Failed to parse the segmented-reply interval: {e}")
+            logger.info(f"Segmented-reply interval: {self.interval}")
 
     async def _word_cnt(self, text: str) -> int:
         """分段回复 统计字数"""
@@ -211,7 +211,7 @@ class RespondStage(Stage):
 
         if result.result_content_type == ResultContentType.STREAMING_RESULT:
             if result.async_stream is None:
-                logger.warning("async_stream 为空，跳过发送。")
+                logger.warning("async_stream is empty; skipping delivery.")
                 return
             # 流式结果直接交付平台适配器处理
             realtime_segmenting = (
@@ -221,7 +221,7 @@ class RespondStage(Stage):
                 )
                 == "realtime_segmenting"
             )
-            logger.info(f"应用流式输出({event.get_platform_id()})")
+            logger.info(f"Applying streaming output ({event.get_platform_id()}).")
             await event.send_streaming(result.async_stream, realtime_segmenting)
             return
         if len(result.chain) > 0:
@@ -236,10 +236,10 @@ class RespondStage(Stage):
             # 检查消息链是否为空
             try:
                 if await self._is_empty_message_chain(result.chain):
-                    logger.info("消息为空，跳过发送阶段")
+                    logger.info("The message is empty; skipping the respond stage.")
                     return
             except Exception as e:
-                logger.warning(f"空内容检查异常: {e}")
+                logger.warning(f"Empty-content validation failed: {e}")
 
             # 将 Plain 为空的消息段移除
             result.chain = [
@@ -263,7 +263,9 @@ class RespondStage(Stage):
                 if not result.chain or len(result.chain) == 0:
                     # may fix #2670
                     logger.warning(
-                        f"实际消息链为空, 跳过发送阶段。header_chain: {header_comps}, actual_chain: {result.chain}",
+                        "The effective message chain is empty; skipping the respond "
+                        f"stage. header_chain: {header_comps}, "
+                        f"actual_chain: {result.chain}",
                     )
                     return
                 for comp in result.chain:
@@ -277,7 +279,8 @@ class RespondStage(Stage):
                             header_comps.clear()
                     except Exception as e:
                         logger.error(
-                            f"发送消息链失败: chain = {MessageChain([comp])}, error = {e}",
+                            "Failed to send the message chain: "
+                            f"chain = {MessageChain([comp])}, error = {e}",
                             exc_info=True,
                         )
             else:
@@ -287,7 +290,8 @@ class RespondStage(Stage):
                 ):
                     # may fix #2670
                     logger.warning(
-                        f"消息链全为 Reply 和 At 消息段, 跳过发送阶段。chain: {result.chain}",
+                        "The message chain contains only Reply and At segments; "
+                        f"skipping the respond stage. chain: {result.chain}",
                     )
                     return
                 sep_comps = self._extract_comp(
@@ -301,7 +305,8 @@ class RespondStage(Stage):
                         await event.send(chain)
                     except Exception as e:
                         logger.error(
-                            f"发送消息链失败: chain = {chain}, error = {e}",
+                            f"Failed to send the message chain: chain = {chain}, "
+                            f"error = {e}",
                             exc_info=True,
                         )
                 chain = result.derive(result.chain)
@@ -310,7 +315,8 @@ class RespondStage(Stage):
                         await event.send(chain)
                     except Exception as e:
                         logger.error(
-                            f"发送消息链失败: chain = {chain}, error = {e}",
+                            f"Failed to send the message chain: chain = {chain}, "
+                            f"error = {e}",
                             exc_info=True,
                         )
 
