@@ -270,13 +270,12 @@ class MockToolCallProvider(MockProvider):
         )
 
 
-class InternalToolSearchProvider(MockProvider):
+class InternalToolProvider(MockProvider):
     def __init__(self):
         super().__init__()
-        self.provider_config.update({"api_mode": "responses", "tools_search": True})
         self.internal_tool = FunctionTool(
-            name="tool_search",
-            description="Search deferred tools",
+            name="provider_internal_tool",
+            description="Provider-owned internal tool",
             parameters={
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -290,7 +289,7 @@ class InternalToolSearchProvider(MockProvider):
         if self.call_count == 1:
             return LLMResponse(
                 role="tool",
-                tools_call_name=["tool_search"],
+                tools_call_name=["provider_internal_tool"],
                 tools_call_args=[{"query": "calendar"}],
                 tools_call_ids=["search_1"],
                 internal_tools={"search_1": self.internal_tool},
@@ -570,22 +569,22 @@ def _make_large_tool_result_text() -> str:
 
 
 @pytest.mark.asyncio
-async def test_provider_internal_tool_search_is_executed(
+async def test_provider_internal_tool_is_executed(
     runner, provider_request, mock_hooks
 ):
-    provider = InternalToolSearchProvider()
-    ordinary_tool_search_handler = AsyncMock(return_value="ordinary result")
-    ordinary_tool_search = FunctionTool(
-        name="tool_search",
+    provider = InternalToolProvider()
+    ordinary_tool_handler = AsyncMock(return_value="ordinary result")
+    ordinary_tool = FunctionTool(
+        name="provider_internal_tool",
         description="An ordinary same-name plugin tool",
         parameters={
             "type": "object",
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
         },
-        handler=ordinary_tool_search_handler,
+        handler=ordinary_tool_handler,
     )
-    provider_request.func_tool.add_tool(ordinary_tool_search)
+    provider_request.func_tool.add_tool(ordinary_tool)
     executor = RecordingToolExecutor()
     await runner.reset(
         provider=provider,
@@ -600,14 +599,14 @@ async def test_provider_internal_tool_search_is_executed(
 
     assert responses
     assert runner.done()
-    assert executor.tool_names == ["tool_search"]
+    assert executor.tool_names == ["provider_internal_tool"]
     assert executor.tools == [provider.internal_tool]
-    ordinary_tool_search_handler.assert_not_awaited()
+    ordinary_tool_handler.assert_not_awaited()
     assert provider.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_ordinary_same_name_tool_search_is_executed_without_internal_marker(
+async def test_ordinary_tool_search_is_executed_as_regular_function(
     runner, mock_hooks
 ):
     ordinary_tool_search = FunctionTool(
@@ -626,7 +625,6 @@ async def test_ordinary_same_name_tool_search_is_executed_without_internal_marke
         contexts=[],
     )
     provider = SingleToolThenFinalProvider("tool_search", {"query": "calendar"})
-    provider.provider_config.update({"api_mode": "responses", "tools_search": True})
     executor = RecordingToolExecutor()
     await runner.reset(
         provider=provider,

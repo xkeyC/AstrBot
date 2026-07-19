@@ -397,9 +397,6 @@ export function useProviderSources(options: UseProviderSourcesOptions) {
       if (source.api_mode === undefined) {
         source.api_mode = 'chat_completions'
       }
-      if (source.tools_search === undefined) {
-        source.tools_search = false
-      }
     }
 
     return source

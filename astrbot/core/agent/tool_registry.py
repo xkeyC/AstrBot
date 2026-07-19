@@ -241,10 +241,6 @@ class ToolSearchIndex:
         ]
 
 
-class ToolRegistryMetaTool(FunctionTool):
-    """Marker type for trusted tool registry infrastructure tools."""
-
-
 def build_tool_prefix_index(tools: list[FunctionTool]) -> str:
     """Build a compact prompt inventory of searchable tool-name prefixes.
 
@@ -449,7 +445,7 @@ def create_tool_registry_tools(
         del tool_id, arguments
         return "error: tool_invoke must be resolved by the AstrBot agent runner."
 
-    search_tool = ToolRegistryMetaTool(
+    search_tool = FunctionTool(
         name=TOOL_SEARCH_NAME,
         description=(
             "Search the hidden tool registry for capabilities. Results contain "
@@ -508,7 +504,7 @@ def create_tool_registry_tools(
         },
         handler=search_tools,
     )
-    invoke_tool = ToolRegistryMetaTool(
+    invoke_tool = FunctionTool(
         name=TOOL_INVOKE_NAME,
         description=(
             "Invoke a hidden tool returned by tool_search. Pass its exact tool_id "

@@ -737,20 +737,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             return None
         if self.tool_schema_mode == "search_registry":
             return self.req.func_tool
-        if self._responses_tools_search_enabled() and self._skill_like_raw_tool_set:
-            return self._skill_like_raw_tool_set
         return self.req.func_tool
-
-    def _responses_tools_search_enabled(self) -> bool:
-        """Check whether the active provider uses native Responses tool search.
-
-        Returns:
-            True when the provider enables tool search in Responses API mode.
-        """
-        return bool(
-            self.provider.provider_config.get("tools_search", False)
-            and self.provider.provider_config.get("api_mode") == "responses"
-        )
 
     def _simple_print_message_role(self, tag: str, messages: list):
         roles = [m.role for m in messages]
@@ -1012,10 +999,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
 
         # 如果有工具调用，还需处理工具调用
         if llm_resp.tools_call_name:
-            if (
-                self.tool_schema_mode == "skills_like"
-                and not self._responses_tools_search_enabled()
-            ):
+            if self.tool_schema_mode == "skills_like":
                 requery_resp, _ = await self._resolve_tool_exec(llm_resp)
                 if not requery_resp.tools_call_name:
                     llm_resp = requery_resp
@@ -1330,12 +1314,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 elif internal_tool is not None:
                     func_tool = internal_tool
                     available_tools = [internal_tool.name]
-                elif (
-                    self._responses_tools_search_enabled()
-                    and self._skill_like_raw_tool_set
-                ):
-                    func_tool = self._skill_like_raw_tool_set.get_tool(func_tool_name)
-                    available_tools = self._skill_like_raw_tool_set.names()
                 elif (
                     self.tool_schema_mode == "skills_like"
                     and self._skill_like_raw_tool_set
