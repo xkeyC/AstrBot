@@ -639,9 +639,20 @@ export default {
 
             this.saving = true;
             try {
+                // Persist the radio-button mode explicitly instead of relying on
+                // watcher timing or a stale tool list retained by the form.
+                const personaPayload = {
+                    ...this.personaForm,
+                    tools: this.toolSelectValue === '0'
+                        ? null
+                        : [...(this.personaForm.tools || [])],
+                    skills: this.skillSelectValue === '0'
+                        ? null
+                        : [...(this.personaForm.skills || [])]
+                };
                 const response = this.editingPersona
-                    ? await personaApi.update(this.personaForm.persona_id, this.personaForm)
-                    : await personaApi.create(this.personaForm);
+                    ? await personaApi.update(this.personaForm.persona_id, personaPayload)
+                    : await personaApi.create(personaPayload);
 
                 if (response.data.status === 'ok') {
                     this.$emit('saved', response.data.message || this.tm('messages.saveSuccess'));
