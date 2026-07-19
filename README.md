@@ -46,12 +46,13 @@ This fork intentionally differs from upstream AstrBot in a few areas:
 
 1. Chat model calls are forced through streaming internally, even when callers use the non-streaming chat API.
 2. OpenAI-compatible providers can opt into the OpenAI Responses API through the provider `api_mode` setting. The Responses path is streaming-only.
-3. Docker and git/wheel installs build and prefer the bundled dashboard from this repository, so local dashboard changes are used instead of an existing upstream `data/dist` with the same version.
-4. MCP server connection tests use the configured proxy settings where applicable.
-5. The dashboard persona manager supports cloning an existing persona.
-6. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
-7. Shipyard Neo auto-start mode propagates AstrBot's global proxy settings into the managed Bay container and recreates that container when the managed proxy environment changes, so new sandbox Python/Shell sessions inherit the updated proxy.
-8. Persona tool allowlists cover all exposed tools, including builtin tools, MCP tools, scheduled task tools, web search tools, local/sandbox computer tools, and subagent handoff tools. Tool calls that are not allowed by the active persona are rejected even if the LLM constructs them manually.
+3. OpenAI Responses API providers can enable the default-off `tools_search` setting. When enabled, only AstrBot builtin core tools are declared directly; plugin, MCP, and other tools are progressively disclosed through client-executed native `tool_search` calls. This setting has no effect in Chat Completions mode and requires model/service support for Responses Tool Search.
+4. Docker and git/wheel installs build and prefer the bundled dashboard from this repository, so local dashboard changes are used instead of an existing upstream `data/dist` with the same version.
+5. MCP server connection tests use the configured proxy settings where applicable.
+6. The dashboard persona manager supports cloning an existing persona.
+7. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
+8. Shipyard Neo auto-start mode propagates AstrBot's global proxy settings into the managed Bay container and recreates that container when the managed proxy environment changes, so new sandbox Python/Shell sessions inherit the updated proxy.
+9. Persona tool allowlists cover all exposed tools, including builtin tools, MCP tools, scheduled task tools, web search tools, local/sandbox computer tools, and subagent handoff tools. Tool calls that are not allowed by the active persona are rejected even if the LLM constructs them manually.
 
 These changes are maintained for this fork and may not match upstream behavior.
 

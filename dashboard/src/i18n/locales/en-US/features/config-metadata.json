@@ -1280,6 +1280,10 @@
         "description": "OpenAI API mode",
         "hint": "Use chat_completions for OpenAI-compatible providers. Use responses only for providers that support OpenAI Responses API; AstrBot sends Responses API requests in streaming mode only."
       },
+      "tools_search": {
+        "description": "Tools Search",
+        "hint": "Only applies in Responses API mode. When enabled, only AstrBot core tools are exposed directly; plugin, MCP, and other tools are progressively disclosed through tool_search. Confirm that the model and service support Tool Search before enabling it."
+      },
       "ollama_disable_thinking": {
         "description": "Disable thinking mode",
         "hint": "Close Ollama thinking mode."

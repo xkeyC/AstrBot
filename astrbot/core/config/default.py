@@ -1166,6 +1166,7 @@ CONFIG_METADATA_2 = {
                         "key": [],
                         "api_base": "https://api.openai.com/v1",
                         "api_mode": "chat_completions",
+                        "tools_search": False,
                         "timeout": 120,
                         "proxy": "",
                         "custom_headers": {},
@@ -2087,6 +2088,11 @@ CONFIG_METADATA_2 = {
                         "type": "string",
                         "options": ["chat_completions", "responses"],
                         "hint": "OpenAI 兼容服务请使用 chat_completions。仅在服务支持 OpenAI Responses API 时使用 responses；AstrBot 只会以流式模式发送 Responses API 请求。",
+                    },
+                    "tools_search": {
+                        "description": "Tools Search",
+                        "type": "bool",
+                        "hint": "仅在 Responses API 模式下生效。启用后只直接暴露 AstrBot 内置核心工具，插件、MCP 和其他工具通过 tool_search 按需渐进披露；使用前请确认模型与服务支持 Tool Search。",
                     },
                     "ollama_disable_thinking": {
                         "description": "关闭思考模式",

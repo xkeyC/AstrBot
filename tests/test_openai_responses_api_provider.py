@@ -1,10 +1,16 @@
+import json
 from types import SimpleNamespace
 
 import pytest
 
 import astrbot.core.message.components as Comp
+import astrbot.core.provider.sources.openai_source as openai_source_module
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
+from astrbot.core.provider.responses_tool_search import (
+    TOOL_SEARCH_HISTORY_MARKER_KEY,
+    TOOL_SEARCH_HISTORY_MARKER_VALUE,
+)
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 
 
@@ -413,6 +419,397 @@ def test_responses_api_converts_tool_history_to_response_items():
             "arguments": '{"q":"abc"}',
         },
         {"type": "function_call_output", "call_id": "call_1", "output": "result"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_tools_search_exposes_only_core_tools(monkeypatch):
+    class CoreFunctionTool(FunctionTool):
+        pass
+
+    core_tool = CoreFunctionTool(
+        name="core_tool",
+        description="Core operation",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    plugin_tool = FunctionTool(
+        name="plugin_lookup",
+        description="Look up plugin data",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        handler=None,
+    )
+    output_message = SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text="done")],
+    )
+    provider, fake_responses = _make_provider(
+        [_completed_event(output=[output_message])]
+    )
+    provider.provider_config["tools_search"] = True
+    monkeypatch.setattr(
+        openai_source_module,
+        "get_builtin_tool_name",
+        lambda tool_type: "core_tool" if tool_type is CoreFunctionTool else None,
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            ToolSet([core_tool, plugin_tool]),
+        )
+    ]
+
+    assert responses[-1].completion_text == "done"
+    assert fake_responses.payload["tools"] == [
+        {
+            "type": "function",
+            "name": "core_tool",
+            "description": "Core operation",
+            "parameters": {"type": "object", "properties": {}},
+            "strict": False,
+        },
+        {
+            "type": "tool_search",
+            "execution": "client",
+            "description": fake_responses.payload["tools"][1]["description"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query for deferred tools.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tools to return. Defaults to 8.",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_tools_search_call_returns_deferred_tool(monkeypatch):
+    plugin_tool = FunctionTool(
+        name="plugin_lookup",
+        description="Look up plugin data",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        handler=None,
+    )
+    search_item = SimpleNamespace(
+        type="tool_search_call",
+        call_id="search_1",
+        execution="client",
+        arguments={"query": "plugin lookup", "limit": 1},
+    )
+    provider, _ = _make_provider(
+        [
+            SimpleNamespace(type="response.output_item.done", item=search_item),
+            _completed_event(output=[search_item]),
+        ]
+    )
+    provider.provider_config["tools_search"] = True
+    monkeypatch.setattr(
+        openai_source_module,
+        "get_builtin_tool_name",
+        lambda _tool_type: None,
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            ToolSet([plugin_tool]),
+        )
+    ]
+
+    final = responses[-1]
+    assert final.tools_call_ids == ["search_1"]
+    assert final.tools_call_name == ["tool_search"]
+    assert final.tools_call_args == [{"query": "plugin lookup", "limit": 1}]
+    assert final.tools_call_extra_content == {
+        "search_1": {TOOL_SEARCH_HISTORY_MARKER_KEY: TOOL_SEARCH_HISTORY_MARKER_VALUE}
+    }
+    internal_tool = final.internal_tools["search_1"]
+    output = json.loads(
+        await internal_tool.handler(None, query="plugin lookup", limit=1)
+    )
+    assert output == {
+        "tools": [
+            {
+                "type": "function",
+                "name": "plugin_lookup",
+                "description": "Look up plugin data",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+                "strict": False,
+                "defer_loading": True,
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_responses_tools_search_does_not_trust_builtin_tool_name(monkeypatch):
+    class CoreFunctionTool(FunctionTool):
+        pass
+
+    plugin_tool = FunctionTool(
+        name="core_tool",
+        description="Plugin using a builtin tool name",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    output_message = SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text="done")],
+    )
+    provider, fake_responses = _make_provider(
+        [_completed_event(output=[output_message])]
+    )
+    provider.provider_config["tools_search"] = True
+    monkeypatch.setattr(
+        openai_source_module,
+        "get_builtin_tool_name",
+        lambda tool_type: "core_tool" if tool_type is CoreFunctionTool else None,
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            ToolSet([plugin_tool]),
+        )
+    ]
+
+    assert responses[-1].completion_text == "done"
+    assert [tool["type"] for tool in fake_responses.payload["tools"]] == ["tool_search"]
+
+
+@pytest.mark.asyncio
+async def test_responses_tools_search_does_not_capture_same_name_function(
+    monkeypatch,
+):
+    plugin_tool = FunctionTool(
+        name="tool_search",
+        description="An ordinary plugin function",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        handler=None,
+    )
+    function_item = SimpleNamespace(
+        type="function_call",
+        call_id="ordinary_search_1",
+        name="tool_search",
+        arguments='{"query":"calendar"}',
+    )
+    provider, _ = _make_provider(
+        [
+            SimpleNamespace(type="response.output_item.done", item=function_item),
+            _completed_event(output=[function_item]),
+        ]
+    )
+    provider.provider_config["tools_search"] = True
+    monkeypatch.setattr(
+        openai_source_module,
+        "get_builtin_tool_name",
+        lambda _tool_type: None,
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            ToolSet([plugin_tool]),
+        )
+    ]
+
+    final = responses[-1]
+    assert final.tools_call_name == ["tool_search"]
+    assert final.internal_tools == {}
+    assert final.tools_call_extra_content == {}
+
+
+@pytest.mark.asyncio
+async def test_responses_tools_search_is_scoped_to_each_response(monkeypatch):
+    first_tool = FunctionTool(
+        name="first_lookup",
+        description="Look up alpha data",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    second_tool = FunctionTool(
+        name="second_lookup",
+        description="Look up beta data",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    first_search_item = SimpleNamespace(
+        type="tool_search_call",
+        call_id="search_1",
+        execution="client",
+        arguments={"query": "alpha", "limit": 1},
+    )
+    provider, fake_responses = _make_provider(
+        [
+            SimpleNamespace(type="response.output_item.done", item=first_search_item),
+            _completed_event(output=[first_search_item]),
+        ]
+    )
+    provider.provider_config["tools_search"] = True
+    monkeypatch.setattr(
+        openai_source_module,
+        "get_builtin_tool_name",
+        lambda _tool_type: None,
+    )
+
+    first_responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            ToolSet([first_tool]),
+        )
+    ]
+    first_final = first_responses[-1]
+
+    second_search_item = SimpleNamespace(
+        type="tool_search_call",
+        call_id="search_1",
+        execution="client",
+        arguments={"query": "beta", "limit": 1},
+    )
+    fake_responses.events = [
+        SimpleNamespace(type="response.output_item.done", item=second_search_item),
+        _completed_event(output=[second_search_item]),
+    ]
+    second_responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            ToolSet([second_tool]),
+        )
+    ]
+    second_final = second_responses[-1]
+
+    first_output = json.loads(
+        await first_final.internal_tools["search_1"].handler(
+            None, query="alpha", limit=1
+        )
+    )
+    second_output = json.loads(
+        await second_final.internal_tools["search_1"].handler(
+            None, query="beta", limit=1
+        )
+    )
+    assert [tool["name"] for tool in first_output["tools"]] == ["first_lookup"]
+    assert [tool["name"] for tool in second_output["tools"]] == ["second_lookup"]
+
+
+def test_responses_api_converts_tool_search_history_to_native_items():
+    provider, _ = _make_provider([])
+
+    converted = provider._convert_messages_to_responses_input(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "search_1",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_search",
+                            "arguments": '{"query":"calendar"}',
+                        },
+                        "extra_content": {
+                            TOOL_SEARCH_HISTORY_MARKER_KEY: TOOL_SEARCH_HISTORY_MARKER_VALUE
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "search_1",
+                "content": '{"tools":[{"type":"function","name":"calendar"}]}',
+            },
+        ]
+    )
+
+    assert converted == [
+        {
+            "type": "tool_search_call",
+            "call_id": "search_1",
+            "execution": "client",
+            "arguments": {"query": "calendar"},
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "search_1",
+            "status": "completed",
+            "execution": "client",
+            "tools": [{"type": "function", "name": "calendar"}],
+        },
+    ]
+
+
+def test_responses_api_keeps_unmarked_tool_search_as_function_call():
+    provider, _ = _make_provider([])
+
+    converted = provider._convert_messages_to_responses_input(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "ordinary_search_1",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_search",
+                            "arguments": '{"query":"calendar"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "ordinary_search_1",
+                "content": "ordinary result",
+            },
+        ]
+    )
+
+    assert converted == [
+        {
+            "type": "function_call",
+            "call_id": "ordinary_search_1",
+            "name": "tool_search",
+            "arguments": '{"query":"calendar"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "ordinary_search_1",
+            "output": "ordinary result",
+        },
     ]
 
 

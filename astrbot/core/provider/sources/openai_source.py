@@ -30,6 +30,14 @@ from astrbot.core.agent.tool import ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import LLMResponse, TokenUsage, ToolCallsResult
+from astrbot.core.provider.responses_tool_search import (
+    TOOL_SEARCH_HISTORY_MARKER_KEY,
+    TOOL_SEARCH_HISTORY_MARKER_VALUE,
+    TOOL_SEARCH_NAME,
+    create_responses_tool_search,
+    to_responses_function_schema,
+)
+from astrbot.core.tools.registry import get_builtin_tool_name
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -772,17 +780,49 @@ class ProviderOpenAIOfficial(Provider):
         return converted or ""
 
     def _convert_messages_to_responses_input(self, messages: list[dict]) -> list[dict]:
+        tool_search_call_ids = {
+            tool_call.get("id", "")
+            for message in messages
+            if message.get("role") == "assistant"
+            for tool_call in message.get("tool_calls", []) or []
+            if (tool_call.get("extra_content") or {}).get(
+                TOOL_SEARCH_HISTORY_MARKER_KEY
+            )
+            == TOOL_SEARCH_HISTORY_MARKER_VALUE
+        }
         responses_input = []
         for message in messages:
             role = message.get("role")
             if role == "tool":
-                responses_input.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": message.get("tool_call_id", ""),
-                        "output": self._normalize_content(message.get("content", "")),
-                    }
-                )
+                call_id = message.get("tool_call_id", "")
+                output = self._normalize_content(message.get("content", ""))
+                if call_id in tool_search_call_ids:
+                    try:
+                        parsed_output = json.loads(output)
+                    except (TypeError, json.JSONDecodeError):
+                        parsed_output = {}
+                    tools = (
+                        parsed_output.get("tools", [])
+                        if isinstance(parsed_output, dict)
+                        else []
+                    )
+                    responses_input.append(
+                        {
+                            "type": "tool_search_output",
+                            "call_id": call_id,
+                            "status": "completed",
+                            "execution": "client",
+                            "tools": tools if isinstance(tools, list) else [],
+                        }
+                    )
+                else:
+                    responses_input.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": output,
+                        }
+                    )
                 continue
 
             if role == "assistant" and message.get("tool_calls"):
@@ -791,14 +831,32 @@ class ProviderOpenAIOfficial(Provider):
                     responses_input.append({"role": "assistant", "content": content})
                 for tool_call in message.get("tool_calls", []):
                     function = tool_call.get("function", {})
-                    responses_input.append(
-                        {
-                            "type": "function_call",
-                            "call_id": tool_call.get("id", ""),
-                            "name": function.get("name", ""),
-                            "arguments": function.get("arguments") or "{}",
-                        }
-                    )
+                    if tool_call.get("id", "") in tool_search_call_ids:
+                        arguments = function.get("arguments") or "{}"
+                        if isinstance(arguments, str):
+                            try:
+                                arguments = json.loads(arguments)
+                            except json.JSONDecodeError:
+                                arguments = {}
+                        responses_input.append(
+                            {
+                                "type": "tool_search_call",
+                                "call_id": tool_call.get("id", ""),
+                                "execution": "client",
+                                "arguments": (
+                                    arguments if isinstance(arguments, dict) else {}
+                                ),
+                            }
+                        )
+                    else:
+                        responses_input.append(
+                            {
+                                "type": "function_call",
+                                "call_id": tool_call.get("id", ""),
+                                "name": function.get("name", ""),
+                                "arguments": function.get("arguments") or "{}",
+                            }
+                        )
                 continue
 
             if role in ("system", "user", "assistant", "developer"):
@@ -818,16 +876,36 @@ class ProviderOpenAIOfficial(Provider):
         payloads: dict,
         tools: ToolSet | None,
     ) -> AsyncGenerator[LLMResponse, None]:
+        tool_search_tool = None
         if tools:
-            tool_list = tools.openai_schema()
+            if self.provider_config.get("tools_search", False):
+                direct_tools = []
+                deferred_tools = []
+                for tool in tools:
+                    if get_builtin_tool_name(type(tool)) is not None:
+                        direct_tools.append(to_responses_function_schema(tool))
+                    else:
+                        deferred_tools.append(tool)
+                if deferred_tools:
+                    tool_search_tool, tool_search_schema = create_responses_tool_search(
+                        deferred_tools
+                    )
+                    direct_tools.append(tool_search_schema)
+                tool_list = direct_tools
+            else:
+                tool_list = [
+                    self._convert_openai_tool_to_responses(tool)
+                    for tool in tools.openai_schema()
+                ]
             if tool_list:
-                payloads["tools"] = self._order_responses_tools(
-                    [self._convert_openai_tool_to_responses(tool) for tool in tool_list]
-                )
+                payloads["tools"] = self._order_responses_tools(tool_list)
                 payloads["tool_choice"] = payloads.get("tool_choice", "auto")
                 logger.debug(
                     "OpenAI Responses API tools: %s",
-                    [tool.get("name", "") for tool in payloads["tools"]],
+                    [
+                        tool.get("name", tool.get("type", ""))
+                        for tool in payloads["tools"]
+                    ],
                 )
 
         self._sanitize_assistant_messages(payloads)
@@ -910,6 +988,17 @@ class ProviderOpenAIOfficial(Provider):
                         name=getattr(item, "name", ""),
                         arguments=arguments if arguments is not None else None,
                     )
+                elif item_type == "tool_search_call":
+                    arguments = self._response_field(item, "arguments") or {}
+                    self._merge_response_tool_call(
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                        item_id=self._response_field(item, "id"),
+                        call_id=self._response_field(item, "call_id"),
+                        name=TOOL_SEARCH_NAME,
+                        arguments=json.dumps(arguments, ensure_ascii=False),
+                        internal_tool_name=TOOL_SEARCH_NAME,
+                    )
                 elif item_type == "image_generation_call":
                     image = self._image_output_to_component(
                         self._response_field(item, "result")
@@ -918,7 +1007,8 @@ class ProviderOpenAIOfficial(Provider):
                         output_images.append(image)
             elif event_type == "response.output_item.added":
                 item = getattr(event, "item", None)
-                if getattr(item, "type", None) == "function_call":
+                item_type = self._response_field(item, "type")
+                if item_type == "function_call":
                     arguments = getattr(item, "arguments", None)
                     self._merge_response_tool_call(
                         tool_calls_by_id,
@@ -927,6 +1017,17 @@ class ProviderOpenAIOfficial(Provider):
                         call_id=getattr(item, "call_id", None),
                         name=getattr(item, "name", ""),
                         arguments=arguments if arguments is not None else None,
+                    )
+                elif item_type == "tool_search_call":
+                    arguments = self._response_field(item, "arguments") or {}
+                    self._merge_response_tool_call(
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                        item_id=self._response_field(item, "id"),
+                        call_id=self._response_field(item, "call_id"),
+                        name=TOOL_SEARCH_NAME,
+                        arguments=json.dumps(arguments, ensure_ascii=False),
+                        internal_tool_name=TOOL_SEARCH_NAME,
                     )
             elif event_type == "response.function_call_arguments.delta":
                 item_id = getattr(event, "item_id", None)
@@ -996,6 +1097,15 @@ class ProviderOpenAIOfficial(Provider):
                 )
                 final_response.tools_call_args.append({})
 
+            if (
+                call.get("internal_tool_name") == TOOL_SEARCH_NAME
+                and tool_search_tool is not None
+            ):
+                final_response.internal_tools[call_id] = tool_search_tool
+                final_response.tools_call_extra_content[call_id] = {
+                    TOOL_SEARCH_HISTORY_MARKER_KEY: TOOL_SEARCH_HISTORY_MARKER_VALUE
+                }
+
         if (
             not final_text
             and not output_images
@@ -1015,7 +1125,20 @@ class ProviderOpenAIOfficial(Provider):
         tool_call_id_aliases: dict[str, str],
     ) -> None:
         for item in getattr(response, "output", []) or []:
-            if getattr(item, "type", None) != "function_call":
+            item_type = self._response_field(item, "type")
+            if item_type == "tool_search_call":
+                arguments = self._response_field(item, "arguments") or {}
+                self._merge_response_tool_call(
+                    tool_calls_by_id,
+                    tool_call_id_aliases,
+                    item_id=self._response_field(item, "id"),
+                    call_id=self._response_field(item, "call_id"),
+                    name=TOOL_SEARCH_NAME,
+                    arguments=json.dumps(arguments, ensure_ascii=False),
+                    internal_tool_name=TOOL_SEARCH_NAME,
+                )
+                continue
+            if item_type != "function_call":
                 continue
             arguments = getattr(item, "arguments", None)
             self._merge_response_tool_call(
@@ -1036,6 +1159,7 @@ class ProviderOpenAIOfficial(Provider):
         call_id: str | None,
         name: str,
         arguments: str | None,
+        internal_tool_name: str | None = None,
     ) -> None:
         stable_id = call_id or (tool_call_id_aliases.get(item_id) if item_id else None)
         stable_id = stable_id or item_id
@@ -1055,6 +1179,8 @@ class ProviderOpenAIOfficial(Provider):
             tool_call["name"] = name
         if arguments is not None:
             tool_call["arguments"] = arguments
+        if internal_tool_name is not None:
+            tool_call["internal_tool_name"] = internal_tool_name
 
     def _collect_response_output_text(self, response: Any) -> str:
         text_parts = []

@@ -611,7 +611,20 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 self.provider,
             )
             return None
+        if self._responses_tools_search_enabled() and self._skill_like_raw_tool_set:
+            return self._skill_like_raw_tool_set
         return self.req.func_tool
+
+    def _responses_tools_search_enabled(self) -> bool:
+        """Check whether the active provider uses native Responses tool search.
+
+        Returns:
+            True when the provider enables tool search in Responses API mode.
+        """
+        return bool(
+            self.provider.provider_config.get("tools_search", False)
+            and self.provider.provider_config.get("api_mode") == "responses"
+        )
 
     def _simple_print_message_role(self, tag: str, messages: list):
         roles = [m.role for m in messages]
@@ -873,7 +886,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
 
         # 如果有工具调用，还需处理工具调用
         if llm_resp.tools_call_name:
-            if self.tool_schema_mode == "skills_like":
+            if (
+                self.tool_schema_mode == "skills_like"
+                and not self._responses_tools_search_enabled()
+            ):
                 requery_resp, _ = await self._resolve_tool_exec(llm_resp)
                 if not requery_resp.tools_call_name:
                     llm_resp = requery_resp
@@ -1109,7 +1125,11 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
             )
             try:
-                if _is_persona_denied_tool_call(func_tool_name, None):
+                internal_tool = llm_response.internal_tools.get(func_tool_id)
+                is_internal_tool = internal_tool is not None
+                if not is_internal_tool and _is_persona_denied_tool_call(
+                    func_tool_name, None
+                ):
                     logger.warning("拒绝未被当前人格允许的工具调用: %s", func_tool_name)
                     _append_tool_call_result(
                         func_tool_id,
@@ -1117,10 +1137,19 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     )
                     continue
 
-                if not req.func_tool:
+                if not req.func_tool and not is_internal_tool:
                     return
 
-                if (
+                if internal_tool is not None:
+                    func_tool = internal_tool
+                    available_tools = [internal_tool.name]
+                elif (
+                    self._responses_tools_search_enabled()
+                    and self._skill_like_raw_tool_set
+                ):
+                    func_tool = self._skill_like_raw_tool_set.get_tool(func_tool_name)
+                    available_tools = self._skill_like_raw_tool_set.names()
+                elif (
                     self.tool_schema_mode == "skills_like"
                     and self._skill_like_raw_tool_set
                 ):
@@ -1137,7 +1166,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     func_tool_args = {}
                 logger.info(f"使用工具：{func_tool_name}，参数：{func_tool_args}")
 
-                if _is_persona_denied_tool_call(func_tool_name, func_tool):
+                if not is_internal_tool and _is_persona_denied_tool_call(
+                    func_tool_name, func_tool
+                ):
                     logger.warning("拒绝未被当前人格允许的工具调用: %s", func_tool_name)
                     _append_tool_call_result(
                         func_tool_id,

@@ -269,6 +269,50 @@ class MockToolCallProvider(MockProvider):
         )
 
 
+class InternalToolSearchProvider(MockProvider):
+    def __init__(self):
+        super().__init__()
+        self.provider_config.update({"api_mode": "responses", "tools_search": True})
+        self.internal_tool = FunctionTool(
+            name="tool_search",
+            description="Search deferred tools",
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            handler=AsyncMock(return_value='{"tools":[]}'),
+        )
+
+    async def text_chat(self, **kwargs) -> LLMResponse:
+        self.call_count += 1
+        if self.call_count == 1:
+            return LLMResponse(
+                role="tool",
+                tools_call_name=["tool_search"],
+                tools_call_args=[{"query": "calendar"}],
+                tools_call_ids=["search_1"],
+                internal_tools={"search_1": self.internal_tool},
+                usage=TokenUsage(input_other=10, output=5),
+            )
+        return LLMResponse(
+            role="assistant",
+            completion_text="final",
+            usage=TokenUsage(input_other=10, output=5),
+        )
+
+
+class RecordingToolExecutor(MockToolExecutor):
+    def __init__(self):
+        self.tool_names = []
+        self.tools = []
+
+    def execute(self, tool, run_context, **tool_args):
+        self.tool_names.append(tool.name)
+        self.tools.append(tool)
+        return super().execute(tool, run_context, **tool_args)
+
+
 class SingleToolThenFinalProvider(MockProvider):
     def __init__(self, tool_name: str, tool_args: dict[str, str] | None = None):
         super().__init__()
@@ -484,6 +528,82 @@ def runner():
 
 def _make_large_tool_result_text() -> str:
     return "x" * 100000
+
+
+@pytest.mark.asyncio
+async def test_provider_internal_tool_search_is_executed(
+    runner, provider_request, mock_hooks
+):
+    provider = InternalToolSearchProvider()
+    ordinary_tool_search_handler = AsyncMock(return_value="ordinary result")
+    ordinary_tool_search = FunctionTool(
+        name="tool_search",
+        description="An ordinary same-name plugin tool",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        handler=ordinary_tool_search_handler,
+    )
+    provider_request.func_tool.add_tool(ordinary_tool_search)
+    executor = RecordingToolExecutor()
+    await runner.reset(
+        provider=provider,
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    responses = [response async for response in runner.step_until_done(3)]
+
+    assert responses
+    assert runner.done()
+    assert executor.tool_names == ["tool_search"]
+    assert executor.tools == [provider.internal_tool]
+    ordinary_tool_search_handler.assert_not_awaited()
+    assert provider.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ordinary_same_name_tool_search_is_executed_without_internal_marker(
+    runner, mock_hooks
+):
+    ordinary_tool_search = FunctionTool(
+        name="tool_search",
+        description="An ordinary same-name plugin tool",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        handler=AsyncMock(return_value="ordinary result"),
+    )
+    request = ProviderRequest(
+        prompt="search",
+        func_tool=ToolSet([ordinary_tool_search]),
+        contexts=[],
+    )
+    provider = SingleToolThenFinalProvider("tool_search", {"query": "calendar"})
+    provider.provider_config.update({"api_mode": "responses", "tools_search": True})
+    executor = RecordingToolExecutor()
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    responses = [response async for response in runner.step_until_done(3)]
+
+    assert responses
+    assert runner.done()
+    assert executor.tools == [ordinary_tool_search]
+    assert provider.call_count == 2
 
 
 @pytest.mark.asyncio
