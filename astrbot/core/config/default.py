@@ -3807,9 +3807,13 @@ CONFIG_METADATA_3 = {
                     "provider_settings.tool_schema_mode": {
                         "description": "工具调用模式",
                         "type": "string",
-                        "options": ["skills_like", "full"],
-                        "labels": ["Skills-like（两阶段）", "Full（完整参数）"],
-                        "hint": "skills-like 先下发工具名称与描述，再下发参数；full 一次性下发完整参数。",
+                        "options": ["search_registry", "skills_like", "full"],
+                        "labels": [
+                            "Search Registry（工具注册表）",
+                            "Skills-like（两阶段）",
+                            "Full（完整参数）",
+                        ],
+                        "hint": "search_registry 只暴露核心工具和搜索/执行入口；skills-like 先下发工具名称与描述，再下发参数；full 一次性下发完整参数。",
                         "condition": {
                             "provider_settings.agent_runner_type": "local",
                         },

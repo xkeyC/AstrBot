@@ -27,6 +27,7 @@ from astrbot.core.astr_main_agent_resources import (
     LLM_SAFETY_MODE_SYSTEM_PROMPT,
     SANDBOX_MODE_PROMPT,
     TOOL_CALL_PROMPT,
+    TOOL_CALL_PROMPT_SEARCH_REGISTRY_MODE,
     TOOL_CALL_PROMPT_SKILLS_LIKE_MODE,
 )
 from astrbot.core.conversation_mgr import Conversation
@@ -161,7 +162,7 @@ class MainAgentBuildConfig:
     a timeout error as a tool result will be returned.
     """
     tool_schema_mode: str = "full"
-    """The tool schema mode, can be 'full' or 'skills-like'."""
+    """The tool schema mode: full, skills_like, or search_registry."""
     provider_wake_prefix: str = ""
     """The wake prefix for the provider. If the user message does not start with this prefix,
     the main agent will not be triggered."""
@@ -1664,11 +1665,11 @@ async def build_main_agent(
         asyncio.create_task(_handle_webchat(event, req, provider))
 
     if req.func_tool and req.func_tool.tools:
-        tool_prompt = (
-            TOOL_CALL_PROMPT
-            if config.tool_schema_mode == "full"
-            else TOOL_CALL_PROMPT_SKILLS_LIKE_MODE
-        )
+        tool_prompt = {
+            "full": TOOL_CALL_PROMPT,
+            "skills_like": TOOL_CALL_PROMPT_SKILLS_LIKE_MODE,
+            "search_registry": TOOL_CALL_PROMPT_SEARCH_REGISTRY_MODE,
+        }.get(config.tool_schema_mode, TOOL_CALL_PROMPT)
 
         if config.computer_use_runtime == "local":
             workspace_root = await _get_workspace_path_for_umo(

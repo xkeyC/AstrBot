@@ -6,6 +6,7 @@ import pytest
 import astrbot.core.message.components as Comp
 import astrbot.core.provider.sources.openai_source as openai_source_module
 from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.agent.tool_registry import create_tool_registry_tools
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.provider.responses_tool_search import (
     TOOL_SEARCH_HISTORY_MARKER_KEY,
@@ -495,6 +496,80 @@ async def test_responses_tools_search_exposes_only_core_tools(monkeypatch):
             },
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_responses_search_registry_uses_stable_function_meta_tools():
+    hidden_tool = FunctionTool(
+        name="qq_group_members",
+        description="Get QQ group members.",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    registry_tools = create_tool_registry_tools([hidden_tool])
+    output_message = SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text="done")],
+    )
+    provider, fake_responses = _make_provider(
+        [_completed_event(output=[output_message])]
+    )
+    provider.provider_config["tools_search"] = True
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            registry_tools,
+        )
+    ]
+
+    assert responses[-1].completion_text == "done"
+    assert [tool["name"] for tool in fake_responses.payload["tools"]] == [
+        "tool_search",
+        "tool_invoke",
+    ]
+    assert {tool["type"] for tool in fake_responses.payload["tools"]} == {"function"}
+
+
+@pytest.mark.asyncio
+async def test_ordinary_tool_invoke_name_does_not_disable_native_search(monkeypatch):
+    ordinary_tool_invoke = FunctionTool(
+        name="tool_invoke",
+        description="An ordinary plugin tool.",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    plugin_tool = FunctionTool(
+        name="plugin_lookup",
+        description="Look up plugin data.",
+        parameters={"type": "object", "properties": {}},
+        handler=None,
+    )
+    output_message = SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text="done")],
+    )
+    provider, fake_responses = _make_provider(
+        [_completed_event(output=[output_message])]
+    )
+    provider.provider_config["tools_search"] = True
+    monkeypatch.setattr(
+        openai_source_module,
+        "get_builtin_tool_name",
+        lambda _tool_type: None,
+    )
+
+    responses = [
+        response
+        async for response in provider._query_responses_stream(
+            {"model": "gpt-4.1", "messages": [{"role": "user", "content": "hi"}]},
+            ToolSet([ordinary_tool_invoke, plugin_tool]),
+        )
+    ]
+
+    assert responses[-1].completion_text == "done"
+    assert [tool["type"] for tool in fake_responses.payload["tools"]] == ["tool_search"]
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ from astrbot.core.agent.message import (
     TextPart,
 )
 from astrbot.core.agent.tool import ToolSet
+from astrbot.core.agent.tool_registry import ToolRegistryMetaTool
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import LLMResponse, TokenUsage, ToolCallsResult
@@ -878,7 +879,11 @@ class ProviderOpenAIOfficial(Provider):
     ) -> AsyncGenerator[LLMResponse, None]:
         tool_search_tool = None
         if tools:
-            if self.provider_config.get("tools_search", False):
+            use_native_tool_search = bool(
+                self.provider_config.get("tools_search", False)
+                and not any(isinstance(tool, ToolRegistryMetaTool) for tool in tools)
+            )
+            if use_native_tool_search:
                 direct_tools = []
                 deferred_tools = []
                 for tool in tools:

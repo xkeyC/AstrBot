@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -306,11 +307,29 @@ class RecordingToolExecutor(MockToolExecutor):
     def __init__(self):
         self.tool_names = []
         self.tools = []
+        self.tool_args = []
 
     def execute(self, tool, run_context, **tool_args):
         self.tool_names.append(tool.name)
         self.tools.append(tool)
+        self.tool_args.append(tool_args)
         return super().execute(tool, run_context, **tool_args)
+
+
+class HandlerToolExecutor:
+    """Execute local async handlers without requiring a full AstrBot event."""
+
+    @staticmethod
+    def execute(tool, run_context, **tool_args):
+        del run_context
+
+        async def generator():
+            from mcp.types import CallToolResult, TextContent
+
+            result = await tool.handler(None, **tool_args)
+            yield CallToolResult(content=[TextContent(type="text", text=str(result))])
+
+        return generator()
 
 
 class SingleToolThenFinalProvider(MockProvider):
@@ -335,6 +354,26 @@ class SingleToolThenFinalProvider(MockProvider):
             tools_call_name=[self.tool_name],
             tools_call_args=[self.tool_args],
             tools_call_ids=["call_large_result"],
+            usage=TokenUsage(input_other=10, output=5),
+        )
+
+
+class ParallelSearchThenFinalProvider(MockProvider):
+    async def text_chat(self, **kwargs) -> LLMResponse:
+        self.call_count += 1
+        if self.call_count > 1:
+            return LLMResponse(
+                role="assistant",
+                completion_text="final",
+                usage=TokenUsage(input_other=10, output=5),
+            )
+        search_args = {"index": "qq_", "keywords": [], "limit": 1}
+        return LLMResponse(
+            role="assistant",
+            completion_text="",
+            tools_call_name=["tool_search", "tool_search"],
+            tools_call_args=[search_args, search_args],
+            tools_call_ids=["search_1", "search_2"],
             usage=TokenUsage(input_other=10, output=5),
         )
 
@@ -2000,6 +2039,510 @@ async def test_persona_denied_tool_call_is_rejected(runner, mock_hooks):
     assert "Permission denied" in tool_result
     assert "blocked_tool" in tool_result
     assert mock_hooks.tool_start_called is False
+
+
+@pytest.mark.asyncio
+async def test_search_registry_invokes_hidden_tool_through_runner(runner, mock_hooks):
+    hidden_tool = FunctionTool(
+        name="qq_group_members",
+        description="Get QQ group members.",
+        parameters={
+            "type": "object",
+            "properties": {"group_id": {"type": "string"}},
+            "required": ["group_id"],
+            "additionalProperties": False,
+        },
+        handler=AsyncMock(),
+    )
+    request = ProviderRequest(
+        prompt="list members",
+        func_tool=ToolSet(tools=[hidden_tool]),
+        contexts=[],
+    )
+    provider = SingleToolThenFinalProvider(
+        "tool_invoke",
+        {
+            "tool_id": "qq_group_members",
+            "arguments": {"group_id": "123"},
+        },
+    )
+    executor = RecordingToolExecutor()
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+
+    assert request.func_tool.names() == ["tool_search", "tool_invoke"]
+    assert "- `qq_` (1 tool)" in request.system_prompt
+
+    responses = [response async for response in runner.step_until_done(3)]
+
+    assert responses
+    assert executor.tool_names == ["qq_group_members"]
+    assert executor.tool_args == [{"group_id": "123"}]
+    assert mock_hooks.tool_start_called is True
+    assert mock_hooks.tool_end_called is True
+    tool_result = str(request.tool_calls_result[0].tool_calls_result[0].content)
+    assert '"tool_id": "qq_group_members"' in tool_result
+    assert '"result": "工具执行结果"' in tool_result
+
+
+@pytest.mark.asyncio
+async def test_search_registry_deduplicates_only_live_context_results(
+    runner, mock_hooks
+):
+    hidden_tools = [
+        FunctionTool(
+            name="qq_file",
+            description="Manage QQ files.",
+            parameters={"type": "object", "properties": {}},
+            handler=AsyncMock(),
+        ),
+        FunctionTool(
+            name="qq_group_members",
+            description="Get QQ group members.",
+            parameters={"type": "object", "properties": {}},
+            handler=AsyncMock(),
+        ),
+    ]
+    request = ProviderRequest(
+        prompt="search tools",
+        func_tool=ToolSet(tools=hidden_tools),
+        contexts=[],
+    )
+
+    await runner.reset(
+        provider=MockProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=MockToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+    search_tool = request.func_tool.get_tool("tool_search")
+    first_page = json.loads(
+        await search_tool.handler(None, index="qq_", keywords=[], limit=1)
+    )
+
+    assert [tool["tool_id"] for tool in first_page["tools"]] == ["qq_file"]
+    assert first_page["has_more"] is True
+    assert first_page["next_offset"] == 0
+    assert first_page["pagination_mode"] == "live_context_dedup"
+
+    runner.run_context.messages.extend(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "search_1",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_search",
+                            "arguments": '{"index":"qq_","keywords":[]}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "search_1",
+                "content": json.dumps(
+                    {"tools": [{"tool_id": "qq_file"}]},
+                    ensure_ascii=False,
+                )
+                + "\n\n[SYSTEM NOTICE: follow-up merged]",
+            },
+        ]
+    )
+
+    with_live_result = json.loads(
+        await search_tool.handler(None, index="qq_", keywords=[])
+    )
+
+    assert [tool["tool_id"] for tool in with_live_result["tools"]] == [
+        "qq_group_members"
+    ]
+    assert with_live_result["tools_in_context"] == 1
+    assert with_live_result["filtered_in_context"] == 1
+
+    runner.run_context.messages = []
+    after_compression = json.loads(
+        await search_tool.handler(None, index="qq_", keywords=[])
+    )
+
+    assert [tool["tool_id"] for tool in after_compression["tools"]] == [
+        "qq_file",
+        "qq_group_members",
+    ]
+    assert after_compression["tools_in_context"] == 0
+    assert after_compression["filtered_in_context"] == 0
+
+
+@pytest.mark.asyncio
+async def test_search_registry_releases_results_removed_during_step_compression(
+    runner, mock_hooks
+):
+    hidden_tools = [
+        FunctionTool(
+            name="qq_file",
+            description="Manage QQ files.",
+            parameters={"type": "object", "properties": {}},
+            handler=AsyncMock(),
+        ),
+        FunctionTool(
+            name="qq_group_members",
+            description="Get QQ group members.",
+            parameters={"type": "object", "properties": {}},
+            handler=AsyncMock(),
+        ),
+    ]
+    request = ProviderRequest(
+        prompt="search tools",
+        func_tool=ToolSet(tools=hidden_tools),
+        contexts=[],
+    )
+
+    await runner.reset(
+        provider=SingleToolThenFinalProvider(
+            "tool_search",
+            {"index": "qq_", "keywords": [], "limit": 1},
+        ),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=HandlerToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+    runner.run_context.messages.extend(
+        [
+            Message.model_validate(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "old_search",
+                            "type": "function",
+                            "function": {
+                                "name": "tool_search",
+                                "arguments": '{"index":"qq_","keywords":[]}',
+                            },
+                        }
+                    ],
+                }
+            ),
+            Message(
+                role="tool",
+                tool_call_id="old_search",
+                content=json.dumps({"tools": [{"tool_id": "qq_file"}]}),
+            ),
+        ]
+    )
+
+    async def compress_old_tool_messages(messages, trusted_token_usage=0):
+        del trusted_token_usage
+        return [
+            message for message in messages if message.role not in {"assistant", "tool"}
+        ]
+
+    runner.request_context_manager.process = compress_old_tool_messages
+
+    async for _ in runner.step():
+        pass
+
+    search_output = json.loads(
+        str(request.tool_calls_result[0].tool_calls_result[0].content)
+    )
+    assert search_output["tools"][0]["tool_id"] == "qq_file"
+    assert search_output["tools_in_context"] == 0
+    assert search_output["filtered_in_context"] == 0
+
+
+@pytest.mark.asyncio
+async def test_search_registry_deduplicates_parallel_search_calls(runner, mock_hooks):
+    hidden_tools = [
+        FunctionTool(
+            name="qq_file",
+            description="Manage QQ files.",
+            parameters={"type": "object", "properties": {}},
+            handler=AsyncMock(),
+        ),
+        FunctionTool(
+            name="qq_group_members",
+            description="Get QQ group members.",
+            parameters={"type": "object", "properties": {}},
+            handler=AsyncMock(),
+        ),
+    ]
+    request = ProviderRequest(
+        prompt="search tools",
+        func_tool=ToolSet(tools=hidden_tools),
+        contexts=[],
+    )
+
+    await runner.reset(
+        provider=ParallelSearchThenFinalProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=HandlerToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+    responses = [response async for response in runner.step_until_done(3)]
+
+    assert responses
+    first_batch = request.tool_calls_result[0].tool_calls_result
+    search_outputs = [json.loads(str(result.content)) for result in first_batch]
+    assert [output["tools"][0]["tool_id"] for output in search_outputs] == [
+        "qq_file",
+        "qq_group_members",
+    ]
+    assert search_outputs[1]["tools_in_context"] == 1
+    assert search_outputs[1]["filtered_in_context"] == 1
+    assert runner._tool_registry_pending_ids == set()
+
+
+@pytest.mark.asyncio
+async def test_search_registry_rejects_invalid_target_arguments(runner, mock_hooks):
+    hidden_tool = FunctionTool(
+        name="qq_group_members",
+        description="Get QQ group members.",
+        parameters={
+            "type": "object",
+            "properties": {"group_id": {"type": "string"}},
+            "required": ["group_id"],
+            "additionalProperties": False,
+        },
+        handler=AsyncMock(),
+    )
+    request = ProviderRequest(
+        prompt="list members",
+        func_tool=ToolSet(tools=[hidden_tool]),
+        contexts=[],
+    )
+    provider = SingleToolThenFinalProvider(
+        "tool_invoke",
+        {"tool_id": "qq_group_members", "arguments": {}},
+    )
+    executor = RecordingToolExecutor()
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+    async for _ in runner.step():
+        pass
+
+    assert executor.tool_names == []
+    assert request.tool_calls_result is not None
+    tool_result = str(request.tool_calls_result[0].tool_calls_result[0].content)
+    assert "Invalid arguments for tool qq_group_members" in tool_result
+    assert "group_id" in tool_result
+    assert mock_hooks.tool_start_called is False
+
+
+@pytest.mark.asyncio
+async def test_search_registry_filters_persona_scope_before_search(runner, mock_hooks):
+    event = MockEvent("test:FriendMessage:registry_denied", "u1")
+    event.set_extra("_persona_allowed_tools", {"allowed_tool"})
+    run_context = ContextWrapper(context=SimpleNamespace(event=event, context=None))
+    hidden_tool = FunctionTool(
+        name="qq_group_members",
+        description="Get QQ group members.",
+        parameters={"type": "object", "properties": {}},
+        handler=AsyncMock(),
+    )
+    request = ProviderRequest(
+        prompt="list members",
+        func_tool=ToolSet(tools=[hidden_tool]),
+        contexts=[],
+    )
+    provider = SingleToolThenFinalProvider(
+        "tool_invoke",
+        {"tool_id": "qq_group_members", "arguments": {}},
+    )
+    executor = RecordingToolExecutor()
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=run_context,
+        tool_executor=executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+    search_tool = request.func_tool.get_tool("tool_search")
+    search_output = json.loads(await search_tool.handler(None, index="*", keywords=[]))
+
+    assert search_output["tools"] == []
+    assert "qq_" not in request.system_prompt
+
+    async for _ in runner.step():
+        pass
+
+    assert executor.tool_names == []
+    tool_result = str(request.tool_calls_result[0].tool_calls_result[0].content)
+    assert "not found in the current tool registry" in tool_result
+
+
+@pytest.mark.asyncio
+async def test_search_registry_revalidates_persona_scope_before_invoke(
+    runner, mock_hooks
+):
+    event = MockEvent("test:FriendMessage:registry_changed", "u1")
+    event.set_extra("_persona_allowed_tools", {"qq_group_members"})
+    run_context = ContextWrapper(context=SimpleNamespace(event=event, context=None))
+    hidden_tool = FunctionTool(
+        name="qq_group_members",
+        description="Get QQ group members.",
+        parameters={"type": "object", "properties": {}},
+        handler=AsyncMock(),
+    )
+    request = ProviderRequest(
+        prompt="list members",
+        func_tool=ToolSet(tools=[hidden_tool]),
+        contexts=[],
+    )
+    provider = SingleToolThenFinalProvider(
+        "tool_invoke",
+        {"tool_id": "qq_group_members", "arguments": {}},
+    )
+    executor = RecordingToolExecutor()
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=run_context,
+        tool_executor=executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+    event.set_extra("_persona_allowed_tools", {"allowed_tool"})
+    async for _ in runner.step():
+        pass
+
+    assert executor.tool_names == []
+    tool_result = str(request.tool_calls_result[0].tool_calls_result[0].content)
+    assert "Permission denied" in tool_result
+    assert "qq_group_members" in tool_result
+
+
+@pytest.mark.asyncio
+async def test_search_registry_revalidates_active_state(runner, mock_hooks):
+    hidden_tool = FunctionTool(
+        name="qq_group_members",
+        description="Get QQ group members.",
+        parameters={"type": "object", "properties": {}},
+        handler=AsyncMock(),
+    )
+    request = ProviderRequest(
+        prompt="list members",
+        func_tool=ToolSet(tools=[hidden_tool]),
+        contexts=[],
+    )
+    provider = SingleToolThenFinalProvider(
+        "tool_invoke",
+        {"tool_id": "qq_group_members", "arguments": {}},
+    )
+    executor = RecordingToolExecutor()
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+    hidden_tool.active = False
+    async for _ in runner.step():
+        pass
+
+    assert executor.tool_names == []
+    tool_result = str(request.tool_calls_result[0].tool_calls_result[0].content)
+    assert "currently inactive" in tool_result
+
+
+@pytest.mark.asyncio
+async def test_search_registry_keeps_builtin_core_tools_direct(runner, mock_hooks):
+    from astrbot.core.tools.message_tools import SendMessageToUserTool
+
+    request = ProviderRequest(
+        prompt="hello",
+        func_tool=ToolSet(
+            tools=[
+                SendMessageToUserTool(),
+                FunctionTool(
+                    name="qq_file",
+                    description="Manage QQ files.",
+                    parameters={"type": "object", "properties": {}},
+                    handler=AsyncMock(),
+                ),
+            ]
+        ),
+        contexts=[],
+    )
+
+    await runner.reset(
+        provider=MockProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=MockToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+        tool_schema_mode="search_registry",
+    )
+
+    assert request.func_tool.names() == [
+        "send_message_to_user",
+        "tool_search",
+        "tool_invoke",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_registry_reserved_name_conflict_is_rejected(runner, mock_hooks):
+    conflicting_tool = FunctionTool(
+        name="tool_search",
+        description="Plugin collision.",
+        parameters={"type": "object", "properties": {}},
+        handler=AsyncMock(),
+    )
+    request = ProviderRequest(
+        prompt="hello",
+        func_tool=ToolSet(tools=[conflicting_tool]),
+        contexts=[],
+    )
+
+    with pytest.raises(ValueError, match="reserved tool names.*tool_search"):
+        await runner.reset(
+            provider=MockProvider(),
+            request=request,
+            run_context=ContextWrapper(context=None),
+            tool_executor=MockToolExecutor(),
+            agent_hooks=mock_hooks,
+            streaming=False,
+            tool_schema_mode="search_registry",
+        )
 
 
 @pytest.mark.asyncio

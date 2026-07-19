@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import sys
 import time
 import traceback
@@ -9,6 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+import jsonschema
 from mcp.types import (
     BlobResourceContents,
     CallToolResult,
@@ -28,6 +30,13 @@ from astrbot import logger
 from astrbot.core.agent.message import ImageURLPart, TextPart, ThinkPart
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.agent.tool_image_cache import tool_image_cache
+from astrbot.core.agent.tool_registry import (
+    TOOL_INVOKE_NAME,
+    TOOL_REGISTRY_RESERVED_NAMES,
+    TOOL_SEARCH_NAME,
+    build_tool_prefix_index,
+    create_tool_registry_tools,
+)
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.components import Json
 from astrbot.core.message.message_event_result import (
@@ -46,6 +55,7 @@ from astrbot.core.provider.modalities import (
     sanitize_contexts_by_modalities,
 )
 from astrbot.core.provider.provider import Provider
+from astrbot.core.tools.registry import get_builtin_tool_name
 
 from ..context.compressor import ContextCompressor
 from ..context.config import ContextConfig
@@ -206,6 +216,76 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             logger.error(f"Error in on_agent_done hook: {e}", exc_info=True)
         self._resolve_unconsumed_follow_ups()
 
+    def _persona_allowed_tool_names(self) -> set[str] | None:
+        """Return the current request's persona tool allowlist, if restricted."""
+        event = getattr(self.run_context.context, "event", None)
+        if event is None or not hasattr(event, "get_extra"):
+            return None
+        allowed_tools = event.get_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY)
+        if allowed_tools is None:
+            return None
+        return {
+            str(tool_name).strip()
+            for tool_name in allowed_tools
+            if str(tool_name).strip()
+        }
+
+    def _tool_registry_ids_in_context(self) -> set[str]:
+        """Collect tool IDs disclosed by structured search results still in context."""
+        search_call_ids: set[str] = set()
+        tool_ids = set(self._tool_registry_pending_ids)
+
+        for message in self.run_context.messages:
+            if hasattr(message, "model_dump"):
+                message_data = message.model_dump()
+            elif isinstance(message, dict):
+                message_data = message
+            else:
+                continue
+
+            if message_data.get("role") == "assistant":
+                for tool_call in message_data.get("tool_calls") or []:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    function = tool_call.get("function")
+                    if (
+                        isinstance(function, dict)
+                        and function.get("name") == TOOL_SEARCH_NAME
+                    ):
+                        call_id = str(tool_call.get("id", "")).strip()
+                        if call_id:
+                            search_call_ids.add(call_id)
+                continue
+
+            if message_data.get("role") != "tool":
+                continue
+            call_id = str(message_data.get("tool_call_id", "")).strip()
+            content = message_data.get("content")
+            if call_id not in search_call_ids or not isinstance(content, str):
+                continue
+            tool_ids.update(self._tool_ids_from_search_output(content))
+
+        return tool_ids
+
+    @staticmethod
+    def _tool_ids_from_search_output(content: str) -> set[str]:
+        """Extract tool IDs from a registry or native search JSON output prefix."""
+        try:
+            payload, _end = json.JSONDecoder().raw_decode(content.lstrip())
+        except (json.JSONDecodeError, TypeError):
+            return set()
+        if not isinstance(payload, dict):
+            return set()
+
+        tool_ids: set[str] = set()
+        for tool in payload.get("tools") or []:
+            if not isinstance(tool, dict):
+                continue
+            tool_id = str(tool.get("tool_id") or tool.get("name") or "").strip()
+            if tool_id:
+                tool_ids.add(tool_id)
+        return tool_ids
+
     @override
     async def reset(
         self,
@@ -288,16 +368,17 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self._last_tool_args: dict[str, T.Any] | None = None
         self._same_tool_streak = 0
 
-        # These two are used for tool schema mode handling
-        # We now have two modes:
+        # These fields are used for tool schema mode handling.
+        # Supported modes:
         # - "full": use full tool schema for LLM calls, default.
         # - "skills_like": use light tool schema for LLM calls, and re-query with param-only schema when needed.
-        #   Light tool schema does not include tool parameters.
-        #   This can reduce token usage when tools have large descriptions.
+        # - "search_registry": expose core tools plus tool_search/tool_invoke.
         # See #4681
         self.tool_schema_mode = tool_schema_mode
         self._tool_schema_param_set = None
         self._skill_like_raw_tool_set = None
+        self._tool_registry_raw_tool_set = None
+        self._tool_registry_pending_ids: set[str] = set()
         if tool_schema_mode == "skills_like":
             tool_set = self.req.func_tool
             if not tool_set:
@@ -307,6 +388,49 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             self._tool_schema_param_set = tool_set.get_param_only_tool_set()
             # MODIFIE the req.func_tool to use light tool schemas
             self.req.func_tool = light_set
+        elif tool_schema_mode == "search_registry" and self.req.func_tool:
+            original_tool_set = self.req.func_tool
+            persona_allowed_tools = self._persona_allowed_tool_names()
+            effective_tools = [
+                tool
+                for tool in original_tool_set
+                if bool(getattr(tool, "active", True))
+                and (
+                    persona_allowed_tools is None or tool.name in persona_allowed_tools
+                )
+            ]
+            conflicts = TOOL_REGISTRY_RESERVED_NAMES.intersection(
+                tool.name for tool in effective_tools
+            )
+            if conflicts:
+                conflict_names = ", ".join(sorted(conflicts))
+                raise ValueError(
+                    "search_registry cannot start because reserved tool names are "
+                    f"registered: {conflict_names}"
+                )
+            else:
+                direct_tool_set = ToolSet()
+                deferred_tool_set = ToolSet()
+                for tool in effective_tools:
+                    if get_builtin_tool_name(type(tool)) is not None:
+                        direct_tool_set.add_tool(tool)
+                    else:
+                        deferred_tool_set.add_tool(tool)
+
+                self._tool_registry_raw_tool_set = deferred_tool_set
+                direct_tool_set.merge(
+                    create_tool_registry_tools(
+                        deferred_tool_set.tools,
+                        context_tool_ids_provider=(self._tool_registry_ids_in_context),
+                    )
+                )
+                self.req.func_tool = direct_tool_set
+                registry_prompt = build_tool_prefix_index(deferred_tool_set.tools)
+                self.req.system_prompt = (
+                    f"{self.req.system_prompt}\n{registry_prompt}"
+                    if self.req.system_prompt
+                    else registry_prompt
+                )
 
         # append existing messages in the run context
         messages = bind_checkpoint_messages(request.contexts or [])
@@ -611,6 +735,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 self.provider,
             )
             return None
+        if self.tool_schema_mode == "search_registry":
+            return self.req.func_tool
         if self._responses_tools_search_enabled() and self._skill_like_raw_tool_set:
             return self._skill_like_raw_tool_set
         return self.req.func_tool
@@ -952,6 +1078,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             except _ToolExecutionInterrupted:
                 yield await self._finalize_aborted_step(llm_resp)
                 return
+            finally:
+                self._tool_registry_pending_ids.clear()
 
             # 将结果添加到上下文中
             parts = []
@@ -1053,6 +1181,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
     ) -> T.AsyncGenerator[_HandleFunctionToolsResult, None]:
         """处理函数工具调用。"""
         tool_call_result_blocks: list[ToolCallMessageSegment] = []
+        self._tool_registry_pending_ids.clear()
         logger.info(f"Agent 使用工具: {llm_response.tools_call_name}")
 
         def _append_tool_call_result(tool_call_id: str, content: str) -> None:
@@ -1065,22 +1194,17 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             )
 
         def _get_persona_allowed_tools() -> set[str] | None:
-            event = getattr(self.run_context.context, "event", None)
-            if event is None or not hasattr(event, "get_extra"):
-                return None
-            allowed_tools = event.get_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY)
-            if allowed_tools is None:
-                return None
-            return {
-                str(tool_name).strip()
-                for tool_name in allowed_tools
-                if str(tool_name).strip()
-            }
+            return self._persona_allowed_tool_names()
 
         def _is_persona_denied_tool_call(
             tool_name: str,
             func_tool: FunctionTool | None,
         ) -> bool:
+            if (
+                self.tool_schema_mode == "search_registry"
+                and tool_name in TOOL_REGISTRY_RESERVED_NAMES
+            ):
+                return False
             allowed_tools = _get_persona_allowed_tools()
             if allowed_tools is None or tool_name in allowed_tools:
                 return False
@@ -1105,10 +1229,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             llm_response.tools_call_ids,
         ):
             tool_result_blocks_start = len(tool_call_result_blocks)
-            tool_call_streak = self._track_tool_call_streak(
-                func_tool_name,
-                func_tool_args,
-            )
             yield _HandleFunctionToolsResult.from_message_chain(
                 MessageChain(
                     type="tool_call",
@@ -1140,7 +1260,74 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 if not req.func_tool and not is_internal_tool:
                     return
 
-                if internal_tool is not None:
+                registry_invocation = bool(
+                    not is_internal_tool
+                    and func_tool_name == TOOL_INVOKE_NAME
+                    and self._tool_registry_raw_tool_set is not None
+                )
+                if registry_invocation:
+                    if not isinstance(func_tool_args, dict):
+                        _append_tool_call_result(
+                            func_tool_id,
+                            "error: tool_invoke arguments must be an object.",
+                        )
+                        continue
+                    tool_id = str(func_tool_args.get("tool_id", "")).strip()
+                    target_arguments = func_tool_args.get("arguments", {})
+                    if not tool_id:
+                        _append_tool_call_result(
+                            func_tool_id,
+                            "error: tool_invoke requires a non-empty tool_id.",
+                        )
+                        continue
+                    if target_arguments is None:
+                        target_arguments = {}
+                    if not isinstance(target_arguments, dict):
+                        _append_tool_call_result(
+                            func_tool_id,
+                            f"error: Invalid arguments for tool {tool_id}: expected an object.",
+                        )
+                        continue
+
+                    func_tool_name = tool_id
+                    func_tool_args = target_arguments
+                    func_tool = self._tool_registry_raw_tool_set.get_tool(tool_id)
+                    available_tools = []
+                    if func_tool is None:
+                        logger.warning(
+                            "Tool registry invocation could not resolve tool_id: %s",
+                            tool_id,
+                        )
+                        _append_tool_call_result(
+                            func_tool_id,
+                            f"error: Tool {tool_id} was not found in the current tool registry.",
+                        )
+                        continue
+                    if _is_persona_denied_tool_call(tool_id, func_tool):
+                        logger.warning(
+                            "拒绝未被当前人格允许的注册表工具调用: %s",
+                            tool_id,
+                        )
+                        _append_tool_call_result(
+                            func_tool_id,
+                            f"error: Permission denied. Tool {tool_id} is not allowed by the current persona.",
+                        )
+                        continue
+                    if not bool(getattr(func_tool, "active", True)):
+                        _append_tool_call_result(
+                            func_tool_id,
+                            f"error: Tool {tool_id} is currently inactive.",
+                        )
+                        continue
+                    try:
+                        jsonschema.validate(func_tool_args, func_tool.parameters)
+                    except jsonschema.ValidationError as exc:
+                        _append_tool_call_result(
+                            func_tool_id,
+                            f"error: Invalid arguments for tool {tool_id}: {exc.message}",
+                        )
+                        continue
+                elif internal_tool is not None:
                     func_tool = internal_tool
                     available_tools = [internal_tool.name]
                 elif (
@@ -1164,6 +1351,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 #  Some API may return None for tools with no parameters
                 if func_tool_args is None:
                     func_tool_args = {}
+                tool_call_streak = self._track_tool_call_streak(
+                    func_tool_name,
+                    func_tool_args,
+                )
                 logger.info(f"使用工具：{func_tool_name}，参数：{func_tool_args}")
 
                 if not is_internal_tool and _is_persona_denied_tool_call(
@@ -1293,10 +1484,30 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                     )
                         if result_parts:
                             inline_result = "\n\n".join(result_parts)
+                            if (
+                                self.tool_schema_mode == "search_registry"
+                                and func_tool_name == TOOL_SEARCH_NAME
+                            ):
+                                self._tool_registry_pending_ids.update(
+                                    self._tool_ids_from_search_output(inline_result)
+                                )
                             inline_result = await self._materialize_large_tool_result(
                                 tool_call_id=func_tool_id,
                                 content=inline_result,
                             )
+                            if registry_invocation:
+                                try:
+                                    registry_result = json.loads(inline_result)
+                                except (json.JSONDecodeError, TypeError):
+                                    registry_result = inline_result
+                                inline_result = json.dumps(
+                                    {
+                                        "tool_id": func_tool_name,
+                                        "result": registry_result,
+                                    },
+                                    ensure_ascii=False,
+                                    default=str,
+                                )
                             _append_tool_call_result(
                                 func_tool_id,
                                 inline_result

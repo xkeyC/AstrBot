@@ -40,6 +40,18 @@ TOOL_CALL_PROMPT_SKILLS_LIKE_MODE = (
     " Keep the role-play and style consistent throughout the conversation."
 )
 
+TOOL_CALL_PROMPT_SEARCH_REGISTRY_MODE = (
+    "When using tools: never return an empty response; briefly explain the purpose "
+    "when starting a new type of task, but not before every tool call. Non-core "
+    "tools are discoverable through `tool_search`. Select an exact namespace `index` "
+    "from the provided inventory, then supply capability `keywords` to match schemas. "
+    "Read the returned parameter schema, then execute the selected result only through "
+    "`tool_invoke(tool_id, arguments)`. Continue with `next_offset` when `has_more` "
+    "is true. Search results already present in the live context are filtered and "
+    "become searchable again after context compression removes them. Never guess "
+    "arguments or call a hidden tool directly. Keep the conversation style consistent."
+)
+
 
 CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT = (
     "You are a calm, patient friend with a systems-oriented way of thinking.\n"
