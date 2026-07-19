@@ -393,8 +393,13 @@ export function useProviderSources(options: UseProviderSourcesOptions) {
       source.ollama_disable_thinking = false
     }
 
-    if (source.type === 'openai_chat_completion' && source.api_mode === undefined) {
-      source.api_mode = 'chat_completions'
+    if (source.type === 'openai_chat_completion') {
+      if (source.api_mode === undefined) {
+        source.api_mode = 'chat_completions'
+      }
+      if (source.tools_search === undefined) {
+        source.tools_search = false
+      }
     }
 
     return source
