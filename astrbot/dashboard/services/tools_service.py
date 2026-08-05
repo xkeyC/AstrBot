@@ -92,17 +92,17 @@ class ToolsService:
                     if key not in {"active", "tool_prefix"}:
                         server_info[key] = value
 
-                for name_key, runtime in self.tool_mgr.mcp_server_runtime_view.items():
-                    if name_key == name:
-                        mcp_client = runtime.client
-                        server_info["tools"] = [
-                            f"{server_info['tool_prefix']}{tool.name}"
-                            for tool in mcp_client.tools
-                        ]
-                        server_info["errlogs"] = mcp_client.server_errlogs
-                        break
-                else:
+                runtime = self.tool_mgr.mcp_server_runtime_view.get(name)
+                server_info["connected"] = runtime is not None
+                if runtime is None:
                     server_info["tools"] = []
+                else:
+                    mcp_client = runtime.client
+                    server_info["tools"] = [
+                        f"{server_info['tool_prefix']}{tool.name}"
+                        for tool in mcp_client.tools
+                    ]
+                    server_info["errlogs"] = mcp_client.server_errlogs
 
                 servers.append(server_info)
 
@@ -458,7 +458,15 @@ class ToolsService:
         has_top_level_tool_prefix = "tool_prefix" in server_data
 
         for key, value in server_data.items():
-            if key in ["name", "active", "tools", "errlogs", "oldName", "tool_prefix"]:
+            if key in [
+                "name",
+                "active",
+                "connected",
+                "tools",
+                "errlogs",
+                "oldName",
+                "tool_prefix",
+            ]:
                 continue
             if key == "mcpServers":
                 try:
@@ -600,6 +608,7 @@ class ToolsService:
         if self.tool_mgr.is_builtin_tool(tool.name):
             origin = "builtin"
             origin_name = "AstrBot Core"
+            origin_display_name = origin_name
             readonly = True
             builtin_config_statuses = get_builtin_tool_config_statuses(
                 tool.name,
@@ -611,16 +620,20 @@ class ToolsService:
         elif isinstance(tool, MCPTool):
             origin = "mcp"
             origin_name = tool.mcp_server_name
+            origin_display_name = origin_name
         elif isinstance(tool, HandoffTool):
             origin = "subagent"
             origin_name = tool.agent.name
+            origin_display_name = origin_name
         elif tool.handler_module_path and star_map.get(tool.handler_module_path):
             star = star_map[tool.handler_module_path]
             origin = "plugin"
             origin_name = star.name
+            origin_display_name = star.display_name or star.name
         else:
             origin = "unknown"
             origin_name = "unknown"
+            origin_display_name = origin_name
 
         tool_info = {
             "name": tool.name,
@@ -629,6 +642,7 @@ class ToolsService:
             "active": tool.active,
             "origin": origin,
             "origin_name": origin_name,
+            "origin_display_name": origin_display_name,
             "readonly": readonly,
             "builtin_config_statuses": builtin_config_statuses,
             "builtin_config_tags": builtin_config_tags,

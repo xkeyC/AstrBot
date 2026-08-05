@@ -28,7 +28,7 @@ from astrbot.core.platform.sources.webchat.request_flags import (
 from astrbot.core.platform.sources.webchat.webchat_queue_mgr import webchat_queue_mgr
 from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.core.utils.datetime_utils import to_utc_isoformat
+from astrbot.core.utils.datetime_utils import generate_timestamp_id, to_utc_isoformat
 from astrbot.core.utils.media_utils import (
     MEDIA_MIME_EXTENSIONS,
     detect_image_mime_type_async,
@@ -36,15 +36,22 @@ from astrbot.core.utils.media_utils import (
 
 SSE_HEARTBEAT = ": heartbeat\n\n"
 CHAT_RUN_SUBSCRIBER_QUEUE_SIZE = 256
+WEBCHAT_IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
 
 def sanitize_upload_filename(filename: str | None) -> str:
     if not filename:
-        return f"{uuid.uuid4()!s}"
+        return generate_timestamp_id()
     normalized = filename.replace("\\", "/")
     name = PurePosixPath(normalized).name.replace("\x00", "").strip()
     if name in ("", ".", ".."):
-        return f"{uuid.uuid4()!s}"
+        return generate_timestamp_id()
     return name
 
 
@@ -504,7 +511,6 @@ class ChatService:
         self.webchat_img_dir = os.path.join(get_astrbot_data_path(), "webchat", "imgs")
         os.makedirs(self.attachments_dir, exist_ok=True)
 
-        self.supported_imgs = ["jpg", "jpeg", "png", "gif", "webp"]
         self.conv_mgr = core_lifecycle.conversation_manager
         self.platform_history_mgr = core_lifecycle.platform_message_history_manager
         self.umop_config_router = core_lifecycle.umop_config_router
@@ -557,8 +563,8 @@ class ChatService:
         filename_ext = file_path.suffix.lower()
         if filename_ext == ".wav":
             return str(file_path), "audio/wav"
-        if filename_ext[1:] in self.supported_imgs:
-            return str(file_path), "image/jpeg"
+        if filename_ext in WEBCHAT_IMAGE_MIME_TYPES:
+            return str(file_path), WEBCHAT_IMAGE_MIME_TYPES[filename_ext]
         return str(file_path), None
 
     async def resolve_webchat_file_from_dashboard_query(
@@ -620,7 +626,8 @@ class ChatService:
                     target_path = file_path.with_suffix(detected_suffix)
                     if target_path.exists():
                         target_path = (
-                            attachments_dir / f"{uuid.uuid4().hex}{detected_suffix}"
+                            attachments_dir
+                            / f"{generate_timestamp_id()}{detected_suffix}"
                         )
                     await asyncio.to_thread(file_path.rename, target_path)
                     file_path = target_path
@@ -1162,6 +1169,9 @@ class ChatService:
                         "message_id": message_id,
                         "llm_checkpoint_id": llm_checkpoint_id,
                         "thread_selected_text": thread_selected_text,
+                        "_api_key_allow_admin_role": post_data.get(
+                            "_api_key_allow_admin_role"
+                        ),
                     },
                 ),
             )
