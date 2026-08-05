@@ -1167,7 +1167,6 @@ CONFIG_METADATA_2 = {
                         "enable": True,
                         "key": [],
                         "api_base": "https://api.openai.com/v1",
-                        "api_mode": "chat_completions",
                         "timeout": 120,
                         "proxy": "",
                         "custom_headers": {},
@@ -1190,6 +1189,7 @@ CONFIG_METADATA_2 = {
                         "responses_code_interpreter": False,
                         "responses_image_generation": False,
                         "responses_tool_choice": "auto",
+                        "responses_compact_threshold": 0,
                     },
                     "Google Gemini": {
                         "id": "google_gemini",
@@ -1319,6 +1319,7 @@ CONFIG_METADATA_2 = {
                         "responses_code_interpreter": False,
                         "responses_image_generation": False,
                         "responses_tool_choice": "auto",
+                        "responses_compact_threshold": 0,
                     },
                     "DeepSeek": {
                         "id": "deepseek",
@@ -1350,6 +1351,7 @@ CONFIG_METADATA_2 = {
                         "responses_code_interpreter": False,
                         "responses_image_generation": False,
                         "responses_tool_choice": "auto",
+                        "responses_compact_threshold": 0,
                     },
                     "Zhipu": {
                         "id": "zhipu",
@@ -2100,6 +2102,12 @@ CONFIG_METADATA_2 = {
                         "hint": "控制模型自动选择工具、强制调用工具或禁用所有工具。",
                         "condition": {"type": "openai_responses"},
                     },
+                    "responses_compact_threshold": {
+                        "description": "Responses 原生上下文压缩阈值",
+                        "type": "int",
+                        "hint": "达到该输入 token 数时启用服务端 compaction；0 表示禁用。建议设为模型上下文上限的 80% 以下，以早于 AstrBot 本地压缩触发。仅支持实现 OpenAI 原生 compaction 的接口。",
+                        "condition": {"type": "openai_responses"},
+                    },
                     "rerank_api_base": {
                         "description": "重排序模型 API Base URL",
                         "type": "string",
@@ -2197,12 +2205,6 @@ CONFIG_METADATA_2 = {
                         "type": "dict",
                         "items": {},
                         "hint": "此处添加的键值对将被合并到 OpenAI SDK 的 default_headers 中，用于自定义 HTTP 请求头。",
-                    },
-                    "api_mode": {
-                        "description": "OpenAI API 模式",
-                        "type": "string",
-                        "options": ["chat_completions", "responses"],
-                        "hint": "OpenAI 兼容服务请使用 chat_completions。仅在服务支持 OpenAI Responses API 时使用 responses；AstrBot 只会以流式模式发送 Responses API 请求。",
                     },
                     "ollama_disable_thinking": {
                         "description": "关闭思考模式",

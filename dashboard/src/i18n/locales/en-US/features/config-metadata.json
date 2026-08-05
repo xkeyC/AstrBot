@@ -1237,6 +1237,10 @@
         "description": "Responses tool choice",
         "hint": "Choose whether the model may select tools automatically, must call a tool, or cannot call tools."
       },
+      "responses_compact_threshold": {
+        "description": "Responses native compaction threshold",
+        "hint": "Run server-side compaction at this input-token threshold; 0 disables it. Set it below 80% of the model context limit so it runs before AstrBot's local compression. Requires an API with native OpenAI compaction support."
+      },
       "rerank_api_base": {
         "description": "Rerank Model API Base URL",
         "hint": "The full request URL is formed by combining the Base URL and a path suffix (defaults to /v1/rerank)."
@@ -1311,10 +1315,6 @@
       "custom_headers": {
         "description": "Custom request headers",
         "hint": "Key/value pairs added here are merged into the OpenAI SDK default_headers for custom HTTP headers. Values must be strings."
-      },
-      "api_mode": {
-        "description": "OpenAI API mode",
-        "hint": "Use chat_completions for OpenAI-compatible providers. Use responses only for providers that support OpenAI Responses API; AstrBot sends Responses API requests in streaming mode only."
       },
       "ollama_disable_thinking": {
         "description": "Disable thinking mode",

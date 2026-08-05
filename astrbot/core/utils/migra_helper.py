@@ -128,6 +128,26 @@ def _migra_provider_to_source_structure(conf: AstrBotConfig) -> None:
         logger.info("Provider-source structure migration completed")
 
 
+def _migrate_legacy_openai_responses_sources(conf: AstrBotConfig) -> None:
+    """Move the fork's legacy Responses mode to the dedicated provider type."""
+    migrated = False
+    for source in conf.get("provider_sources", []):
+        if not isinstance(source, dict) or "api_mode" not in source:
+            continue
+
+        api_mode = source.pop("api_mode")
+        migrated = True
+        if source.get("type") == "openai_chat_completion" and api_mode == "responses":
+            source["type"] = "openai_responses"
+            logger.info(
+                "Migrated legacy Responses provider source %s to openai_responses",
+                source.get("id", "<unknown>"),
+            )
+
+    if migrated:
+        conf.save_config()
+
+
 async def migra(
     db, astrbot_config_mgr, umop_config_router, acm: AstrBotConfigManager
 ) -> None:
@@ -180,4 +200,11 @@ async def migra(
         _migra_provider_to_source_structure(astrbot_config)
     except Exception as e:
         logger.error(f"Migration for provider-source structure failed: {e!s}")
+        logger.error(traceback.format_exc())
+
+    # Replace the fork's old api_mode patch with the upstream dedicated adapter.
+    try:
+        _migrate_legacy_openai_responses_sources(astrbot_config)
+    except Exception as e:
+        logger.error(f"Migration for legacy Responses providers failed: {e!s}")
         logger.error(traceback.format_exc())
