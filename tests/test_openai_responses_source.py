@@ -124,7 +124,7 @@ def test_convert_chat_history_preserves_response_items_and_function_calls():
     )
 
     assert response_input == [
-        {"type": "message", "role": "system", "content": "system context"},
+        {"type": "message", "role": "developer", "content": "system context"},
         {
             "type": "message",
             "role": "user",

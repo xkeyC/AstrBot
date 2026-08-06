@@ -477,10 +477,11 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                 and converted_content != ""
                 and converted_content != []
             ):
+                response_role = "developer" if role == "system" else role
                 response_input.append(
                     {
                         "type": "message",
-                        "role": role,
+                        "role": response_role,
                         "content": converted_content,
                     }
                 )
