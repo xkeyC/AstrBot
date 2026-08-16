@@ -197,7 +197,9 @@ class ProviderRequest:
         # historical cache checkpoints remain reusable while the user's text keeps
         # the final semantic position within the message.
         for part in self.dynamic_user_context_parts:
-            content_blocks.append(part.model_dump_for_context())
+            dynamic_part = part.model_dump_for_context()
+            dynamic_part["_no_save"] = True
+            content_blocks.append(dynamic_part)
 
         # 2. 用户原始发言
         if self.prompt and self.prompt.strip():

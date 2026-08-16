@@ -298,7 +298,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
             llm_compress_provider=self.llm_compress_provider,
             llm_compress_tools=(
-                self.req.func_tool if self.llm_compress_provider is provider else None
+                self._func_tool_for_provider()
+                if self.llm_compress_provider is provider
+                else None
             ),
             custom_token_counter=self.custom_token_counter,
             custom_compressor=self.custom_compressor,
@@ -309,6 +311,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
 
         # append existing messages in the run context
         messages = bind_checkpoint_messages(request.contexts or [])
+        self._active_request_message: Message | None = None
         if (
             request.prompt is not None
             or request.image_urls
@@ -317,7 +320,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             or request.extra_user_content_parts
         ):
             m = await self._assemble_request_context_for_provider(request)
-            messages.append(Message.model_validate(m))
+            assembled_request_message = Message.model_validate(m)
+            messages.append(assembled_request_message)
+            if request.dynamic_user_context_parts:
+                self._active_request_message = assembled_request_message
         if request.system_prompt:
             messages.insert(
                 0,
@@ -327,6 +333,44 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
 
         self.stats = AgentStats()
         self.stats.start_time = time.time()
+
+    def _get_active_request_round(self) -> list[Message]:
+        """Return the current request round that must survive compaction."""
+        if self._active_request_message is None:
+            return []
+        for index, message in enumerate(self.run_context.messages):
+            if message is self._active_request_message:
+                return self.run_context.messages[index:]
+        return []
+
+    @staticmethod
+    def _restore_active_request_round(
+        processed_messages: list[Message],
+        active_request_round: list[Message],
+    ) -> list[Message]:
+        """Restore the provider-facing request context and its tool protocol."""
+        if not active_request_round:
+            return processed_messages
+
+        active_message_ids = {id(message) for message in active_request_round}
+        compacted_prefix = [
+            message
+            for message in processed_messages
+            if id(message) not in active_message_ids
+        ]
+        for active_message in reversed(active_request_round):
+            active_structure = active_message.model_dump()
+            matching_index = next(
+                (
+                    index
+                    for index in range(len(compacted_prefix) - 1, -1, -1)
+                    if compacted_prefix[index].model_dump() == active_structure
+                ),
+                None,
+            )
+            if matching_index is not None:
+                compacted_prefix.pop(matching_index)
+        return [*compacted_prefix, *active_request_round]
 
     def _read_tool_hint(self) -> str:
         if self.read_tool is not None:
@@ -807,6 +851,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         # Process request-time context before sending it to the provider.
         token_usage = self.req.conversation.token_usage if self.req.conversation else 0
         self._simple_print_message_role("[BefCompact]", self.run_context.messages)
+        active_request_round = self._get_active_request_round()
         processed_messages = await self._await_or_stop(
             self.request_context_manager.process(
                 self.run_context.messages,
@@ -816,7 +861,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         if processed_messages is None:
             yield await self._finalize_aborted_step()
             return
-        self.run_context.messages = processed_messages
+        self.run_context.messages = self._restore_active_request_round(
+            processed_messages,
+            active_request_round,
+        )
         self._simple_print_message_role("[AftCompact]", self.run_context.messages)
 
         async for llm_response in self._iter_llm_responses_with_fallback():

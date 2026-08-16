@@ -134,9 +134,7 @@ def test_content_part_no_save_round_trip_from_dict():
 async def test_provider_request_assemble_context_preserves_temp_content_part_marker():
     request = ProviderRequest(
         prompt="hello",
-        dynamic_user_context_parts=[
-            TextPart(text="context-before-user").mark_as_temp()
-        ],
+        dynamic_user_context_parts=[TextPart(text="context-before-user")],
         extra_user_content_parts=[TextPart(text="temporary").mark_as_temp()],
     )
 

@@ -99,6 +99,61 @@ class MockToolExecutor:
         return generator()
 
 
+class DroppingCompressor:
+    """Simulate compaction that replaces every non-system message."""
+
+    def should_compress(self, messages, current_tokens, max_tokens):
+        del messages, current_tokens, max_tokens
+        return True
+
+    async def __call__(self, messages):
+        del messages
+        return [Message(role="user", content="Compacted history")]
+
+
+class CloningCompressor:
+    """Return cloned messages through the supported custom compressor hook."""
+
+    def __init__(self):
+        self.compressed = False
+
+    def should_compress(self, messages, current_tokens, max_tokens):
+        del messages, current_tokens, max_tokens
+        return not self.compressed
+
+    async def __call__(self, messages):
+        self.compressed = True
+        return [Message.model_validate(message.model_dump()) for message in messages]
+
+
+class PartialCloningCompressor(CloningCompressor):
+    """Retain only a clone of the active user message after compaction."""
+
+    async def __call__(self, messages):
+        self.compressed = True
+        active_user = next(
+            message
+            for message in messages
+            if message.role == "user" and isinstance(message.content, list)
+        )
+        return [
+            Message(role="user", content="Compacted history"),
+            Message.model_validate(active_user.model_dump()),
+        ]
+
+
+class HistoricalDuplicateCompressor(CloningCompressor):
+    """Drop the active round while retaining an identical historical prompt."""
+
+    async def __call__(self, messages):
+        self.compressed = True
+        return [
+            Message.model_validate(messages[0].model_dump()),
+            Message.model_validate(messages[1].model_dump()),
+            Message(role="user", content="Compacted active request"),
+        ]
+
+
 class LargeTextToolExecutor:
     """模拟返回超长文本的工具执行器"""
 
@@ -991,12 +1046,143 @@ async def test_runner_clears_tools_for_provider_without_tool_use(
         tool_executor=mock_tool_executor,
         agent_hooks=mock_hooks,
         streaming=False,
+        llm_compress_provider=provider,
     )
 
     async for _ in runner.step_until_done(1):
         pass
 
     assert provider.received_func_tools == [None]
+    assert runner.request_context_manager_config.llm_compress_tools is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "compaction_mode",
+    ["llm", "clone", "partial_clone", "turn_limit"],
+)
+async def test_compaction_preserves_dynamic_context_and_active_tool_round(
+    compaction_mode, mock_hooks, tool_set
+):
+    provider = CapturingProvider(modalities=["text", "tool_use"])
+    request = ProviderRequest(
+        prompt="Current request",
+        contexts=[
+            {"role": "user", "content": "Old request"},
+            {"role": "assistant", "content": "Old response"},
+        ],
+        dynamic_user_context_parts=[TextPart(text="Persona and skills").mark_as_temp()],
+        func_tool=tool_set,
+    )
+    runner = ToolLoopAgentRunner()
+    reset_kwargs = {}
+    if compaction_mode in {"llm", "clone", "partial_clone"}:
+        provider.provider_config["max_context_tokens"] = 1
+        compressors = {
+            "llm": DroppingCompressor,
+            "clone": CloningCompressor,
+            "partial_clone": PartialCloningCompressor,
+        }
+        reset_kwargs["custom_compressor"] = compressors[compaction_mode]()
+    else:
+        reset_kwargs["enforce_max_turns"] = 0
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=MockToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+        **reset_kwargs,
+    )
+    runner.run_context.messages.extend(
+        [
+            Message(
+                role="assistant",
+                content="Calling tool",
+                tool_calls=[
+                    {
+                        "id": "call_active",
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            ),
+            Message(
+                role="tool",
+                content="Active tool result",
+                tool_call_id="call_active",
+            ),
+        ]
+    )
+
+    async for _ in runner.step_until_done(1):
+        pass
+
+    sent_contexts = provider.received_contexts[0]
+    active_user_indexes = [
+        index
+        for index, message in enumerate(sent_contexts)
+        if message.get("role") == "user"
+        and isinstance(message.get("content"), list)
+        and message["content"][0].get("text") == "Persona and skills"
+    ]
+    assert len(active_user_indexes) == 1
+    active_user_index = active_user_indexes[0]
+    assert sent_contexts[active_user_index]["content"][1] == {
+        "type": "text",
+        "text": "Current request",
+    }
+    assert sent_contexts[active_user_index + 1]["tool_calls"][0]["id"] == (
+        "call_active"
+    )
+    assert sent_contexts[active_user_index + 2] == {
+        "role": "tool",
+        "content": "Active tool result",
+        "tool_call_id": "call_active",
+    }
+    assert (
+        sum(message.get("tool_call_id") == "call_active" for message in sent_contexts)
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_compaction_does_not_reconcile_ordinary_repeated_user_prompt(
+    mock_hooks, tool_set
+):
+    provider = CapturingProvider(modalities=["text", "tool_use"])
+    provider.provider_config["max_context_tokens"] = 1
+    request = ProviderRequest(
+        prompt="Repeated request",
+        contexts=[
+            {"role": "user", "content": "Repeated request"},
+            {"role": "assistant", "content": "Historical response"},
+        ],
+        func_tool=tool_set,
+    )
+    runner = ToolLoopAgentRunner()
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=MockToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+        custom_compressor=HistoricalDuplicateCompressor(),
+    )
+
+    async for _ in runner.step_until_done(1):
+        pass
+
+    assert provider.received_contexts[0][:2] == [
+        {"role": "user", "content": "Repeated request"},
+        {"role": "assistant", "content": "Historical response"},
+    ]
 
 
 @pytest.mark.asyncio
