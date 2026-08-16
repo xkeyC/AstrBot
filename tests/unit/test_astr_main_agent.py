@@ -142,6 +142,11 @@ def _setup_conversation_for_build(conv_mgr, cid: str = "conv-id") -> MagicMock:
     return conversation
 
 
+def _dynamic_context_text(req: ProviderRequest) -> str:
+    """Join request-scoped context injected before the user's input."""
+    return "\n".join(part.text for part in req.dynamic_user_context_parts)
+
+
 def test_append_system_reminders_includes_weekday(mock_event):
     """Test datetime reminder includes weekday information."""
     req = ProviderRequest(prompt="Hello")
@@ -169,16 +174,18 @@ def test_append_system_reminders_includes_weekday(mock_event):
             "UTC",
         )
 
-    assert [part.text for part in req.extra_user_content_parts] == [
-        "<system_reminder>Current datetime: "
-        "2026-06-08 12:34 (UTC), Weekday: Monday</system_reminder>"
-    ]
+    assert "Current datetime: 2026-06-08 12:34 (UTC), Weekday: Monday" in (
+        _dynamic_context_text(req)
+    )
 
 
 def test_local_mode_prompt_uses_windows_powershell_51():
-    with patch("astrbot.core.astr_main_agent.platform.system", return_value="Windows"), patch(
-        "astrbot.core.astr_main_agent.resolve_windows_shell",
-        return_value="powershell.exe",
+    with (
+        patch("astrbot.core.astr_main_agent.platform.system", return_value="Windows"),
+        patch(
+            "astrbot.core.astr_main_agent.resolve_windows_shell",
+            return_value="powershell.exe",
+        ),
     ):
         prompt = ama._build_local_mode_prompt()
 
@@ -188,9 +195,12 @@ def test_local_mode_prompt_uses_windows_powershell_51():
 
 
 def test_local_mode_prompt_hints_pwsh_when_resolved():
-    with patch("astrbot.core.astr_main_agent.platform.system", return_value="Windows"), patch(
-        "astrbot.core.astr_main_agent.resolve_windows_shell",
-        return_value="pwsh.exe",
+    with (
+        patch("astrbot.core.astr_main_agent.platform.system", return_value="Windows"),
+        patch(
+            "astrbot.core.astr_main_agent.resolve_windows_shell",
+            return_value="pwsh.exe",
+        ),
     ):
         prompt = ama._build_local_mode_prompt()
 
@@ -200,9 +210,12 @@ def test_local_mode_prompt_hints_pwsh_when_resolved():
 
 
 def test_local_mode_prompt_ignores_pwsh_on_non_windows():
-    with patch("astrbot.core.astr_main_agent.platform.system", return_value="Linux"), patch(
-        "astrbot.core.astr_main_agent.resolve_windows_shell",
-        return_value="pwsh.exe",
+    with (
+        patch("astrbot.core.astr_main_agent.platform.system", return_value="Linux"),
+        patch(
+            "astrbot.core.astr_main_agent.resolve_windows_shell",
+            return_value="pwsh.exe",
+        ),
     ):
         prompt = ama._build_local_mode_prompt()
 
@@ -622,7 +635,8 @@ class TestBuiltinToolInjection:
 
         module._apply_web_search_citation_prompt(mock_event, req)
 
-        assert module.WEB_SEARCH_CITATION_PROMPT in req.system_prompt
+        assert module.WEB_SEARCH_CITATION_PROMPT in _dynamic_context_text(req)
+        assert req.system_prompt == "base"
 
     def test_apply_web_search_citation_prompt_is_idempotent(self, mock_event):
         module = ama
@@ -636,7 +650,7 @@ class TestBuiltinToolInjection:
         module._apply_web_search_citation_prompt(mock_event, req)
         module._apply_web_search_citation_prompt(mock_event, req)
 
-        assert req.system_prompt.count(module.WEB_SEARCH_CITATION_PROMPT) == 1
+        assert _dynamic_context_text(req).count(module.WEB_SEARCH_CITATION_PROMPT) == 1
 
     def test_apply_web_search_citation_prompt_requires_webchat(self, mock_event):
         module = ama
@@ -649,7 +663,7 @@ class TestBuiltinToolInjection:
 
         module._apply_web_search_citation_prompt(mock_event, req)
 
-        assert module.WEB_SEARCH_CITATION_PROMPT not in req.system_prompt
+        assert module.WEB_SEARCH_CITATION_PROMPT not in _dynamic_context_text(req)
 
     def test_proactive_cron_job_tools_uses_builtin_tool_manager(self, mock_context):
         """Test cron tool injection through the builtin tool manager."""
@@ -690,8 +704,8 @@ class TestApplyFileExtract:
 
             await module._apply_file_extract(mock_event, req, sample_config)
 
-        assert len(req.contexts) == 1
-        assert "File Extract Results" in req.contexts[0]["content"]
+        assert req.contexts == []
+        assert "File Extract Results" in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
     async def test_file_extract_no_files(self, mock_event, sample_config):
@@ -724,7 +738,8 @@ class TestApplyFileExtract:
 
             await module._apply_file_extract(mock_event, req, sample_config)
 
-        assert len(req.contexts) == 1
+        assert req.contexts == []
+        assert "Reply content" in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
     async def test_file_extract_no_prompt(self, mock_event, sample_config):
@@ -863,7 +878,8 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
-        assert "You are helpful." in req.system_prompt
+        assert "You are helpful." in _dynamic_context_text(req)
+        assert req.system_prompt == ""
 
     @pytest.mark.asyncio
     async def test_ensure_persona_from_conversation(self, mock_event, mock_context):
@@ -879,7 +895,7 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
-        assert "Custom persona." in req.system_prompt
+        assert "Custom persona." in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
     async def test_inline_genui_prompt_is_added_with_custom_persona(
@@ -897,8 +913,9 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
-        assert "Custom persona." in req.system_prompt
-        assert module.CHATUI_INLINE_GENUI_SYSTEM_PROMPT in req.system_prompt
+        dynamic_context = _dynamic_context_text(req)
+        assert "Custom persona." in dynamic_context
+        assert module.CHATUI_INLINE_GENUI_SYSTEM_PROMPT.strip() in dynamic_context
 
     @pytest.mark.asyncio
     async def test_inline_genui_prompt_does_not_require_conversation(
@@ -911,7 +928,9 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
-        assert module.CHATUI_INLINE_GENUI_SYSTEM_PROMPT in req.system_prompt
+        assert module.CHATUI_INLINE_GENUI_SYSTEM_PROMPT.strip() in (
+            _dynamic_context_text(req)
+        )
         mock_context.persona_manager.resolve_selected_persona.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -932,7 +951,9 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
-        assert module.CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT not in req.system_prompt
+        assert module.CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT not in (
+            _dynamic_context_text(req)
+        )
 
     @pytest.mark.asyncio
     async def test_ensure_persona_none_explicit(self, mock_event, mock_context):
@@ -947,7 +968,7 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
-        assert "Persona Instructions" not in req.system_prompt
+        assert "Persona Instructions" not in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
     async def test_ensure_skills_includes_workspace_skills(
@@ -1008,12 +1029,12 @@ class TestEnsurePersonaAndSkills:
             req, runtime_config, mock_context, mock_event
         )
 
-        assert "**workspace-skill**" in req.system_prompt
-        assert "Workspace scoped skill." in req.system_prompt
-        assert "Global scoped skill." not in req.system_prompt
+        dynamic_context = _dynamic_context_text(req)
+        assert "**workspace-skill**" in dynamic_context
+        assert "Workspace scoped skill." in dynamic_context
+        assert "Global scoped skill." not in dynamic_context
         assert (
-            str(workspace_skill_dir / "SKILL.md").replace("\\", "/")
-            in req.system_prompt
+            str(workspace_skill_dir / "SKILL.md").replace("\\", "/") in dynamic_context
         )
 
     @pytest.mark.asyncio
@@ -1069,8 +1090,8 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
-        assert "Workspace scoped skill." not in req.system_prompt
-        assert "## Skills" not in req.system_prompt
+        assert "Workspace scoped skill." not in _dynamic_context_text(req)
+        assert "## Skills" not in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
     async def test_ensure_skills_skips_workspace_skills_in_sandbox_runtime(
@@ -1126,8 +1147,8 @@ class TestEnsurePersonaAndSkills:
             mock_event,
         )
 
-        assert "Workspace scoped skill." not in req.system_prompt
-        assert "## Skills" not in req.system_prompt
+        assert "Workspace scoped skill." not in _dynamic_context_text(req)
+        assert "## Skills" not in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
     async def test_ensure_tools_from_persona(self, mock_event, mock_context):
@@ -2544,7 +2565,8 @@ class TestApplySandboxTools:
 
         module._apply_sandbox_tools(config, req, "session-123")
 
-        assert "sandboxed environment" in req.system_prompt
+        assert "sandboxed environment" in _dynamic_context_text(req)
+        assert req.system_prompt == "Original prompt"
 
     def test_apply_sandbox_tools_with_cua_adds_gui_guidance(self, mock_context):
         """Test that CUA sandbox guidance nudges reliable GUI workflows."""
@@ -2565,16 +2587,17 @@ class TestApplySandboxTools:
         assert "astrbot_cua_keyboard_type" in tool_names
         assert "astrbot_cua_key_press" not in tool_names
 
-        assert "Firefox" in req.system_prompt
-        assert "background=true" in req.system_prompt
-        assert 'firefox "https://example.com"' in req.system_prompt
-        assert "astrbot_cua_screenshot" in req.system_prompt
-        assert "astrbot_cua_key_press" not in req.system_prompt
-        assert "return_image_to_llm" in req.system_prompt
-        assert "astrbot_execute_shell" in req.system_prompt
-        assert "\\n" in req.system_prompt
-        assert "send_to_user=true" in req.system_prompt
-        assert "focused and empty or safe to append" in req.system_prompt
+        dynamic_context = _dynamic_context_text(req)
+        assert "Firefox" in dynamic_context
+        assert "background=true" in dynamic_context
+        assert 'firefox "https://example.com"' in dynamic_context
+        assert "astrbot_cua_screenshot" in dynamic_context
+        assert "astrbot_cua_key_press" not in dynamic_context
+        assert "return_image_to_llm" in dynamic_context
+        assert "astrbot_execute_shell" in dynamic_context
+        assert "\\n" in dynamic_context
+        assert "send_to_user=true" in dynamic_context
+        assert "focused and empty or safe to append" in dynamic_context
 
     def test_apply_sandbox_tools_with_shipyard_booter(self, monkeypatch, mock_context):
         """Test sandbox tools with shipyard booter configuration."""
@@ -2671,8 +2694,8 @@ class TestApplySandboxTools:
 
         module._apply_sandbox_tools(config, req, "session-123")
 
-        assert req.system_prompt.startswith("Base prompt")
-        assert "sandboxed environment" in req.system_prompt
+        assert req.system_prompt == "Base prompt"
+        assert "sandboxed environment" in _dynamic_context_text(req)
 
     def test_apply_sandbox_tools_with_none_system_prompt(self, mock_context):
         """Test that sandbox prompt is applied when system_prompt is None."""
@@ -2687,4 +2710,4 @@ class TestApplySandboxTools:
         module._apply_sandbox_tools(config, req, "session-123")
 
         assert isinstance(req.system_prompt, str)
-        assert "sandboxed environment" in req.system_prompt
+        assert "sandboxed environment" in _dynamic_context_text(req)

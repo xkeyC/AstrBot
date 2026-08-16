@@ -244,22 +244,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.tool_result_overflow_dir = tool_result_overflow_dir
         self.read_tool = read_tool
         self._tool_result_token_counter = EstimateTokenCounter()
-        self.request_context_manager_config = ContextConfig(
-            # <=0 disables token-based guarding.
-            max_context_tokens=provider.provider_config.get("max_context_tokens", 0),
-            # Enforce max turns before token-based guarding.
-            enforce_max_turns=self.enforce_max_turns,
-            truncate_turns=self.truncate_turns,
-            llm_compress_instruction=self.llm_compress_instruction,
-            llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
-            llm_compress_provider=self.llm_compress_provider,
-            custom_token_counter=self.custom_token_counter,
-            custom_compressor=self.custom_compressor,
-        )
-        self.request_context_manager = ContextManager(
-            self.request_context_manager_config
-        )
-
         self.provider = provider
         self.fallback_providers: list[Provider] = []
         seen_provider_ids: set[str] = {str(provider.provider_config.get("id", ""))}
@@ -297,13 +281,31 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self._skill_like_raw_tool_set = None
         if tool_schema_mode == "skills_like":
             tool_set = self.req.func_tool
-            if not tool_set:
-                return
-            self._skill_like_raw_tool_set = tool_set
-            light_set = tool_set.get_light_tool_set()
-            self._tool_schema_param_set = tool_set.get_param_only_tool_set()
-            # MODIFIE the req.func_tool to use light tool schemas
-            self.req.func_tool = light_set
+            if tool_set:
+                self._skill_like_raw_tool_set = tool_set
+                light_set = tool_set.get_light_tool_set()
+                self._tool_schema_param_set = tool_set.get_param_only_tool_set()
+                # Modify req.func_tool to use light tool schemas.
+                self.req.func_tool = light_set
+
+        self.request_context_manager_config = ContextConfig(
+            # <=0 disables token-based guarding.
+            max_context_tokens=provider.provider_config.get("max_context_tokens", 0),
+            # Enforce max turns before token-based guarding.
+            enforce_max_turns=self.enforce_max_turns,
+            truncate_turns=self.truncate_turns,
+            llm_compress_instruction=self.llm_compress_instruction,
+            llm_compress_keep_recent_ratio=self.llm_compress_keep_recent_ratio,
+            llm_compress_provider=self.llm_compress_provider,
+            llm_compress_tools=(
+                self.req.func_tool if self.llm_compress_provider is provider else None
+            ),
+            custom_token_counter=self.custom_token_counter,
+            custom_compressor=self.custom_compressor,
+        )
+        self.request_context_manager = ContextManager(
+            self.request_context_manager_config
+        )
 
         # append existing messages in the run context
         messages = bind_checkpoint_messages(request.contexts or [])
@@ -311,6 +313,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             request.prompt is not None
             or request.image_urls
             or request.audio_urls
+            or request.dynamic_user_context_parts
             or request.extra_user_content_parts
         ):
             m = await self._assemble_request_context_for_provider(request)

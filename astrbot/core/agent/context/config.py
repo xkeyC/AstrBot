@@ -5,6 +5,7 @@ from .compressor import ContextCompressor
 from .token_counter import TokenCounter
 
 if TYPE_CHECKING:
+    from astrbot.core.agent.tool import ToolSet
     from astrbot.core.provider.provider import Provider
 
 
@@ -29,6 +30,8 @@ class ContextConfig:
     """Percent of current context tokens to keep as exact recent context during LLM-based compression."""
     llm_compress_provider: "Provider | None" = None
     """LLM provider used for compression tasks. If None, truncation strategy is used."""
+    llm_compress_tools: "ToolSet | None" = None
+    """Stable tool set shared with cache-aware compression requests."""
     custom_token_counter: TokenCounter | None = None
     """Custom token counting method. If None, the default method is used."""
     custom_compressor: ContextCompressor | None = None

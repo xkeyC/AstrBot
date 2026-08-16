@@ -134,14 +134,22 @@ def test_content_part_no_save_round_trip_from_dict():
 async def test_provider_request_assemble_context_preserves_temp_content_part_marker():
     request = ProviderRequest(
         prompt="hello",
+        dynamic_user_context_parts=[
+            TextPart(text="context-before-user").mark_as_temp()
+        ],
         extra_user_content_parts=[TextPart(text="temporary").mark_as_temp()],
     )
 
     message = Message.model_validate(await request.assemble_context())
 
     assert isinstance(message.content, list)
-    assert message.content[1].text == "temporary"
-    assert message.content[1]._no_save is True
+    assert [part.text for part in message.content] == [
+        "context-before-user",
+        "hello",
+        "temporary",
+    ]
+    assert message.content[0]._no_save is True
+    assert message.content[2]._no_save is True
     assert dump_messages_with_checkpoints([message]) == [
         {"role": "user", "content": [{"type": "text", "text": "hello"}]},
     ]

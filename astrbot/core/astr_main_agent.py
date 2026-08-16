@@ -358,14 +358,11 @@ async def _apply_file_extract(
         return
 
     for file_content, file_name in zip(file_contents, file_names):
-        req.contexts.append(
-            {
-                "role": "system",
-                "content": (
-                    "File Extract Results of user uploaded files:\n"
-                    f"{file_content}\nFile Name: {file_name or 'Unknown'}"
-                ),
-            },
+        _append_dynamic_user_context(
+            req,
+            "file_extract",
+            "File Extract Results of user uploaded files:\n"
+            f"{file_content}\nFile Name: {file_name or 'Unknown'}",
         )
 
 
@@ -377,6 +374,36 @@ def _apply_prompt_prefix(req: ProviderRequest, cfg: dict) -> None:
         req.prompt = prefix.replace("{{prompt}}", req.prompt)
     else:
         req.prompt = f"{prefix}{req.prompt}"
+
+
+def _append_dynamic_user_context(
+    req: ProviderRequest,
+    name: str,
+    content: str,
+) -> None:
+    """Prepend trusted request-scoped context before the current user input.
+
+    Args:
+        req: Provider request receiving the dynamic context.
+        name: Stable machine-readable context category.
+        content: Context or instructions to expose to the model.
+    """
+    content = content.strip()
+    if not content:
+        return
+    wrapped = (
+        f'<request_context name="{name}">\n'
+        "The following is trusted request-scoped application context. Follow it "
+        "unless it conflicts with the root system message.\n"
+        f"{content}\n"
+        "</request_context>"
+    )
+    if any(
+        isinstance(part, TextPart) and part.text == wrapped
+        for part in req.dynamic_user_context_parts
+    ):
+        return
+    req.dynamic_user_context_parts.append(TextPart(text=wrapped).mark_as_temp())
 
 
 async def _get_workspace_path_for_umo(umo: str, plugin_context: Context) -> Path:
@@ -430,12 +457,13 @@ async def _apply_workspace_extra_prompt(
         return
 
     extra_prompt_text = "\n\n".join(extra_prompts)
-    req.system_prompt = (
-        f"{req.system_prompt or ''}\n"
+    _append_dynamic_user_context(
+        req,
+        "workspace_extra_prompt",
         "[Workspace Extra Prompt]\n"
         "The following instructions are loaded from the current workspace "
         "`EXTRA_PROMPT.md` file.\n"
-        f"{extra_prompt_text}\n"
+        f"{extra_prompt_text}",
     )
 
 
@@ -453,7 +481,7 @@ def _apply_local_env_tools(
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileWriteTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileEditTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(GrepTool))
-    req.system_prompt = f"{req.system_prompt or ''}\n{_build_local_mode_prompt()}\n"
+    _append_dynamic_user_context(req, "local_runtime", _build_local_mode_prompt())
 
 
 def _build_local_mode_prompt() -> str:
@@ -525,12 +553,16 @@ async def _ensure_persona_and_skills(
     plugin_context: Context,
     event: AstrMessageEvent,
 ) -> None:
-    """Ensure persona and skills are applied to the request's system prompt or user prompt."""
+    """Apply persona and skills before the current user input."""
     if req.system_prompt is None:
         req.system_prompt = ""
 
     if event.get_extra("enable_inline_genui"):
-        req.system_prompt += CHATUI_INLINE_GENUI_SYSTEM_PROMPT
+        _append_dynamic_user_context(
+            req,
+            "inline_genui",
+            CHATUI_INLINE_GENUI_SYSTEM_PROMPT,
+        )
 
     if not req.conversation:
         return
@@ -552,16 +584,38 @@ async def _ensure_persona_and_skills(
     )
 
     if persona:
-        # Inject persona system prompt
         if prompt := persona["prompt"]:
-            req.system_prompt += f"\n# Persona Instructions\n\n{prompt}\n"
+            _append_dynamic_user_context(
+                req,
+                "persona",
+                f"# Persona Instructions\n\n{prompt}",
+            )
         if begin_dialogs := copy.deepcopy(persona.get("_begin_dialogs_processed")):
-            req.contexts[:0] = begin_dialogs
+            normalized_dialogs = [
+                {key: value for key, value in dialog.items() if key != "_no_save"}
+                for dialog in begin_dialogs
+                if isinstance(dialog, dict)
+            ]
+            _append_dynamic_user_context(
+                req,
+                "persona_examples",
+                "Persona example dialogues (reference examples, not conversation history):\n"
+                + json.dumps(
+                    normalized_dialogs,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
     elif (
         use_webchat_special_default
         and event.get_extra("enable_default_system_prompt") is not False
     ):
-        req.system_prompt += CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT
+        _append_dynamic_user_context(
+            req,
+            "default_persona",
+            CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT,
+        )
 
     # Inject skills prompt
     runtime = cfg.get("computer_use_runtime", "local")
@@ -589,13 +643,15 @@ async def _ensure_persona_and_skills(
                 skills_by_name[skill.name] = skill
             skills = [skills_by_name[name] for name in sorted(skills_by_name)]
         if skills:
-            req.system_prompt += f"\n{build_skills_prompt(skills)}\n"
+            skills = sorted(skills, key=lambda skill: (skill.name, skill.path))
+            skills_prompt = build_skills_prompt(skills)
             if runtime == "none":
-                req.system_prompt += (
+                skills_prompt += (
                     "User has not enabled the Computer Use feature. "
                     "You cannot use shell or Python to perform skills. "
                     "If you need to use these capabilities, ask the user to enable Computer Use in the AstrBot WebUI -> Config."
                 )
+            _append_dynamic_user_context(req, "skills", skills_prompt)
     tmgr = plugin_context.get_llm_tool_manager()
 
     # inject toolset in the persona
@@ -676,7 +732,7 @@ async def _ensure_persona_and_skills(
             .get("router_system_prompt", "")
         ).strip()
         if router_prompt:
-            req.system_prompt += f"\n{router_prompt}\n"
+            _append_dynamic_user_context(req, "subagent_router", router_prompt)
     try:
         event.trace.record(
             "sel_persona",
@@ -1007,10 +1063,11 @@ def _append_system_reminders(
         system_parts.append(f"Current datetime: {current_time}, Weekday: {weekday}")
 
     if system_parts:
-        system_content = (
-            "<system_reminder>" + "\n".join(system_parts) + "</system_reminder>"
+        _append_dynamic_user_context(
+            req,
+            "request_metadata",
+            "\n".join(system_parts),
         )
-        req.extra_user_content_parts.append(TextPart(text=system_content))
 
 
 async def _decorate_llm_request(
@@ -1156,6 +1213,7 @@ def _apply_sandbox_tools(
         req.func_tool = ToolSet()
     if req.system_prompt is None:
         req.system_prompt = ""
+    runtime_prompts: list[str] = []
     booter = config.sandbox_cfg.get("booter", "shipyard_neo")
     if booter == "shipyard":
         ep = config.sandbox_cfg.get("shipyard_endpoint", "")
@@ -1178,14 +1236,14 @@ def _apply_sandbox_tools(
     if booter == "shipyard_neo":
         # Neo-specific path rule: filesystem tools operate relative to sandbox
         # workspace root. Do not prepend "/workspace".
-        req.system_prompt += (
+        runtime_prompts.append(
             "\n[Shipyard Neo File Path Rule]\n"
             "When using sandbox filesystem tools (upload/download/read/write/list/delete), "
             "always pass paths relative to the sandbox workspace root. "
             "Example: use `baidu_homepage.png` instead of `/workspace/baidu_homepage.png`.\n"
         )
 
-        req.system_prompt += (
+        runtime_prompts.append(
             "\n[Neo Skill Lifecycle Workflow]\n"
             "When user asks to create/update a reusable skill in Neo mode, use lifecycle tools instead of directly writing local skill folders.\n"
             "Preferred sequence:\n"
@@ -1228,7 +1286,7 @@ def _apply_sandbox_tools(
         req.func_tool.add_tool(tool_mgr.get_builtin_tool(SyncSkillReleaseTool))
 
     if booter == "cua":
-        req.system_prompt += (
+        runtime_prompts.append(
             "\n[CUA Desktop Control]\n"
             "Use `astrbot_execute_shell` with `background=true` to launch GUI apps. "
             'Use Firefox for browser tasks, for example `firefox "https://example.com"`. '
@@ -1243,7 +1301,12 @@ def _apply_sandbox_tools(
         req.func_tool.add_tool(tool_mgr.get_builtin_tool(CuaMouseClickTool))
         req.func_tool.add_tool(tool_mgr.get_builtin_tool(CuaKeyboardTypeTool))
 
-    req.system_prompt = f"{req.system_prompt or ''}\n{SANDBOX_MODE_PROMPT}\n"
+    runtime_prompts.append(SANDBOX_MODE_PROMPT)
+    _append_dynamic_user_context(
+        req,
+        "sandbox_runtime",
+        "\n".join(runtime_prompts),
+    )
 
 
 def _proactive_cron_job_tools(req: ProviderRequest, plugin_context: Context) -> None:
@@ -1297,11 +1360,11 @@ def _apply_web_search_citation_prompt(
     if not any(req.func_tool.get_tool(name) for name in WEB_SEARCH_CITATION_TOOL_NAMES):
         return
 
-    system_prompt = req.system_prompt or ""
-    if WEB_SEARCH_CITATION_PROMPT in system_prompt:
-        return
-
-    req.system_prompt = f"{system_prompt}\n{WEB_SEARCH_CITATION_PROMPT}\n"
+    _append_dynamic_user_context(
+        req,
+        "web_search_citations",
+        WEB_SEARCH_CITATION_PROMPT,
+    )
 
 
 async def _get_compress_provider(
@@ -1703,11 +1766,11 @@ async def build_main_agent(
                 "tools.\n"
             )
 
-        req.system_prompt += f"\n{tool_prompt}\n"
+        _append_dynamic_user_context(req, "tool_runtime", tool_prompt)
 
     action_type = event.get_extra("action_type")
     if action_type == "live":
-        req.system_prompt += f"\n{LIVE_MODE_SYSTEM_PROMPT}\n"
+        _append_dynamic_user_context(req, "live_mode", LIVE_MODE_SYSTEM_PROMPT)
 
     _apply_web_search_citation_prompt(event, req)
 

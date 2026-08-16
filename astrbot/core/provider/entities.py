@@ -97,8 +97,10 @@ class ProviderRequest:
     """图片 URL 列表"""
     audio_urls: list[str] = field(default_factory=list)
     """音频 URL 列表，也支持本地路径"""
+    dynamic_user_context_parts: list[ContentPart] = field(default_factory=list)
+    """请求级动态上下文，放在当前用户原始输入之前且不应持久化。"""
     extra_user_content_parts: list[ContentPart] = field(default_factory=list)
-    """额外的用户消息内容部分列表，用于在用户消息后添加额外的内容块（如系统提醒、指令等）。支持 dict 或 ContentPart 对象"""
+    """用户输入后的附件、引用等额外内容块。"""
     func_tool: ToolSet | None = None
     """可用的函数工具"""
     contexts: list[dict] = field(default_factory=list)
@@ -190,7 +192,14 @@ class ProviderRequest:
         # 构建内容块列表
         content_blocks = []
 
-        # 1. 用户原始发言（OpenAI 建议：用户发言在前）
+        # 1. Request-scoped instructions/context precede the user's own input.
+        # The complete user message is still appended after immutable history, so
+        # historical cache checkpoints remain reusable while the user's text keeps
+        # the final semantic position within the message.
+        for part in self.dynamic_user_context_parts:
+            content_blocks.append(part.model_dump_for_context())
+
+        # 2. 用户原始发言
         if self.prompt and self.prompt.strip():
             content_blocks.append({"type": "text", "text": self.prompt})
         elif self.image_urls:
@@ -200,12 +209,12 @@ class ProviderRequest:
             # 如果没有文本但有音频，添加占位文本
             content_blocks.append({"type": "text", "text": "[音频]"})
 
-        # 2. 额外的内容块（系统提醒、指令等）
+        # 3. 额外的内容块（附件、引用等）
         if self.extra_user_content_parts:
             for part in self.extra_user_content_parts:
                 content_blocks.append(part.model_dump_for_context())
 
-        # 3. 图片内容
+        # 4. 图片内容
         if self.image_urls:
             for image_url in self.image_urls:
                 image_data = await MediaResolver(
@@ -251,6 +260,7 @@ class ProviderRequest:
         if (
             len(content_blocks) == 1
             and content_blocks[0]["type"] == "text"
+            and not self.dynamic_user_context_parts
             and not self.extra_user_content_parts
             and not self.image_urls
             and not self.audio_urls

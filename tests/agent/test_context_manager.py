@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from astrbot.core.agent.context.config import ContextConfig
 from astrbot.core.agent.context.manager import ContextManager
 from astrbot.core.agent.message import AudioURLPart, ImageURLPart, Message, TextPart
+from astrbot.core.agent.tool import ToolSet
 from astrbot.core.provider.entities import LLMResponse
 
 
@@ -74,16 +75,19 @@ class TestContextManager:
     def test_init_with_llm_compressor(self):
         """Test initialization with LLM-based compression."""
         mock_provider = MockProvider()
+        tools = ToolSet()
         config = ContextConfig(
             llm_compress_provider=mock_provider,  # type: ignore
             llm_compress_keep_recent_ratio=0.15,
             llm_compress_instruction="Summarize the conversation",
+            llm_compress_tools=tools,
         )
         manager = ContextManager(config)
 
         from astrbot.core.agent.context.compressor import LLMSummaryCompressor
 
         assert isinstance(manager.compressor, LLMSummaryCompressor)
+        assert manager.compressor.tools is tools
 
     def test_init_with_truncate_compressor(self):
         """Test initialization with truncate-based compression (default)."""
@@ -146,11 +150,11 @@ class TestContextManager:
             compressor.TASK_CONTINUATION_INSTRUCTION in summary_contexts[-1]["content"]
         )
 
-        assert len(result) == 4
+        assert len(result) == 3
         assert result[0].role == "user"
         assert isinstance(result[0].content, str)
         assert result[0].content.strip()
-        assert "Hello" in result[0].content
+        assert "previous history conversation summary" in result[0].content
         assert result[-1].content == [TextPart(text="Sure")]
 
     @pytest.mark.asyncio
@@ -175,8 +179,10 @@ class TestContextManager:
         summary_contexts = provider.last_text_chat_kwargs["contexts"]
         assert summary_contexts[0] == {"role": "system", "content": "System prompt"}
         assert summary_contexts[1] == {"role": "user", "content": "Old question"}
-        assert summary_contexts[2]["role"] == "assistant"
-        assert summary_contexts[2]["content"]
+        assert summary_contexts[2] == {
+            "role": "user",
+            "content": "Current question",
+        }
         assert summary_contexts[3]["role"] == "user"
         assert instruction in summary_contexts[3]["content"]
         assert (
@@ -220,13 +226,13 @@ class TestContextManager:
         assert summary_contexts[1]["tool_calls"]
         assert summary_contexts[2]["role"] == "tool"
         assert summary_contexts[2]["tool_call_id"] == "call_1"
-        assert summary_contexts[3]["role"] == "assistant"
-        assert summary_contexts[4]["role"] == "user"
-        assert "Summarize the whole trajectory." in summary_contexts[4]["content"]
+        assert summary_contexts[3]["role"] == "user"
+        assert "Summarize the whole trajectory." in summary_contexts[3]["content"]
         assert (
-            compressor.TASK_CONTINUATION_INSTRUCTION in summary_contexts[4]["content"]
+            compressor.TASK_CONTINUATION_INSTRUCTION in summary_contexts[3]["content"]
         )
-        assert all(original not in result for original in messages)
+        assert result[0] is messages[0]
+        assert all(original not in result for original in messages[1:])
         assert len(result) == 2
 
     @pytest.mark.asyncio
@@ -250,9 +256,9 @@ class TestContextManager:
         summary_contexts = provider.last_text_chat_kwargs["contexts"]
         assert summary_contexts[0] == {"role": "user", "content": "Old question"}
         assert summary_contexts[1] == {"role": "assistant", "content": "Old answer"}
-        assert not any(
-            msg.get("content") == "Current question" for msg in summary_contexts
-        )
+        assert any(msg.get("content") == "Current question" for msg in summary_contexts)
+        assert summary_contexts[-1]["role"] == "user"
+        assert "Summarize old context." in summary_contexts[-1]["content"]
         assert result[-1] is messages[2]
 
     @pytest.mark.asyncio
@@ -294,10 +300,9 @@ class TestContextManager:
         assert summary_contexts[0]["role"] == "system"
         assert summary_contexts[1]["role"] == "user"
         assert summary_contexts[2]["role"] == "assistant"
-        assert len(result) == 3
+        assert len(result) == 2
         assert result[0] is messages[0]
         assert result[1].role == "user"
-        assert result[2].role == "assistant"
 
     @pytest.mark.asyncio
     async def test_llm_compressor_sanitizes_context_for_text_only_provider(self):
@@ -373,7 +378,9 @@ class TestContextManager:
         summary_contexts = provider.last_text_chat_kwargs["contexts"]
         assert summary_contexts[0] == {"role": "user", "content": "a" * 200}
         assert summary_contexts[1] == {"role": "assistant", "content": "b" * 200}
-        assert not any(msg.get("content") == "c" * 10 for msg in summary_contexts)
+        assert any(msg.get("content") == "c" * 10 for msg in summary_contexts)
+        assert summary_contexts[-1]["role"] == "user"
+        assert "Summarize." in summary_contexts[-1]["content"]
         assert result[-4:] == messages[2:]
 
     # ==================== Empty and Edge Cases ====================

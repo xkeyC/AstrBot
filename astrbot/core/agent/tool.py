@@ -1,4 +1,5 @@
 import copy
+import json
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any, Generic
 
@@ -201,9 +202,14 @@ class ToolSet:
         return self.tools
 
     def openai_schema(self, omit_empty_parameter_field: bool = False) -> list[dict]:
-        """Convert tools to OpenAI API function calling schema format."""
+        """Convert tools to a deterministic OpenAI function-calling schema.
+
+        Tool definitions are part of the prompt-cache prefix for OpenAI-compatible
+        providers. Sorting tools and recursively sorting JSON Schema keys keeps the
+        serialized prefix stable when registration or source-dict order changes.
+        """
         result = []
-        for tool in self.tools:
+        for tool in sorted(self.tools, key=lambda item: item.name):
             func_def = {"type": "function", "function": {"name": tool.name}}
             if tool.description:
                 func_def["function"]["description"] = tool.description
@@ -212,7 +218,14 @@ class ToolSet:
                 if (
                     tool.parameters and tool.parameters.get("properties")
                 ) or not omit_empty_parameter_field:
-                    func_def["function"]["parameters"] = tool.parameters
+                    func_def["function"]["parameters"] = json.loads(
+                        json.dumps(
+                            tool.parameters,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
 
             result.append(func_def)
         return result

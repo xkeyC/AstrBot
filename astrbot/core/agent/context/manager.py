@@ -36,6 +36,7 @@ class ContextManager:
                 keep_recent_ratio=config.llm_compress_keep_recent_ratio,
                 instruction_text=config.llm_compress_instruction,
                 token_counter=self.token_counter,
+                tools=config.llm_compress_tools,
             )
         else:
             self.compressor = TruncateByTurnsCompressor(

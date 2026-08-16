@@ -18,6 +18,7 @@ else:
         logger = logging.getLogger("astrbot")
 
 if TYPE_CHECKING:
+    from astrbot.core.agent.tool import ToolSet
     from astrbot.core.provider.provider import Provider
 
 from ..context.truncator import ContextTruncator
@@ -122,6 +123,7 @@ class LLMSummaryCompressor:
         "If a task appears to be in progress, end the summary with the latest "
         "known result and the concrete next step to continue the task."
     )
+    ANCHOR_MAX_TOKEN_RATIO = 0.2
 
     def __init__(
         self,
@@ -130,6 +132,7 @@ class LLMSummaryCompressor:
         instruction_text: str | None = None,
         compression_threshold: float = 0.82,
         token_counter: TokenCounter | None = None,
+        tools: "ToolSet | None" = None,
     ) -> None:
         """Initialize the LLM summary compressor.
 
@@ -139,11 +142,15 @@ class LLMSummaryCompressor:
                 exact context. Clamped to 0-0.3.
             instruction_text: Custom instruction for summary generation.
             compression_threshold: The compression trigger threshold (default: 0.82).
+            token_counter: Token counter used for recent and anchor budgets.
+            tools: Stable tool definitions to share with the summary request when
+                it uses the same provider as the main request.
         """
         self.provider = provider
         self.keep_recent_ratio = min(max(float(keep_recent_ratio), 0.0), 0.3)
         self.compression_threshold = compression_threshold
         self.token_counter = token_counter or EstimateTokenCounter()
+        self.tools = tools
 
         self.instruction_text = instruction_text or (
             "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n"
@@ -203,6 +210,78 @@ class LLMSummaryCompressor:
 
         return rounds[:recent_start], rounds[recent_start:]
 
+    def _select_stable_anchor(
+        self,
+        rounds: list[list[Message]],
+        total_tokens: int,
+    ) -> list[Message]:
+        """Select a real opening checkpoint without splitting a tool protocol.
+
+        Args:
+            rounds: Rounds that will otherwise be summarized.
+            total_tokens: Token count of the full pre-compression context.
+
+        Returns:
+            A complete small first turn, a small first user message for an
+            oversized tool turn, or an empty list when no safe anchor exists.
+        """
+        first_round: list[Message] = []
+        for round_messages in rounds:
+            first_user_index = next(
+                (
+                    index
+                    for index, message in enumerate(round_messages)
+                    if message.role == "user"
+                ),
+                None,
+            )
+            if first_user_index is not None:
+                first_round = round_messages[first_user_index:]
+                break
+        if not first_round or total_tokens <= 0:
+            return []
+
+        anchor_budget = max(1, int(total_tokens * self.ANCHOR_MAX_TOKEN_RATIO))
+        has_tool_chain = any(
+            msg.role == "tool" or msg.tool_calls for msg in first_round
+        )
+        pending_tool_ids: set[str] = set()
+        valid_tool_chain = True
+        for msg in first_round[1:]:
+            if msg.role == "assistant" and msg.tool_calls:
+                if pending_tool_ids:
+                    valid_tool_chain = False
+                    break
+                pending_tool_ids = {call.id for call in msg.tool_calls}
+            elif msg.role == "tool":
+                if not msg.tool_call_id or msg.tool_call_id not in pending_tool_ids:
+                    valid_tool_chain = False
+                    break
+                pending_tool_ids.remove(msg.tool_call_id)
+            elif pending_tool_ids:
+                valid_tool_chain = False
+                break
+
+        complete_turn = (
+            first_round[-1].role == "assistant"
+            and not first_round[-1].tool_calls
+            and valid_tool_chain
+            and not pending_tool_ids
+        )
+        if (
+            complete_turn
+            and self.token_counter.count_tokens(first_round) <= anchor_budget
+        ):
+            return first_round
+
+        first_user = first_round[0]
+        if (
+            has_tool_chain
+            and self.token_counter.count_tokens([first_user]) <= anchor_budget
+        ):
+            return [first_user]
+        return []
+
     async def __call__(self, messages: list[Message]) -> list[Message]:
         """Use LLM to generate a summary of the conversation history.
 
@@ -237,28 +316,32 @@ class LLMSummaryCompressor:
             old_rounds = message_rounds
             recent_rounds = []
 
-        summary_contexts = [msg for rnd in old_rounds for msg in rnd]
-        if not any(msg.role != "system" for msg in summary_contexts):
+        old_contexts = [msg for rnd in old_rounds for msg in rnd]
+        if not any(msg.role != "system" for msg in old_contexts):
             if recent_rounds and messages and messages[-1].role == "user":
                 return messages
             old_rounds = message_rounds
             recent_rounds = []
-            summary_contexts = [msg for rnd in old_rounds for msg in rnd]
-            if not any(msg.role != "system" for msg in summary_contexts):
+            old_contexts = [msg for rnd in old_rounds for msg in rnd]
+            if not any(msg.role != "system" for msg in old_contexts):
                 return messages
 
-        if summary_contexts[-1].role != "assistant":
-            summary_contexts.append(
-                Message(
-                    role="assistant",
-                    content="Acknowledged.",
-                )
-            )
+        stable_anchor = self._select_stable_anchor(old_rounds, total_tokens)
+        recent_count = sum(len(rnd) for rnd in recent_rounds)
+
+        # Reuse the exact full pre-compression request as the prefix. The summary
+        # instruction is the only appended suffix, so providers can reuse every
+        # available cache checkpoint from the main request.
+        summary_contexts = list(messages)
         summary_contexts.append(
             Message(
                 role="user",
                 content=(
-                    "Generate a summary of our previous conversation history.\n"
+                    "Generate a summary that can replace the older middle portion "
+                    "of our previous conversation history.\n"
+                    f"The compressed context will retain {len(stable_anchor)} opening "
+                    f"message(s) and {recent_count} recent message(s) verbatim. "
+                    "Do not repeat retained content unless it is required for continuity.\n"
                     f"<extra_instruction>\n{self.instruction_text}\n\n"
                     f"{self.TASK_CONTINUATION_INSTRUCTION}</extra_instruction>\n"
                     "Respond ONLY with the summary content, without any additional text or formatting."
@@ -275,6 +358,7 @@ class LLMSummaryCompressor:
         try:
             response = await self.provider.text_chat(
                 contexts=sanitized_summary_contexts,
+                func_tool=self.tools,
             )
             summary_content = (response.completion_text or "").strip()
         except Exception as e:
@@ -285,8 +369,9 @@ class LLMSummaryCompressor:
             logger.warning("LLM context compression returned an empty summary.")
             return messages
 
-        # Build result: system messages + summary pair + recent rounds
+        # Build a new cache epoch after the stable root and real opening anchor.
         result = _extract_system_messages(messages)
+        result.extend(stable_anchor)
 
         result.append(
             Message(
@@ -294,17 +379,11 @@ class LLMSummaryCompressor:
                 content=f"Our previous history conversation summary: {summary_content}",
             )
         )
-        result.append(
-            Message(
-                role="assistant",
-                content="Acknowledged the summary of our previous conversation history.",
-            )
-        )
-
         # Flatten recent rounds back to message list
+        anchor_ids = {id(msg) for msg in stable_anchor}
         for rnd in recent_rounds:
             for seg in rnd:
-                if isinstance(seg, Message):
+                if isinstance(seg, Message) and id(seg) not in anchor_ids:
                     result.append(seg)
 
         return result

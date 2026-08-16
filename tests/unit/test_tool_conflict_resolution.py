@@ -92,6 +92,47 @@ class TestToolSetAddTool:
 
         assert len(toolset.tools) == 1
 
+    def test_openai_schema_is_stable_across_registration_and_key_order(self):
+        """Equivalent tool sets should produce byte-stable schema structures."""
+        first = FunctionTool(
+            name="z_tool",
+            description="Z",
+            parameters={
+                "type": "object",
+                "properties": {"query": {"description": "Q", "type": "string"}},
+            },
+        )
+        second = FunctionTool(
+            name="a_tool",
+            description="A",
+            parameters={
+                "properties": {"query": {"type": "string", "description": "Q"}},
+                "type": "object",
+            },
+        )
+        reversed_first = FunctionTool(
+            name="z_tool",
+            description="Z",
+            parameters={
+                "properties": {"query": {"type": "string", "description": "Q"}},
+                "type": "object",
+            },
+        )
+        reversed_second = FunctionTool(
+            name="a_tool",
+            description="A",
+            parameters={
+                "type": "object",
+                "properties": {"query": {"description": "Q", "type": "string"}},
+            },
+        )
+
+        left = ToolSet([first, second]).openai_schema()
+        right = ToolSet([reversed_second, reversed_first]).openai_schema()
+
+        assert left == right
+        assert [tool["function"]["name"] for tool in left] == ["a_tool", "z_tool"]
+
 
 class TestFunctionToolManagerGetFunc:
     """Tests for FunctionToolManager.get_func with conflict resolution."""
