@@ -2381,7 +2381,9 @@ async def test_search_registry_invokes_hidden_tool_through_runner(runner, mock_h
     )
 
     assert request.func_tool.names() == ["tool_search", "tool_invoke"]
-    assert "- `qq_` (1 tool)" in request.system_prompt
+    assert "- `qq_` (1 tool)" in "\n".join(
+        part.text for part in request.dynamic_user_context_parts
+    )
 
     responses = [response async for response in runner.step_until_done(3)]
 
@@ -2558,6 +2560,7 @@ async def test_search_registry_releases_results_removed_during_step_compression(
         ]
 
     runner.request_context_manager.process = compress_old_tool_messages
+    runner._active_request_message = None
 
     async for _ in runner.step():
         pass

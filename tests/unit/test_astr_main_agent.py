@@ -2,7 +2,6 @@
 
 import datetime
 import os
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -920,7 +919,7 @@ class TestEnsurePersonaAndSkills:
             provider_settings={},
             selected_persona_id="event-persona",
         )
-        assert "Event persona." in req.system_prompt
+        assert "Event persona." in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
     async def test_inline_genui_prompt_is_added_with_custom_persona(
@@ -2054,7 +2053,7 @@ class TestBuildMainAgent:
     ):
         """Test building main agent with video attachments."""
         module = ama
-        video_path = str(Path("/path/to/video.mp4"))
+        video_path = "/path/to/video.mp4"
         mock_video = Video(file="file:///path/to/video.mp4")
         mock_event.message_obj.message = [mock_video]
 
@@ -2090,7 +2089,7 @@ class TestBuildMainAgent:
     ):
         """Test building main agent with quoted video attachments."""
         module = ama
-        video_path = str(Path("/path/to/quoted-video.mp4"))
+        video_path = "/path/to/quoted-video.mp4"
         mock_video = Video(file="file:///path/to/quoted-video.mp4")
         mock_reply = Reply(
             id="reply-1",

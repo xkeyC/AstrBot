@@ -1,6 +1,7 @@
 import base64
 import builtins
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -911,20 +912,20 @@ async def test_prepare_chat_payload_materializes_context_file_uri_image_urls(tmp
 
 
 def test_file_uri_to_path_preserves_windows_drive_letter():
-    assert file_uri_to_path("file:///C:/tmp/quoted-image.png") == (
-        "C:/tmp/quoted-image.png"
+    assert file_uri_to_path("file:///C:/tmp/quoted-image.png") == str(
+        Path("C:/tmp/quoted-image.png")
     )
 
 
 def test_file_uri_to_path_preserves_windows_netloc_drive_letter():
-    assert file_uri_to_path("file://C:/tmp/quoted-image.png") == (
-        "C:/tmp/quoted-image.png"
+    assert file_uri_to_path("file://C:/tmp/quoted-image.png") == str(
+        Path("C:/tmp/quoted-image.png")
     )
 
 
 def test_file_uri_to_path_preserves_remote_netloc_as_unc_path():
-    assert file_uri_to_path("file://server/share/quoted-image.png") == (
-        "//server/share/quoted-image.png"
+    assert file_uri_to_path("file://server/share/quoted-image.png") == str(
+        Path("//server/share/quoted-image.png")
     )
 
 
