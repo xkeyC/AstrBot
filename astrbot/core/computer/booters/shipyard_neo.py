@@ -354,7 +354,7 @@ class ShipyardNeoBooter(ComputerBooter):
         endpoint_url: str,
         access_token: str,
         profile: str = "",
-        ttl: int = 3600,
+        ttl: int = 43200,
     ) -> None:
         self._endpoint_url = endpoint_url
         self._access_token = access_token

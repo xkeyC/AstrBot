@@ -760,6 +760,23 @@ class ProviderAnthropic(Provider):
         request_max_retries: int | None = None,
         **kwargs,
     ) -> LLMResponse:
+        if self._should_force_streaming_text_chat():
+            return await self._text_chat_from_stream_blocking(
+                prompt=prompt,
+                session_id=session_id,
+                image_urls=image_urls,
+                audio_urls=audio_urls,
+                func_tool=func_tool,
+                contexts=contexts,
+                system_prompt=system_prompt,
+                tool_calls_result=tool_calls_result,
+                model=model,
+                extra_user_content_parts=extra_user_content_parts,
+                tool_choice=tool_choice,
+                request_max_retries=request_max_retries,
+                **kwargs,
+            )
+
         if contexts is None:
             contexts = []
         new_record = None

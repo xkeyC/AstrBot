@@ -56,20 +56,299 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             return value.get(name, default)
         return getattr(value, name, default)
 
+    def _replay_state_scope(self, model: str | None = None) -> dict[str, str]:
+        """Identify the provider and model that own opaque replay items."""
+        provider_id = self.provider_config.get("provider_source_id") or (
+            self.provider_config.get("id")
+        )
+        return {
+            "provider_id": str(provider_id or ""),
+            "api_base": str(self.client.base_url).rstrip("/"),
+            "model": str(model or self.get_model()),
+        }
+
+    @staticmethod
+    def _serialize_response_item(item: Any) -> dict[str, Any] | None:
+        """Serialize one SDK output item without changing its opaque fields."""
+        if hasattr(item, "model_dump"):
+            serialized_item = item.model_dump(mode="json", exclude_none=True)
+        elif isinstance(item, dict):
+            serialized_item = copy.deepcopy(item)
+        else:
+            return None
+        if not isinstance(serialized_item.get("type"), str):
+            return None
+        return serialized_item
+
+    def _serialize_replay_state(
+        self,
+        response: Any,
+        request_model: str | None = None,
+    ) -> str | None:
+        """Serialize output items that are not represented by chat history."""
+        replay_items: list[dict[str, Any]] = []
+        for item in self._field(response, "output", []) or []:
+            if self._field(item, "type") in {"message", "function_call"}:
+                continue
+            serialized_item = self._serialize_response_item(item)
+            if serialized_item is not None:
+                replay_items.append(serialized_item)
+        if not replay_items:
+            return None
+        return json.dumps(
+            {
+                "type": self._REASONING_STATE_TYPE,
+                "scope": self._replay_state_scope(request_model),
+                "items": replay_items,
+            },
+            ensure_ascii=False,
+        )
+
+    @classmethod
+    def _image_output_to_component(cls, value: Any) -> Comp.Image | None:
+        """Convert a Responses image payload into an AstrBot image component."""
+        if isinstance(value, dict):
+            nested_url = value.get("url")
+            if nested_url is not None:
+                value = nested_url
+
+        if not isinstance(value, str):
+            return None
+
+        image_data = value.strip()
+        if not image_data:
+            return None
+        if image_data.startswith(("http://", "https://")):
+            return Comp.Image.fromURL(image_data)
+        if image_data.startswith("base64://"):
+            image_data = image_data.removeprefix("base64://")
+        elif image_data.startswith("data:image/"):
+            _, separator, image_data = image_data.partition(",")
+            if not separator:
+                return None
+        return Comp.Image.fromBase64(image_data)
+
+    @staticmethod
+    def _response_tool_key(tool: dict[str, Any]) -> tuple[str, str] | None:
+        """Return a stable key for tools that can safely be deduplicated.
+
+        Args:
+            tool: A Responses API tool definition.
+
+        Returns:
+            A key for native tools and named function tools, or ``None`` when
+            the tool must be preserved as-is.
+        """
+        tool_type = tool.get("type")
+        if tool_type == "function":
+            name = tool.get("name")
+            if isinstance(name, str) and name:
+                return tool_type, name
+            return None
+        if tool_type in {
+            "web_search",
+            "file_search",
+            "code_interpreter",
+            "image_generation",
+        }:
+            return tool_type, ""
+        return None
+
+    @classmethod
+    def _deduplicate_response_tools(
+        cls,
+        response_tools: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Keep the first configured definition of each native tool.
+
+        Args:
+            response_tools: Responses API tools in precedence order.
+
+        Returns:
+            Tools without duplicate native entries or function names.
+        """
+        unique_tools: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for tool in response_tools:
+            tool_key = cls._response_tool_key(tool)
+            if tool_key is not None:
+                if tool_key in seen_keys:
+                    continue
+                seen_keys.add(tool_key)
+            unique_tools.append(tool)
+        return unique_tools
+
+    def _build_response_tools(
+        self,
+        tools: ToolSet | None,
+        custom_tools: Any,
+    ) -> list[dict[str, Any]]:
+        """Build the Responses API tool list from AstrBot and native tools.
+
+        Args:
+            tools: AstrBot function tools available for the request.
+            custom_tools: Backward-compatible raw Responses API tools from config.
+
+        Returns:
+            The normalized tool entries to send to the Responses API.
+        """
+        response_tools: list[dict[str, Any]] = []
+        if tools:
+            function_tools: list[dict[str, Any]] = []
+            for tool in tools.openai_schema():
+                function = tool.get("function", {})
+                function_tools.append({"type": "function", **function})
+            # Preserve the fork's stable tool ordering: knowledge-base search is
+            # kept last so other tools retain their original prefix/order.
+            function_tools.sort(key=lambda tool: tool.get("name") == "astr_kb_search")
+            response_tools.extend(function_tools)
+
+        if self.provider_config.get("responses_web_search"):
+            web_search: dict[str, Any] = {"type": "web_search"}
+            context_size = self.provider_config.get(
+                "responses_web_search_context_size",
+                "medium",
+            )
+            if context_size in {"low", "medium", "high"}:
+                web_search["search_context_size"] = context_size
+            allowed_domains = self.provider_config.get(
+                "responses_web_search_allowed_domains",
+            )
+            if isinstance(allowed_domains, list):
+                domains = [
+                    domain
+                    for domain in allowed_domains
+                    if isinstance(domain, str) and domain
+                ]
+                if domains:
+                    web_search["filters"] = {"allowed_domains": domains}
+            response_tools.append(web_search)
+
+        vector_store_ids = self.provider_config.get(
+            "responses_file_search_vector_store_ids",
+        )
+        if isinstance(vector_store_ids, list):
+            vector_store_ids = [
+                vector_store_id
+                for vector_store_id in vector_store_ids
+                if isinstance(vector_store_id, str) and vector_store_id
+            ]
+            if vector_store_ids:
+                response_tools.append(
+                    {
+                        "type": "file_search",
+                        "vector_store_ids": vector_store_ids,
+                    }
+                )
+
+        if self.provider_config.get("responses_code_interpreter"):
+            response_tools.append(
+                {
+                    "type": "code_interpreter",
+                    "container": {"type": "auto"},
+                }
+            )
+
+        if self.provider_config.get("responses_image_generation"):
+            response_tools.append({"type": "image_generation"})
+
+        if isinstance(custom_tools, list):
+            response_tools.extend(
+                tool for tool in custom_tools if isinstance(tool, dict)
+            )
+
+        return self._deduplicate_response_tools(response_tools)
+
+    def _prepare_response_request(
+        self,
+        payloads: dict[str, Any],
+        tools: ToolSet | None,
+    ) -> dict[str, Any]:
+        """Normalize a Responses API request before streaming or completion.
+
+        Args:
+            payloads: Request payload that is updated in place.
+            tools: AstrBot function tools available for the request.
+
+        Returns:
+            Extra request fields that are not SDK method parameters.
+        """
+        extra_body: dict[str, Any] = {}
+        custom_extra_body = self.provider_config.get("custom_extra_body", {})
+        if isinstance(custom_extra_body, dict):
+            extra_body.update(custom_extra_body)
+
+        custom_tools = extra_body.pop("tools", None)
+        custom_tool_choice = extra_body.pop("tool_choice", None)
+        response_tools = self._build_response_tools(tools, custom_tools)
+        if response_tools:
+            payloads["tools"] = response_tools
+            tool_choice = self.provider_config.get("responses_tool_choice")
+            if tool_choice not in {"auto", "required", "none"}:
+                tool_choice = payloads.get("tool_choice", custom_tool_choice)
+            if tool_choice not in {"auto", "required", "none"}:
+                tool_choice = "auto"
+            payloads["tool_choice"] = tool_choice
+
+        compact_threshold = self.provider_config.get(
+            "responses_compact_threshold",
+            0,
+        )
+        if isinstance(compact_threshold, str):
+            try:
+                compact_threshold = int(compact_threshold)
+            except ValueError:
+                compact_threshold = 0
+        if (
+            isinstance(compact_threshold, int)
+            and not isinstance(compact_threshold, bool)
+            and compact_threshold > 0
+        ):
+            extra_body.pop("context_management", None)
+            payloads["context_management"] = [
+                {
+                    "type": "compaction",
+                    "compact_threshold": compact_threshold,
+                }
+            ]
+
+        for key in list(payloads):
+            if key not in self.default_params:
+                extra_body[key] = payloads.pop(key)
+
+        max_tokens = extra_body.pop("max_tokens", None)
+        if max_tokens is not None and "max_output_tokens" not in extra_body:
+            extra_body["max_output_tokens"] = max_tokens
+        reasoning_effort = extra_body.pop("reasoning_effort", None)
+        if reasoning_effort is not None and "reasoning" not in extra_body:
+            extra_body["reasoning"] = {"effort": reasoning_effort}
+        extra_body.pop("previous_response_id", None)
+        extra_body.pop("conversation", None)
+        extra_body.pop("store", None)
+        payloads.pop("previous_response_id", None)
+        payloads.pop("conversation", None)
+        payloads["store"] = False
+        return extra_body
+
     def _convert_chat_messages_to_response_input(
         self,
         messages: list[dict],
+        model: str | None = None,
     ) -> list[dict]:
         """Convert AstrBot's OpenAI chat history to Responses input items.
 
-        The conversion preserves function call IDs and serialized reasoning output
+        The conversion preserves function call IDs and serialized opaque output
         items so the complete history can be replayed without server-side state.
+        When native compaction has emitted a compaction item, older input items
+        are discarded as required by the stateless Responses continuation flow.
 
         Args:
             messages: AstrBot context in OpenAI Chat Completions format.
+            model: Model that will receive the opaque replay items.
 
         Returns:
-            A list of Responses API input items.
+            A list of Responses API input items, pruned to the latest compaction
+            item when one is present.
         """
         response_input: list[dict] = []
         host = (self.client.base_url.host or "").rstrip(".").lower()
@@ -126,12 +405,15 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                             if (
                                 isinstance(state, dict)
                                 and state.get("type") == self._REASONING_STATE_TYPE
+                                and state.get("scope")
+                                == self._replay_state_scope(model)
                                 and isinstance(state.get("items"), list)
                             ):
                                 restored_items = [
                                     item
                                     for item in state["items"]
                                     if isinstance(item, dict)
+                                    and isinstance(item.get("type"), str)
                                 ]
                         if restored_items:
                             reasoning_items.extend(restored_items)
@@ -195,10 +477,11 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                 and converted_content != ""
                 and converted_content != []
             ):
+                response_role = "developer" if role == "system" else role
                 response_input.append(
                     {
                         "type": "message",
-                        "role": role,
+                        "role": response_role,
                         "content": converted_content,
                     }
                 )
@@ -229,6 +512,12 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                             }
                         )
 
+        latest_compaction_index: int | None = None
+        for index, item in enumerate(response_input):
+            if item.get("type") == "compaction" and item.get("encrypted_content"):
+                latest_compaction_index = index
+        if latest_compaction_index is not None:
+            return response_input[latest_compaction_index:]
         return response_input
 
     @staticmethod
@@ -334,13 +623,17 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         if self._context_contains_image(context_query):
             context_query = await self._materialize_context_image_parts(context_query)
 
+        request_model = model or self.get_model()
         context_query, instructions = self._split_response_instructions(
             context_query,
             system_prompt,
         )
         payloads: dict[str, Any] = {
-            "input": self._convert_chat_messages_to_response_input(context_query),
-            "model": model or self.get_model(),
+            "input": self._convert_chat_messages_to_response_input(
+                context_query,
+                request_model,
+            ),
+            "model": request_model,
             "store": False,
         }
         if instructions:
@@ -368,36 +661,8 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         Raises:
             TypeError: If the SDK returns an unexpected response type.
         """
-        if tools:
-            response_tools = []
-            for tool in tools.openai_schema():
-                function = tool.get("function", {})
-                response_tools.append({"type": "function", **function})
-            if response_tools:
-                payloads["tools"] = response_tools
-                payloads["tool_choice"] = payloads.get("tool_choice", "auto")
-
-        extra_body: dict[str, Any] = {}
-        custom_extra_body = self.provider_config.get("custom_extra_body", {})
-        if isinstance(custom_extra_body, dict):
-            extra_body.update(custom_extra_body)
-
-        for key in list(payloads):
-            if key not in self.default_params:
-                extra_body[key] = payloads.pop(key)
-
-        max_tokens = extra_body.pop("max_tokens", None)
-        if max_tokens is not None and "max_output_tokens" not in extra_body:
-            extra_body["max_output_tokens"] = max_tokens
-        reasoning_effort = extra_body.pop("reasoning_effort", None)
-        if reasoning_effort is not None and "reasoning" not in extra_body:
-            extra_body["reasoning"] = {"effort": reasoning_effort}
-        extra_body.pop("previous_response_id", None)
-        extra_body.pop("conversation", None)
-        extra_body.pop("store", None)
-        payloads.pop("previous_response_id", None)
-        payloads.pop("conversation", None)
-        payloads["store"] = False
+        request_model = str(payloads.get("model") or self.get_model())
+        extra_body = self._prepare_response_request(payloads, tools)
 
         response = await retry_provider_request(
             "OpenAI Responses",
@@ -415,7 +680,11 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             )
 
         logger.debug("response: %s", response)
-        return await self._parse_response(response, tools)
+        return await self._parse_response(
+            response,
+            tools,
+            request_model=request_model,
+        )
 
     async def _query_stream(
         self,
@@ -437,36 +706,8 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         Raises:
             EmptyModelOutputError: If the stream ends without a terminal event.
         """
-        if tools:
-            response_tools = []
-            for tool in tools.openai_schema():
-                function = tool.get("function", {})
-                response_tools.append({"type": "function", **function})
-            if response_tools:
-                payloads["tools"] = response_tools
-                payloads["tool_choice"] = payloads.get("tool_choice", "auto")
-
-        extra_body: dict[str, Any] = {}
-        custom_extra_body = self.provider_config.get("custom_extra_body", {})
-        if isinstance(custom_extra_body, dict):
-            extra_body.update(custom_extra_body)
-
-        for key in list(payloads):
-            if key not in self.default_params:
-                extra_body[key] = payloads.pop(key)
-
-        max_tokens = extra_body.pop("max_tokens", None)
-        if max_tokens is not None and "max_output_tokens" not in extra_body:
-            extra_body["max_output_tokens"] = max_tokens
-        reasoning_effort = extra_body.pop("reasoning_effort", None)
-        if reasoning_effort is not None and "reasoning" not in extra_body:
-            extra_body["reasoning"] = {"effort": reasoning_effort}
-        extra_body.pop("previous_response_id", None)
-        extra_body.pop("conversation", None)
-        extra_body.pop("store", None)
-        payloads.pop("previous_response_id", None)
-        payloads.pop("conversation", None)
-        payloads["store"] = False
+        request_model = str(payloads.get("model") or self.get_model())
+        extra_body = self._prepare_response_request(payloads, tools)
 
         stream = await retry_provider_request(
             "OpenAI Responses",
@@ -479,13 +720,19 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         )
 
         response_id: str | None = None
+        streamed_text: list[str] = []
+        streamed_reasoning: list[str] = []
+        streamed_images: list[Comp.Image] = []
+        tool_calls_by_id: dict[str, dict[str, Any]] = {}
+        tool_call_id_aliases: dict[str, str] = {}
+        tool_call_argument_deltas: dict[str, list[str]] = {}
         async for event in stream:
             event_type = self._field(event, "type", "")
             event_response = self._field(event, "response")
             if event_response is not None:
                 response_id = self._field(event_response, "id", response_id)
 
-            if event_type == "error":
+            if event_type in {"error", "response.error"}:
                 code = self._field(event, "code", "stream_error")
                 message = self._field(event, "message", "Responses stream failed")
                 raise RuntimeError(
@@ -499,6 +746,7 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             }:
                 delta = self._field(event, "delta", "")
                 if delta:
+                    streamed_text.append(str(delta))
                     yield LLMResponse(
                         "assistant",
                         result_chain=MessageChain(chain=[Comp.Plain(str(delta))]),
@@ -513,11 +761,64 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             }:
                 delta = self._field(event, "delta", "")
                 if delta:
+                    streamed_reasoning.append(str(delta))
                     yield LLMResponse(
                         "assistant",
                         reasoning_content=str(delta),
                         is_chunk=True,
                         id=response_id,
+                    )
+                continue
+
+            if event_type in {
+                "response.output_item.added",
+                "response.output_item.done",
+            }:
+                item = self._field(event, "item")
+                item_type = self._field(item, "type")
+                if item_type == "function_call":
+                    arguments = self._field(item, "arguments")
+                    self._merge_response_tool_call(
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                        item_id=self._field(item, "id"),
+                        call_id=self._field(item, "call_id"),
+                        name=str(self._field(item, "name", "")),
+                        arguments=(str(arguments) if arguments is not None else None),
+                    )
+                elif (
+                    event_type == "response.output_item.done"
+                    and item_type == "image_generation_call"
+                ):
+                    image = self._image_output_to_component(self._field(item, "result"))
+                    if image:
+                        streamed_images.append(image)
+                continue
+
+            if event_type == "response.function_call_arguments.delta":
+                item_id = self._field(event, "item_id")
+                delta = self._field(event, "delta", "")
+                if item_id and delta:
+                    tool_call_argument_deltas.setdefault(str(item_id), []).append(
+                        str(delta)
+                    )
+                continue
+
+            if event_type == "response.function_call_arguments.done":
+                item_id = self._field(event, "item_id")
+                if item_id:
+                    arguments = self._field(event, "arguments")
+                    if arguments is None:
+                        arguments = "".join(
+                            tool_call_argument_deltas.get(str(item_id), [])
+                        )
+                    self._merge_response_tool_call(
+                        tool_calls_by_id,
+                        tool_call_id_aliases,
+                        item_id=str(item_id),
+                        call_id=None,
+                        name=str(self._field(event, "name", "")),
+                        arguments=str(arguments),
                     )
                 continue
 
@@ -530,23 +831,173 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                     raise EmptyModelOutputError(
                         f"Responses stream terminal event has no response: {event_type}"
                     )
-                yield await self._parse_response(event_response, tools)
+                self._collect_response_tool_calls(
+                    event_response,
+                    tool_calls_by_id,
+                    tool_call_id_aliases,
+                )
+                parse_error: EmptyModelOutputError | None = None
+                try:
+                    final_response = await self._parse_response(
+                        event_response,
+                        tools,
+                        request_model=request_model,
+                    )
+                except EmptyModelOutputError as exc:
+                    parse_error = exc
+                    final_response = LLMResponse("assistant", id=response_id)
+                    final_response.raw_completion = event_response
+                    final_response.usage = self._parse_usage(event_response)
+                    final_response.reasoning_signature = self._serialize_replay_state(
+                        event_response,
+                        request_model,
+                    )
+
+                if not final_response.completion_text and streamed_text:
+                    final_response.result_chain = MessageChain().message(
+                        "".join(streamed_text)
+                    )
+                if not final_response.reasoning_content and streamed_reasoning:
+                    final_response.reasoning_content = "".join(streamed_reasoning)
+
+                final_chain = (
+                    final_response.result_chain.chain
+                    if final_response.result_chain is not None
+                    else []
+                )
+                if streamed_images and not any(
+                    isinstance(part, Comp.Image) for part in final_chain
+                ):
+                    if final_response.result_chain is None:
+                        final_response.result_chain = MessageChain()
+                    if not final_response.completion_text:
+                        final_response.result_chain.message("[Image]")
+                    final_response.result_chain.chain.extend(streamed_images)
+
+                if tool_calls_by_id:
+                    final_response.role = "tool"
+                    final_response.tools_call_ids = []
+                    final_response.tools_call_name = []
+                    final_response.tools_call_args = []
+                    for call_id, call in tool_calls_by_id.items():
+                        final_response.tools_call_ids.append(call_id)
+                        final_response.tools_call_name.append(call.get("name", ""))
+                        try:
+                            final_response.tools_call_args.append(
+                                json.loads(call.get("arguments") or "{}")
+                            )
+                        except json.JSONDecodeError:
+                            logger.error(
+                                "Failed to parse Responses API tool arguments: %s",
+                                call.get("arguments"),
+                            )
+                            final_response.tools_call_args.append({})
+
+                has_image = bool(
+                    final_response.result_chain
+                    and any(
+                        isinstance(part, Comp.Image)
+                        for part in final_response.result_chain.chain
+                    )
+                )
+                if (
+                    not (final_response.completion_text or "").strip()
+                    and not (final_response.reasoning_content or "").strip()
+                    and not final_response.tools_call_args
+                    and not has_image
+                ):
+                    if parse_error is not None:
+                        raise parse_error
+                    raise EmptyModelOutputError(
+                        "Responses API stream returned no usable output. "
+                        f"response_id={response_id}"
+                    )
+
+                yield final_response
                 return
 
         raise EmptyModelOutputError(
             f"Responses stream ended without a terminal event. response_id={response_id}"
         )
 
+    def _collect_response_tool_calls(
+        self,
+        response: Any,
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        tool_call_id_aliases: dict[str, str],
+    ) -> None:
+        """Merge function calls from a terminal response into stream state."""
+        for item in self._field(response, "output", []) or []:
+            if self._field(item, "type") != "function_call":
+                continue
+            arguments = self._field(item, "arguments")
+            self._merge_response_tool_call(
+                tool_calls_by_id,
+                tool_call_id_aliases,
+                item_id=self._field(item, "id"),
+                call_id=self._field(item, "call_id"),
+                name=str(self._field(item, "name", "")),
+                arguments=str(arguments) if arguments is not None else None,
+            )
+
+    @staticmethod
+    def _merge_response_tool_call(
+        tool_calls_by_id: dict[str, dict[str, Any]],
+        tool_call_id_aliases: dict[str, str],
+        *,
+        item_id: str | None,
+        call_id: str | None,
+        name: str,
+        arguments: str | None,
+    ) -> None:
+        """Merge streamed function-call fragments under the stable call ID."""
+        stable_id = call_id or (tool_call_id_aliases.get(item_id) if item_id else None)
+        stable_id = stable_id or item_id
+        if not stable_id:
+            return
+
+        if item_id and call_id:
+            tool_call_id_aliases[item_id] = call_id
+            if item_id != call_id and item_id in tool_calls_by_id:
+                existing = tool_calls_by_id.pop(item_id)
+                target = tool_calls_by_id.setdefault(call_id, {})
+                target.update({key: value for key, value in existing.items() if value})
+            stable_id = call_id
+
+        tool_call = tool_calls_by_id.setdefault(stable_id, {})
+        if name:
+            tool_call["name"] = name
+        if arguments is not None:
+            tool_call["arguments"] = arguments
+
+    def _parse_usage(self, response: Any) -> TokenUsage:
+        """Extract token usage from a terminal Responses object."""
+        usage = self._field(response, "usage")
+        if usage is None:
+            return TokenUsage()
+        input_details = self._field(usage, "input_tokens_details")
+        cached_tokens = self._field(input_details, "cached_tokens", 0) or 0
+        input_tokens = self._field(usage, "input_tokens", 0) or 0
+        output_tokens = self._field(usage, "output_tokens", 0) or 0
+        return TokenUsage(
+            input_other=input_tokens - cached_tokens,
+            input_cached=cached_tokens,
+            output=output_tokens,
+        )
+
     async def _parse_response(
         self,
         response: Response,
         tools: ToolSet | None,
+        *,
+        request_model: str | None = None,
     ) -> LLMResponse:
         """Normalize a Responses API response into AstrBot's LLM response.
 
         Args:
             response: SDK Responses API response object.
             tools: Functions available for resolving function call output items.
+            request_model: Model used for replay-state provenance.
 
         Returns:
             Normalized AstrBot LLM response.
@@ -576,7 +1027,13 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         llm_response = LLMResponse("assistant", id=response_id)
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
-        serialized_reasoning_items: list[dict] = []
+        citation_sources: dict[str, str] = {}
+        file_citation_sources: dict[str, str] = {}
+        generated_images: list[Comp.Image] = []
+        llm_response.reasoning_signature = self._serialize_replay_state(
+            response,
+            request_model,
+        )
 
         for item in self._field(response, "output", []) or []:
             item_type = self._field(item, "type")
@@ -585,19 +1042,46 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                     content_type = self._field(content, "type")
                     if content_type == "output_text":
                         text_parts.append(str(self._field(content, "text", "")))
+                        for annotation in self._field(content, "annotations", []) or []:
+                            annotation_type = self._field(annotation, "type")
+                            if annotation_type == "url_citation":
+                                url = self._field(annotation, "url")
+                                if not isinstance(url, str) or not url:
+                                    continue
+                                title = self._field(annotation, "title", "")
+                                citation_sources.setdefault(url, str(title or url))
+                            elif annotation_type in {
+                                "file_citation",
+                                "container_file_citation",
+                            }:
+                                file_id = self._field(annotation, "file_id", "")
+                                filename = self._field(annotation, "filename", "")
+                                if isinstance(file_id, str) and file_id:
+                                    file_citation_sources.setdefault(
+                                        file_id,
+                                        str(filename or file_id),
+                                    )
                     elif content_type == "refusal":
                         text_parts.append(str(self._field(content, "refusal", "")))
+                    elif content_type == "output_image":
+                        for field in (
+                            "image_url",
+                            "url",
+                            "b64_json",
+                            "base64",
+                            "data",
+                        ):
+                            image = self._image_output_to_component(
+                                self._field(content, field)
+                            )
+                            if image:
+                                generated_images.append(image)
+                                break
                 continue
 
-            if item_type == "reasoning":
-                if hasattr(item, "model_dump"):
-                    serialized_item = item.model_dump(mode="json", exclude_none=True)
-                elif isinstance(item, dict):
-                    serialized_item = copy.deepcopy(item)
-                else:
-                    serialized_item = {}
-                if serialized_item:
-                    serialized_reasoning_items.append(serialized_item)
+            if item_type in {"reasoning", "compaction"}:
+                if item_type == "compaction":
+                    continue
 
                 item_reasoning: list[str] = []
                 for content in self._field(item, "content", []) or []:
@@ -611,7 +1095,7 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                 reasoning_parts.extend(item_reasoning)
                 continue
 
-            if item_type == "function_call" and tools is not None:
+            if item_type == "function_call":
                 arguments = self._field(item, "arguments", "{}")
                 if isinstance(arguments, str):
                     try:
@@ -628,40 +1112,47 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                 llm_response.tools_call_ids.append(
                     str(self._field(item, "call_id", ""))
                 )
+                continue
+
+            if item_type == "image_generation_call":
+                image = self._image_output_to_component(self._field(item, "result"))
+                if image:
+                    generated_images.append(image)
 
         completion_text = "".join(text_parts)
-        if completion_text:
-            llm_response.result_chain = MessageChain().message(completion_text)
+        if completion_text or generated_images:
+            result_chain = MessageChain()
+            if completion_text:
+                result_chain.message(completion_text)
+            elif generated_images:
+                result_chain.message("[Image]")
+            result_chain.chain.extend(generated_images)
+            if citation_sources or file_citation_sources:
+                source_lines = ["Sources:"]
+                source_lines.extend(
+                    f"- {title}: {url}" for url, title in citation_sources.items()
+                )
+                source_lines.extend(
+                    f"- {filename} ({file_id})"
+                    for file_id, filename in file_citation_sources.items()
+                )
+                result_chain.message("\n\n" + "\n".join(source_lines))
+            llm_response.result_chain = result_chain
         if reasoning_parts:
             llm_response.reasoning_content = "\n".join(reasoning_parts)
-        if serialized_reasoning_items:
-            llm_response.reasoning_signature = json.dumps(
-                {
-                    "type": self._REASONING_STATE_TYPE,
-                    "items": serialized_reasoning_items,
-                },
-                ensure_ascii=False,
-            )
         if llm_response.tools_call_args:
             llm_response.role = "tool"
 
-        usage = self._field(response, "usage")
-        if usage is not None:
-            input_details = self._field(usage, "input_tokens_details")
-            cached_tokens = self._field(input_details, "cached_tokens", 0) or 0
-            input_tokens = self._field(usage, "input_tokens", 0) or 0
-            output_tokens = self._field(usage, "output_tokens", 0) or 0
-            llm_response.usage = TokenUsage(
-                input_other=input_tokens - cached_tokens,
-                input_cached=cached_tokens,
-                output=output_tokens,
-            )
-        else:
-            llm_response.usage = TokenUsage()
+        llm_response.usage = self._parse_usage(response)
 
         has_text = bool((llm_response.completion_text or "").strip())
         has_reasoning = bool((llm_response.reasoning_content or "").strip())
-        if not has_text and not has_reasoning and not llm_response.tools_call_args:
+        if (
+            not has_text
+            and not generated_images
+            and not has_reasoning
+            and not llm_response.tools_call_args
+        ):
             raise EmptyModelOutputError(
                 "Responses API returned no usable output. "
                 f"response_id={response_id}, status={status}"
@@ -727,7 +1218,8 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             retry_payloads.pop("instructions", None),
         )
         retry_payloads["input"] = self._convert_chat_messages_to_response_input(
-            context_query
+            context_query,
+            str(retry_payloads.get("model") or self.get_model()),
         )
         if instructions:
             retry_payloads["instructions"] = instructions

@@ -532,6 +532,30 @@ class Image(BaseMessageComponent):
     def fromIO(IO):
         return Image.fromBytes(IO.read())
 
+    @staticmethod
+    def _decode_file_uri(uri: str) -> str:
+        return file_uri_to_path(uri).replace("\\", "/")
+
+    def _resolve_file_source(self) -> str:
+        fallback = ""
+        for source in (self.url, self.file, self.path):
+            if source:
+                if source.startswith(
+                    ("http://", "https://", "base64://", "data:image/")
+                ):
+                    return source
+                if source.startswith("file://"):
+                    if os.path.exists(self._decode_file_uri(source)):
+                        return source
+                    fallback = fallback or source
+                    continue
+                if os.path.exists(source):
+                    return source
+                fallback = fallback or source
+        if fallback:
+            return fallback
+        raise ValueError("No valid file or URL provided")
+
     async def convert_to_file_path(self) -> str:
         """将这个图片统一转换为本地文件路径。这个方法避免了手动判断图片数据类型，直接返回图片数据的本地路径（如果是网络 URL, 则会自动进行下载）。
 
@@ -539,9 +563,7 @@ class Image(BaseMessageComponent):
             str: 图片的本地路径，以绝对路径表示。
 
         """
-        url = self.url or self.file
-        if not url:
-            raise ValueError("No valid file or URL provided")
+        url = self._resolve_file_source()
         return await MediaResolver(url, media_type="image").to_path()
 
     async def convert_to_base64(self) -> str:
@@ -552,9 +574,7 @@ class Image(BaseMessageComponent):
 
         """
         # convert to base64
-        url = self.url or self.file
-        if not url:
-            raise ValueError("No valid file or URL provided")
+        url = self._resolve_file_source()
         return await MediaResolver(url, media_type="image").to_base64()
 
     async def register_to_file_service(self) -> str:

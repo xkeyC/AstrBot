@@ -59,6 +59,8 @@ def _normalize_server_config(body: dict[str, Any], id_key: str) -> dict[str, Any
     config = body.get("config")
     if isinstance(config, dict):
         normalized = dict(config)
+        if "tool_prefix" in body and "tool_prefix" not in normalized:
+            normalized["tool_prefix"] = body["tool_prefix"]
     else:
         normalized = {
             key: value
@@ -81,7 +83,10 @@ def _test_config_body(
 ) -> dict[str, Any]:
     config = body.get("mcp_server_config") or body.get("config")
     if isinstance(config, dict):
-        return dict(config)
+        normalized = dict(config)
+        if "tool_prefix" in body and "tool_prefix" not in normalized:
+            normalized["tool_prefix"] = body["tool_prefix"]
+        return normalized
 
     stored_config = service.get_mcp_server_config(server_name)
     if stored_config is not None:

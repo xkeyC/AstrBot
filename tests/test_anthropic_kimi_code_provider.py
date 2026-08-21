@@ -4,11 +4,17 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import astrbot.core.provider.provider as provider_core
 import astrbot.core.provider.sources.anthropic_source as anthropic_source
 import astrbot.core.provider.sources.kimi_code_source as kimi_code_source
 import astrbot.core.provider.sources.request_retry as request_retry
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.provider.entities import LLMResponse
+
+
+@pytest.fixture(autouse=True)
+def _use_legacy_non_streaming_text_chat(monkeypatch):
+    monkeypatch.setattr(provider_core, "ENABLE_ALL_STREAMING_MODE", False)
 
 
 class _FakeAsyncAnthropic:

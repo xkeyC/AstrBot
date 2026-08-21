@@ -194,7 +194,7 @@
           },
           "shipyard_neo_ttl": {
             "description": "Shipyard Neo Sandbox 存活时间(秒)",
-            "hint": "Shipyard Neo 沙箱的生存时间（秒）。"
+            "hint": "Shipyard Neo 沙箱的生存时间（秒），默认 43200（12 小时）。"
           },
           "cua_image": {
             "description": "CUA 镜像",
@@ -206,7 +206,7 @@
           },
           "cua_idle_timeout": {
             "description": "CUA 空闲超时(秒)",
-            "hint": "CUA 沙箱空闲超时时间（秒）。大于 0 时，AstrBot 会在会话空闲达到该时长后主动关闭 CUA 沙箱；0 表示禁用。"
+            "hint": "CUA 沙箱空闲超时时间（秒）。大于 0 时，AstrBot 会在会话空闲达到该时长后关闭 CUA 沙箱；0 表示禁用。"
           },
           "cua_telemetry_enabled": {
             "description": "CUA 遥测",
@@ -360,8 +360,9 @@
         },
         "tool_schema_mode": {
           "description": "工具调用模式",
-          "hint": "skills-like 先下发工具名称与描述，再下发参数；full 一次性下发完整参数。",
+          "hint": "search_registry 只暴露核心工具和搜索/执行入口；skills-like 先下发工具名称与描述，再下发参数；full 一次性下发完整参数。",
           "labels": [
+            "Search Registry（工具注册表）",
             "Skills-like（两阶段）",
             "Full（完整参数）"
           ]
@@ -1209,6 +1210,38 @@
       "xai_native_search": {
         "description": "启用原生搜索功能",
         "hint": "启用后，将通过 xAI 的 Chat Completions 原生 Live Search 进行联网检索（按需计费）。仅对 xAI 提供商生效。"
+      },
+      "responses_web_search": {
+        "description": "启用 Responses 原生网页搜索",
+        "hint": "通过 OpenAI Responses API 的 web_search 工具联网检索。仅对 openai_responses 提供商生效。"
+      },
+      "responses_web_search_context_size": {
+        "description": "网页搜索上下文大小",
+        "hint": "控制网页搜索为结果分配的上下文量。"
+      },
+      "responses_web_search_allowed_domains": {
+        "description": "网页搜索允许的域名",
+        "hint": "留空则不限制；填写域名后，网页搜索仅使用这些域名及其子域名。"
+      },
+      "responses_file_search_vector_store_ids": {
+        "description": "文件搜索 Vector Store IDs",
+        "hint": "填写 OpenAI Vector Store ID 以启用 file_search；留空则不启用。"
+      },
+      "responses_code_interpreter": {
+        "description": "启用 Responses 原生代码解释器",
+        "hint": "通过 OpenAI 托管容器执行 Python 代码。"
+      },
+      "responses_image_generation": {
+        "description": "启用 Responses 原生图像生成",
+        "hint": "允许支持的模型使用 image_generation 工具生成图片。"
+      },
+      "responses_tool_choice": {
+        "description": "Responses 工具选择策略",
+        "hint": "控制模型自动选择工具、强制调用工具或禁用所有工具。"
+      },
+      "responses_compact_threshold": {
+        "description": "Responses 原生上下文压缩阈值",
+        "hint": "达到该输入 token 数时执行服务端 compaction；0 表示禁用。请设为模型上下文上限的 80% 以下，以早于 AstrBot 本地压缩触发。仅支持实现 OpenAI 原生 compaction 的接口。"
       },
       "rerank_api_base": {
         "description": "重排序模型 API Base URL",

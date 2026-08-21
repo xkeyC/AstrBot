@@ -93,6 +93,7 @@ _DENIED_DOCKER_ARGS = frozenset(
     }
 )
 _STDIO_ALLOWLIST_ENV = "ASTRBOT_MCP_STDIO_ALLOWED_COMMANDS"
+_MCP_TOOL_PREFIX_RE = re.compile(r"^[A-Za-z0-9_-]{0,64}$")
 
 try:
     import anyio
@@ -129,7 +130,21 @@ def _prepare_config(config: dict) -> dict:
     else:
         config = dict(config)
     config.pop("active", None)
+    config.pop("tool_prefix", None)
     return config
+
+
+def validate_mcp_tool_prefix(tool_prefix: object) -> str:
+    """Validate and normalize an MCP tool prefix."""
+    if tool_prefix is None:
+        return ""
+    if not isinstance(tool_prefix, str):
+        raise ValueError("MCP tool prefix must be a string.")
+    if not _MCP_TOOL_PREFIX_RE.fullmatch(tool_prefix):
+        raise ValueError(
+            "MCP tool prefix must be 64 characters or fewer and contain only letters, digits, underscore, or hyphen."
+        )
+    return tool_prefix
 
 
 def _normalize_stdio_command_name(command: str) -> str:
@@ -293,7 +308,7 @@ async def _quick_test_mcp_connection(config: dict) -> tuple[bool, str]:
         else:
             raise Exception("MCP connection config missing transport or type field")
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             if transport_type == "streamable_http":
                 test_payload = {
                     "jsonrpc": "2.0",
@@ -795,13 +810,23 @@ class MCPTool(FunctionTool, Generic[TContext]):
     """A function tool that calls an MCP service."""
 
     def __init__(
-        self, mcp_tool: mcp.Tool, mcp_client: MCPClient, mcp_server_name: str, **kwargs
+        self,
+        mcp_tool: mcp.Tool,
+        mcp_client: MCPClient,
+        mcp_server_name: str,
+        tool_prefix: str = "",
+        **kwargs,
     ) -> None:
         # LLM providers restrict tool names to [a-zA-Z0-9_-], but MCP servers
         # may expose names containing e.g. '.'. Expose a sanitized name to the
         # LLM while keeping the original in self.mcp_tool.name for the actual
         # MCP call in call().
-        llm_tool_name = re.sub(r"[^A-Za-z0-9_-]+", "_", mcp_tool.name)
+        validated_tool_prefix = validate_mcp_tool_prefix(tool_prefix)
+        llm_tool_name = re.sub(
+            r"[^A-Za-z0-9_-]+",
+            "_",
+            f"{validated_tool_prefix}{mcp_tool.name}",
+        )
         super().__init__(
             name=llm_tool_name,
             description=mcp_tool.description or "",
@@ -810,6 +835,7 @@ class MCPTool(FunctionTool, Generic[TContext]):
         self.mcp_tool = mcp_tool
         self.mcp_client = mcp_client
         self.mcp_server_name = mcp_server_name
+        self.tool_prefix = validated_tool_prefix
 
     async def call(
         self, context: ContextWrapper[TContext], **kwargs

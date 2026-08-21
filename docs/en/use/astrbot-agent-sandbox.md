@@ -168,7 +168,7 @@ profiles:
       - shell
       - python
     # Idle timeout (seconds)
-    idle_timeout: 1800
+    idle_timeout: 43200
     # Keep 1 warm instance ready
     warm_pool_size: 1
     env: {}
@@ -189,7 +189,7 @@ profiles:
       - filesystem  # includes upload/download
       - shell
       - python
-    idle_timeout: 1800
+    idle_timeout: 43200
     warm_pool_size: 1
     env: {}
 
@@ -224,7 +224,7 @@ profiles:
         capabilities:
           - browser
         env: {}
-    idle_timeout: 1800
+    idle_timeout: 43200
     warm_pool_size: 1
 
 gc:
@@ -330,7 +330,7 @@ If you choose `Shipyard Neo`, the main configuration items are:
   - For example `python-default` or `browser-python`
   - If left empty, AstrBot will try to choose a profile with richer capabilities, preferring one that includes the `browser` capability, and fall back to `python-default` if needed
 - `Shipyard Neo Sandbox TTL`
-  - The upper lifetime limit of the sandbox, defaulting to 3600 seconds (1 hour)
+  - The upper lifetime limit of the sandbox, defaulting to 43200 seconds (12 hours)
 
 ### Configuring Shipyard (Legacy)
 
@@ -342,7 +342,7 @@ If you choose the legacy `Shipyard` driver, the relevant configuration items are
 - `Shipyard Access Token`
   - Fill in the access token you configured when deploying Shipyard
 - `Shipyard Ship Lifetime (seconds)`
-  - Defines the lifetime of each sandbox instance, default 3600 seconds (1 hour)
+  - Defines the lifetime of each sandbox instance, default 43200 seconds (12 hours)
 - `Shipyard Ship Session Reuse Limit`
   - Defines the maximum number of sessions that can reuse the same sandbox instance, default 10
 

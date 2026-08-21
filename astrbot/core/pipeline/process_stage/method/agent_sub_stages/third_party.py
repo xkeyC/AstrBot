@@ -3,6 +3,7 @@ import inspect
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import TYPE_CHECKING
 
+import astrbot.core.provider.provider as provider_core
 from astrbot.core import astrbot_config, logger
 from astrbot.core.agent.runners.coze.coze_agent_runner import CozeAgentRunner
 from astrbot.core.agent.runners.dashscope.dashscope_agent_runner import (
@@ -59,6 +60,19 @@ RUNNER_NO_FINAL_RESPONSE_LOG = (
 RUNNER_NO_RESULT_LOG = "Agent Runner did not return final result."
 
 
+def _resolve_third_party_streaming_mode(
+    streaming_response: bool,
+    stream_to_general: bool,
+) -> tuple[bool, bool]:
+    all_streaming = provider_core.ENABLE_ALL_STREAMING_MODE
+    streaming_used = streaming_response and not stream_to_general
+    runner_streaming = streaming_response or all_streaming
+    suppress_streaming_deltas = stream_to_general or (
+        all_streaming and not streaming_used
+    )
+    return runner_streaming, suppress_streaming_deltas
+
+
 async def run_third_party_agent(
     runner: "BaseAgentRunner",
     stream_to_general: bool = False,
@@ -93,20 +107,32 @@ async def run_third_party_agent(
 
 class _RunnerResultAggregator:
     def __init__(self) -> None:
-        self.merged_chain: list = []
+        self.merged_chain = MessageChain()
         self.has_error = False
+        self.has_metadata = False
 
     def add_chunk(self, chain: MessageChain, is_error: bool) -> None:
-        self.merged_chain.extend(chain.chain or [])
+        if not self.has_metadata:
+            self.merged_chain.inherit_metadata(chain)
+            self.has_metadata = True
+        elif chain.disable_segment_reply:
+            self.merged_chain.disable_segment_reply = True
+        if chain.use_t2i_ is not None and self.merged_chain.use_t2i_ is None:
+            self.merged_chain.use_t2i_ = chain.use_t2i_
+        if chain.use_markdown_ is not None and self.merged_chain.use_markdown_ is None:
+            self.merged_chain.use_markdown_ = chain.use_markdown_
+        if chain.type is not None and self.merged_chain.type is None:
+            self.merged_chain.type = chain.type
+        self.merged_chain.chain.extend(chain.chain or [])
         if is_error:
             self.has_error = True
 
     def finalize(
         self,
         final_resp: "LLMResponse | None",
-    ) -> tuple[list, bool]:
+    ) -> tuple[MessageChain, bool]:
         if not final_resp or not final_resp.result_chain:
-            if self.merged_chain:
+            if self.merged_chain.chain:
                 logger.warning(RUNNER_NO_FINAL_RESPONSE_LOG)
                 return self.merged_chain, self.has_error
 
@@ -114,9 +140,20 @@ class _RunnerResultAggregator:
             fallback_error_chain = MessageChain().message(
                 RUNNER_NO_RESULT_FALLBACK_MESSAGE,
             )
-            return fallback_error_chain.chain or [], True
+            return fallback_error_chain, True
 
-        final_chain = final_resp.result_chain.chain or []
+        final_chain = final_resp.result_chain
+        if self.has_metadata:
+            if final_chain.use_t2i_ is None:
+                final_chain.use_t2i_ = self.merged_chain.use_t2i_
+            if final_chain.use_markdown_ is None:
+                final_chain.use_markdown_ = self.merged_chain.use_markdown_
+            if final_chain.type is None:
+                final_chain.type = self.merged_chain.type
+            final_chain.disable_segment_reply = (
+                final_chain.disable_segment_reply
+                or self.merged_chain.disable_segment_reply
+            )
         is_runner_error = self.has_error or final_resp.role == "err"
         return final_chain, is_runner_error
 
@@ -245,8 +282,8 @@ class ThirdPartyAgentSubStage(Stage):
             )
             event.set_extra(THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY, is_runner_error)
             event.set_result(
-                MessageEventResult(
-                    chain=final_chain,
+                MessageEventResult.from_chain(
+                    final_chain,
                     result_content_type=ResultContentType.STREAMING_FINISH,
                 ),
             )
@@ -278,8 +315,8 @@ class ThirdPartyAgentSubStage(Stage):
             else ResultContentType.LLM_RESULT
         )
         event.set_result(
-            MessageEventResult(
-                chain=final_chain,
+            MessageEventResult.from_chain(
+                final_chain,
                 result_content_type=result_content_type,
             ),
         )
@@ -362,6 +399,9 @@ class ThirdPartyAgentSubStage(Stage):
             and not event.platform_meta.support_streaming_message
         )
         streaming_used = streaming_response and not stream_to_general
+        runner_streaming, suppress_streaming_deltas = (
+            _resolve_third_party_streaming_mode(streaming_response, stream_to_general)
+        )
 
         runner_closed = False
         stream_consumed = False
@@ -389,7 +429,7 @@ class ThirdPartyAgentSubStage(Stage):
                 ),
                 agent_hooks=MAIN_AGENT_HOOKS,
                 provider_config=self.prov_cfg,
-                streaming=streaming_response,
+                streaming=runner_streaming,
             )
 
             if streaming_used:
@@ -410,7 +450,7 @@ class ThirdPartyAgentSubStage(Stage):
                 async for _ in self._handle_non_streaming_response(
                     runner=runner,
                     event=event,
-                    stream_to_general=stream_to_general,
+                    stream_to_general=suppress_streaming_deltas,
                     custom_error_message=custom_error_message,
                 ):
                     yield

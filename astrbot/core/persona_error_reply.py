@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from astrbot.core.event_llm_overrides import get_event_selected_persona_id
+
 PERSONA_CUSTOM_ERROR_MESSAGE_EXTRA_KEY = "persona_custom_error_message"
 
 
@@ -65,6 +67,7 @@ async def resolve_persona_custom_error_message(
         conversation_persona_id=conversation_persona_id,
         platform_name=event.get_platform_name(),
         provider_settings=provider_settings,
+        selected_persona_id=get_event_selected_persona_id(event),
     )
     return extract_persona_custom_error_message_from_persona(persona)
 

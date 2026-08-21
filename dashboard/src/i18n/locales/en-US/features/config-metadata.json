@@ -192,7 +192,7 @@
           },
           "shipyard_neo_ttl": {
             "description": "Shipyard Neo Sandbox TTL",
-            "hint": "Sandbox time-to-live in seconds."
+            "hint": "Sandbox time-to-live in seconds. Defaults to 43200 (12 hours)."
           },
           "cua_image": {
             "description": "CUA Image",
@@ -204,7 +204,7 @@
           },
           "cua_idle_timeout": {
             "description": "CUA Idle Timeout",
-            "hint": "Idle timeout for CUA sandbox sessions in seconds. When greater than 0, AstrBot proactively shuts down an idle CUA sandbox after that amount of inactivity; 0 disables it."
+            "hint": "Idle timeout for CUA sandbox sessions in seconds. When greater than 0, AstrBot shuts down an idle CUA sandbox after that amount of inactivity; 0 disables it."
           },
           "cua_telemetry_enabled": {
             "description": "CUA Telemetry",
@@ -358,8 +358,9 @@
         },
         "tool_schema_mode": {
           "description": "Tool Schema Mode",
-          "hint": "Skills-like sends name/description first and re-queries for parameters; Full sends the complete schema in one step.",
+          "hint": "Search Registry exposes only core tools plus search/invoke entry points; Skills-like sends name/description first and re-queries for parameters; Full sends the complete schema in one step.",
           "labels": [
+            "Search Registry",
             "Skills-like (two-stage)",
             "Full schema"
           ]
@@ -1207,6 +1208,38 @@
       "xai_native_search": {
         "description": "Enable native search",
         "hint": "When enabled, uses xAI Chat Completions native Live Search for web queries (billed on demand). Only applies to xAI providers."
+      },
+      "responses_web_search": {
+        "description": "Enable Responses web search",
+        "hint": "Use the OpenAI Responses API web_search tool for online retrieval. Only applies to openai_responses providers."
+      },
+      "responses_web_search_context_size": {
+        "description": "Web search context size",
+        "hint": "Controls how much context the web search tool allocates to its results."
+      },
+      "responses_web_search_allowed_domains": {
+        "description": "Allowed web search domains",
+        "hint": "Leave empty for no restriction. When set, web search uses only these domains and their subdomains."
+      },
+      "responses_file_search_vector_store_ids": {
+        "description": "File search Vector Store IDs",
+        "hint": "Set OpenAI Vector Store IDs to enable file_search; leave empty to disable it."
+      },
+      "responses_code_interpreter": {
+        "description": "Enable Responses code interpreter",
+        "hint": "Run Python code in an OpenAI-hosted container."
+      },
+      "responses_image_generation": {
+        "description": "Enable Responses image generation",
+        "hint": "Allow supported models to generate images with the image_generation tool."
+      },
+      "responses_tool_choice": {
+        "description": "Responses tool choice",
+        "hint": "Choose whether the model may select tools automatically, must call a tool, or cannot call tools."
+      },
+      "responses_compact_threshold": {
+        "description": "Responses native compaction threshold",
+        "hint": "Run server-side compaction at this input-token threshold; 0 disables it. Set it below 80% of the model context limit so it runs before AstrBot's local compression. Requires an API with native OpenAI compaction support."
       },
       "rerank_api_base": {
         "description": "Rerank Model API Base URL",

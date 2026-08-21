@@ -20,7 +20,7 @@ from astrbot.core.agent.message import (
     ToolCallMessageSegment,
     is_checkpoint_message,
 )
-from astrbot.core.agent.tool import ToolSet
+from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.db.po import Conversation
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.utils.media_utils import MediaResolver
@@ -319,6 +319,8 @@ class LLMResponse:
     """Tool call IDs."""
     tools_call_extra_content: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Tool call extra content. tool_call_id -> extra_content dict"""
+    internal_tools: dict[str, FunctionTool] = field(default_factory=dict)
+    """Provider-owned client tools scoped to this response by tool call ID."""
     reasoning_content: str | None = None
     """The reasoning content extracted from the LLM, if any."""
     reasoning_signature: str | None = None
@@ -349,6 +351,7 @@ class LLMResponse:
         tools_call_name: list[str] | None = None,
         tools_call_ids: list[str] | None = None,
         tools_call_extra_content: dict[str, dict[str, Any]] | None = None,
+        internal_tools: dict[str, FunctionTool] | None = None,
         reasoning_content: str | None = None,
         reasoning_signature: str | None = None,
         raw_completion: ChatCompletion
@@ -379,6 +382,8 @@ class LLMResponse:
             tools_call_ids = []
         if tools_call_extra_content is None:
             tools_call_extra_content = {}
+        if internal_tools is None:
+            internal_tools = {}
 
         self.role = role
         self.completion_text = completion_text
@@ -387,6 +392,7 @@ class LLMResponse:
         self.tools_call_name = tools_call_name
         self.tools_call_ids = tools_call_ids
         self.tools_call_extra_content = tools_call_extra_content
+        self.internal_tools = internal_tools
         self.reasoning_content = reasoning_content
         self.reasoning_signature = reasoning_signature
         self.raw_completion = raw_completion

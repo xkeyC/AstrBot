@@ -192,7 +192,7 @@
                     },
                     "shipyard_neo_ttl": {
                         "description": "TTL песочницы Shipyard Neo",
-                        "hint": "Время жизни песочницы в секундах."
+                        "hint": "Время жизни песочницы в секундах. По умолчанию 43200 (12 часов)."
                     },
                     "cua_image": {
                         "description": "Образ CUA",
@@ -204,7 +204,7 @@
                     },
                     "cua_idle_timeout": {
                         "description": "Таймаут простоя CUA",
-                        "hint": "Таймаут простоя сессии песочницы CUA в секундах. Если значение больше 0, AstrBot автоматически завершит неактивную песочницу CUA после указанного времени бездействия; 0 отключает автоочистку."
+                        "hint": "Таймаут простоя сессии песочницы CUA в секундах. Если значение больше 0, AstrBot завершит неактивную песочницу CUA после указанного времени бездействия; 0 отключает автоочистку."
                     },
                     "cua_telemetry_enabled": {
                         "description": "Телеметрия CUA",
@@ -358,8 +358,9 @@
                 },
                 "tool_schema_mode": {
                     "description": "Режим схемы инструментов",
-                    "hint": "Skills-like сначала отправляет имя/описание и дозапрашивает параметры; Full отправляет полную схему сразу.",
+                    "hint": "Search Registry предоставляет только основные инструменты и точки входа поиска/вызова; Skills-like сначала отправляет имя/описание и дозапрашивает параметры; Full отправляет полную схему сразу.",
                     "labels": [
+                        "Search Registry",
                         "Skills-like (двухэтапный)",
                         "Полная схема (Full)"
                     ]
@@ -1208,6 +1209,38 @@
             "xai_native_search": {
                 "description": "Включить нативный поиск",
                 "hint": "Если включено, использует Live Search от xAI для веб-запросов (тарифицируется отдельно). Применимо только к провайдерам xAI."
+            },
+            "responses_web_search": {
+                "description": "Включить нативный веб-поиск Responses",
+                "hint": "Использовать инструмент web_search OpenAI Responses API. Применимо только к провайдерам openai_responses."
+            },
+            "responses_web_search_context_size": {
+                "description": "Размер контекста веб-поиска",
+                "hint": "Объём контекста, получаемого нативным веб-поиском: low, medium или high."
+            },
+            "responses_web_search_allowed_domains": {
+                "description": "Разрешённые домены веб-поиска",
+                "hint": "Необязательный список доменов, которыми ограничивается нативный веб-поиск."
+            },
+            "responses_file_search_vector_store_ids": {
+                "description": "Vector Store IDs для поиска файлов",
+                "hint": "Список OpenAI Vector Store IDs для инструмента file_search. Пустой список отключает инструмент."
+            },
+            "responses_code_interpreter": {
+                "description": "Включить нативный Code Interpreter",
+                "hint": "Использовать автоматически управляемый контейнер code_interpreter Responses API."
+            },
+            "responses_image_generation": {
+                "description": "Включить нативную генерацию изображений",
+                "hint": "Разрешить Responses API вызывать инструмент image_generation."
+            },
+            "responses_tool_choice": {
+                "description": "Выбор инструментов Responses",
+                "hint": "Разрешить модели автоматически выбирать инструменты, потребовать вызов инструмента или отключить все инструменты."
+            },
+            "responses_compact_threshold": {
+                "description": "Порог нативного сжатия контекста Responses",
+                "hint": "Включить серверное сжатие при достижении указанного числа входных токенов; 0 отключает функцию. Рекомендуется значение ниже 80% контекстного окна, чтобы сжатие сработало раньше локального сжатия AstrBot. Требуется API с поддержкой нативного OpenAI compaction."
             },
             "rerank_api_base": {
                 "description": "Base URL API модели Rerank",

@@ -4,7 +4,12 @@ import traceback
 from typing import Any
 
 from astrbot.core import logger, sp
-from astrbot.core.agent.mcp_client import MCPTool, validate_mcp_stdio_config
+from astrbot.core.agent.handoff import HandoffTool
+from astrbot.core.agent.mcp_client import (
+    MCPTool,
+    validate_mcp_stdio_config,
+    validate_mcp_tool_prefix,
+)
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.star import star_map
 from astrbot.core.tools.registry import get_builtin_tool_config_statuses
@@ -30,6 +35,8 @@ def extract_mcp_server_config(mcp_servers_value: object) -> dict:
             "Invalid mcpServers format. Ensure each key in mcpServers is a server name, "
             "and each value is an object containing fields like command/url."
         )
+    extracted = dict(extracted)
+    extracted.pop("tool_prefix", None)
     return extracted
 
 
@@ -71,9 +78,18 @@ class ToolsService:
                 server_info = {
                     "name": name,
                     "active": server_config.get("active", True),
+                    "tool_prefix": "",
                 }
+                try:
+                    server_info["tool_prefix"] = validate_mcp_tool_prefix(
+                        server_config.get("tool_prefix", "")
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "Invalid tool_prefix for MCP server '%s': %s", name, exc
+                    )
                 for key, value in server_config.items():
-                    if key != "active":
+                    if key not in {"active", "tool_prefix"}:
                         server_info[key] = value
 
                 runtime = self.tool_mgr.mcp_server_runtime_view.get(name)
@@ -82,7 +98,10 @@ class ToolsService:
                     server_info["tools"] = []
                 else:
                     mcp_client = runtime.client
-                    server_info["tools"] = [tool.name for tool in mcp_client.tools]
+                    server_info["tools"] = [
+                        f"{server_info['tool_prefix']}{tool.name}"
+                        for tool in mcp_client.tools
+                    ]
                     server_info["errlogs"] = mcp_client.server_errlogs
 
                 servers.append(server_info)
@@ -158,12 +177,18 @@ class ToolsService:
             old_active = (
                 old_config.get("active", True) if isinstance(old_config, dict) else True
             )
+            old_tool_prefix = (
+                old_config.get("tool_prefix", "")
+                if isinstance(old_config, dict)
+                else ""
+            )
             active = server_data.get("active", old_active)
 
             only_update_active, server_config = self._build_updated_server_config(
                 server_data,
                 old_config,
                 active,
+                old_tool_prefix,
             )
             self._validate_server_config(server_config)
 
@@ -221,6 +246,9 @@ class ToolsService:
 
             if not isinstance(config, dict) or not config:
                 raise ToolsServiceError("Invalid MCP server configuration")
+            submitted_tool_prefix = server_data.get(
+                "tool_prefix", config.get("tool_prefix")
+            )
 
             if "mcpServers" in config:
                 mcp_servers = config["mcpServers"]
@@ -239,6 +267,13 @@ class ToolsService:
             elif not config:
                 raise ToolsServiceError("MCP server configuration cannot be empty")
 
+            try:
+                config["tool_prefix"] = validate_mcp_tool_prefix(
+                    submitted_tool_prefix if submitted_tool_prefix is not None else ""
+                )
+            except ValueError as exc:
+                raise ToolsServiceError(f"{exc!s}") from exc
+
             self._validate_server_config(config)
             return await self.tool_mgr.test_mcp_server_connection(config)
         except ToolsServiceError:
@@ -254,6 +289,14 @@ class ToolsService:
             for tool in self.tool_mgr.iter_builtin_tools():
                 if tool.name not in existing_names:
                     tools.append(tool)
+                    existing_names.add(tool.name)
+            subagent_orchestrator = getattr(
+                self.core_lifecycle, "subagent_orchestrator", None
+            )
+            for tool in getattr(subagent_orchestrator, "handoffs", []) or []:
+                if tool.name not in existing_names:
+                    tools.append(tool)
+                    existing_names.add(tool.name)
 
             config_entries = self._get_config_entries()
             perms_store = (
@@ -391,7 +434,7 @@ class ToolsService:
         server_config = {"active": server_data.get("active", True)}
 
         for key, value in server_data.items():
-            if key in ["name", "active", "tools", "errlogs"]:
+            if key in ["name", "active", "tools", "errlogs", "tool_prefix"]:
                 continue
             if key == "mcpServers":
                 try:
@@ -402,6 +445,16 @@ class ToolsService:
                 server_config[key] = value
             has_valid_config = True
 
+        server_config["active"] = server_data.get(
+            "active", server_config.get("active", True)
+        )
+        try:
+            server_config["tool_prefix"] = validate_mcp_tool_prefix(
+                server_data.get("tool_prefix", "")
+            )
+        except ValueError as exc:
+            raise ToolsServiceError(f"{exc!s}") from exc
+
         return has_valid_config, server_config
 
     @staticmethod
@@ -409,9 +462,11 @@ class ToolsService:
         server_data: dict,
         old_config: object,
         active: bool,
+        old_tool_prefix: str,
     ) -> tuple[bool, dict]:
         server_config = {"active": active}
         only_update_active = True
+        has_top_level_tool_prefix = "tool_prefix" in server_data
 
         for key, value in server_data.items():
             if key in [
@@ -421,6 +476,7 @@ class ToolsService:
                 "tools",
                 "errlogs",
                 "oldName",
+                "tool_prefix",
             ]:
                 continue
             if key == "mcpServers":
@@ -436,6 +492,21 @@ class ToolsService:
             for key, value in old_config.items():
                 if key != "active":
                     server_config[key] = value
+
+        server_config["active"] = active
+        try:
+            server_config["tool_prefix"] = validate_mcp_tool_prefix(
+                server_data["tool_prefix"]
+                if has_top_level_tool_prefix
+                else old_tool_prefix
+            )
+        except ValueError as exc:
+            raise ToolsServiceError(f"{exc!s}") from exc
+        if (
+            has_top_level_tool_prefix
+            and server_config["tool_prefix"] != old_tool_prefix
+        ):
+            only_update_active = False
 
         return only_update_active, server_config
 
@@ -565,6 +636,10 @@ class ToolsService:
         elif isinstance(tool, MCPTool):
             origin = "mcp"
             origin_name = tool.mcp_server_name
+            origin_display_name = origin_name
+        elif isinstance(tool, HandoffTool):
+            origin = "subagent"
+            origin_name = tool.agent.name
             origin_display_name = origin_name
         elif tool.handler_module_path and star_map.get(tool.handler_module_path):
             star = star_map[tool.handler_module_path]

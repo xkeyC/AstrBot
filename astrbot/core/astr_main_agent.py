@@ -27,11 +27,13 @@ from astrbot.core.astr_main_agent_resources import (
     LLM_SAFETY_MODE_SYSTEM_PROMPT,
     SANDBOX_MODE_PROMPT,
     TOOL_CALL_PROMPT,
+    TOOL_CALL_PROMPT_SEARCH_REGISTRY_MODE,
     TOOL_CALL_PROMPT_SKILLS_LIKE_MODE,
 )
 from astrbot.core.computer.booters.local import resolve_windows_shell
 from astrbot.core.conversation_mgr import Conversation
 from astrbot.core.db import BaseDatabase
+from astrbot.core.event_llm_overrides import get_event_selected_persona_id
 from astrbot.core.message.components import File, Image, Record, Reply, Video
 from astrbot.core.persona_error_reply import (
     extract_persona_custom_error_message_from_persona,
@@ -129,6 +131,7 @@ from astrbot.core.workspace import (
 )
 
 LLM_ERROR_MESSAGE_EXTRA_KEY = "_llm_error_message"
+PERSONA_ALLOWED_TOOLS_EXTRA_KEY = "_persona_allowed_tools"
 WEEKDAY_NAMES = (
     "Monday",
     "Tuesday",
@@ -166,7 +169,7 @@ class MainAgentBuildConfig:
     a timeout error as a tool result will be returned.
     """
     tool_schema_mode: str = "full"
-    """The tool schema mode, can be 'full' or 'skills-like'."""
+    """The tool schema mode: full, skills_like, or search_registry."""
     provider_wake_prefix: str = ""
     """The wake prefix for the provider. If the user message does not start with this prefix,
     the main agent will not be triggered."""
@@ -225,6 +228,45 @@ class MainAgentBuildResult:
 
 def _set_llm_error_message(event: AstrMessageEvent, message: str) -> None:
     event.set_extra(LLM_ERROR_MESSAGE_EXTRA_KEY, message)
+
+
+def _set_persona_allowed_tools(
+    event: AstrMessageEvent,
+    persona: dict | None,
+) -> None:
+    if persona and persona.get("tools") is not None:
+        event.set_extra(
+            PERSONA_ALLOWED_TOOLS_EXTRA_KEY,
+            {
+                str(tool_name).strip()
+                for tool_name in persona.get("tools", [])
+                if str(tool_name).strip()
+            },
+        )
+    else:
+        event.set_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY, None)
+
+
+def _filter_tools_by_persona_scope(
+    event: AstrMessageEvent,
+    req: ProviderRequest,
+) -> None:
+    if not req.func_tool:
+        return
+
+    allowed_tools = event.get_extra(PERSONA_ALLOWED_TOOLS_EXTRA_KEY)
+    if allowed_tools is None:
+        return
+    if not isinstance(allowed_tools, set):
+        allowed_tools = {
+            str(tool_name).strip()
+            for tool_name in allowed_tools
+            if str(tool_name).strip()
+        }
+
+    for tool in list(req.func_tool.tools):
+        if tool.name not in allowed_tools:
+            req.func_tool.remove_tool(tool.name)
 
 
 async def _select_provider(
@@ -577,11 +619,13 @@ async def _ensure_persona_and_skills(
         conversation_persona_id=req.conversation.persona_id,
         platform_name=event.get_platform_name(),
         provider_settings=cfg,
+        selected_persona_id=get_event_selected_persona_id(event),
     )
 
     set_persona_custom_error_message_on_event(
         event, extract_persona_custom_error_message_from_persona(persona)
     )
+    _set_persona_allowed_tools(event, persona)
 
     if persona:
         if prompt := persona["prompt"]:
@@ -849,6 +893,8 @@ async def _append_video_attachment(
             logger.error("Error processing video attachment: %s", exc)
         return
 
+    if video.file and video.file.startswith("file:///"):
+        video_path = video_path.replace("\\", "/")
     video_name = os.path.basename(video_path)
     if quoted:
         text = (
@@ -1512,8 +1558,6 @@ async def build_main_agent(
             req.prompt = ""
             req.image_urls = []
             req.audio_urls = []
-            if sel_model := event.get_extra("selected_model"):
-                req.model = sel_model
             if config.provider_wake_prefix and not event.message_str.startswith(
                 config.provider_wake_prefix
             ):
@@ -1642,6 +1686,9 @@ async def build_main_agent(
             req.contexts = json.loads(conversation.history)
             event.set_extra("provider_request", req)
 
+        if not req.model and (sel_model := event.get_extra("selected_model")):
+            req.model = sel_model
+
     if isinstance(req.contexts, str):
         req.contexts = json.loads(req.contexts)
     thread_selected_text = event.get_extra("thread_selected_text")
@@ -1723,6 +1770,9 @@ async def build_main_agent(
             )
         )
 
+    # Apply persona isolation after every request-time tool injection.
+    _filter_tools_by_persona_scope(event, req)
+
     fallback_providers = _get_fallback_chat_providers(
         provider, plugin_context, config.provider_settings
     )
@@ -1749,11 +1799,11 @@ async def build_main_agent(
         asyncio.create_task(_handle_webchat(event, req, provider))
 
     if req.func_tool and req.func_tool.tools:
-        tool_prompt = (
-            TOOL_CALL_PROMPT
-            if config.tool_schema_mode == "full"
-            else TOOL_CALL_PROMPT_SKILLS_LIKE_MODE
-        )
+        tool_prompt = {
+            "full": TOOL_CALL_PROMPT,
+            "skills_like": TOOL_CALL_PROMPT_SKILLS_LIKE_MODE,
+            "search_registry": TOOL_CALL_PROMPT_SEARCH_REGISTRY_MODE,
+        }.get(config.tool_schema_mode, TOOL_CALL_PROMPT)
 
         if config.computer_use_runtime == "local":
             workspace_root = await _get_workspace_path_for_umo(

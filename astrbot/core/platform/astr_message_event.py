@@ -13,6 +13,12 @@ from deprecated import deprecated
 from astrbot import logger
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.db.po import Conversation
+from astrbot.core.event_llm_overrides import (
+    SELECTED_MODEL_EXTRA_KEY,
+    SELECTED_PERSONA_EXTRA_KEY,
+    SELECTED_PROVIDER_EXTRA_KEY,
+    normalize_event_override_id,
+)
 from astrbot.core.message.components import (
     At,
     AtAll,
@@ -223,6 +229,59 @@ class AstrMessageEvent(abc.ABC):
         """设置额外的信息。"""
         self._extras[key] = value
 
+    def _set_or_clear_extra(self, key: str, value: str | None) -> None:
+        normalized = normalize_event_override_id(value)
+        if normalized is None:
+            self._extras.pop(key, None)
+            return
+        self._extras[key] = normalized
+
+    def set_selected_persona(self, persona_id: str | None) -> None:
+        """Override the persona used for this event's LLM request only.
+
+        Pass ``"[%None]"`` to explicitly disable persona injection for this event.
+        Pass ``None`` or an empty string to clear the event override.
+        """
+        self._set_or_clear_extra(SELECTED_PERSONA_EXTRA_KEY, persona_id)
+
+    def get_selected_persona(self) -> str | None:
+        """Get the event-level persona override, if any."""
+        return normalize_event_override_id(
+            self._extras.get(SELECTED_PERSONA_EXTRA_KEY),
+        )
+
+    def set_selected_provider(
+        self,
+        provider_id: str | None,
+        model_name: str | None = None,
+    ) -> None:
+        """Override the chat provider/model for this event's LLM request only."""
+        self._set_or_clear_extra(SELECTED_PROVIDER_EXTRA_KEY, provider_id)
+        self._set_or_clear_extra(SELECTED_MODEL_EXTRA_KEY, model_name)
+
+    def get_selected_provider(self) -> str | None:
+        """Get the event-level provider override, if any."""
+        return normalize_event_override_id(
+            self._extras.get(SELECTED_PROVIDER_EXTRA_KEY),
+        )
+
+    def get_selected_model(self) -> str | None:
+        """Get the event-level model override, if any."""
+        return normalize_event_override_id(
+            self._extras.get(SELECTED_MODEL_EXTRA_KEY),
+        )
+
+    def set_llm_overrides(
+        self,
+        *,
+        persona_id: str | None = None,
+        provider_id: str | None = None,
+        model_name: str | None = None,
+    ) -> None:
+        """Override persona/provider/model for this event's LLM request only."""
+        self.set_selected_persona(persona_id)
+        self.set_selected_provider(provider_id, model_name)
+
     def get_extra(self, key: str | None = None, default=None) -> Any:
         """获取额外的信息。"""
         if key is None:
@@ -409,11 +468,12 @@ class AstrMessageEvent(abc.ABC):
             return MessageEventResult().url_image(url_or_path)
         return MessageEventResult().file_image(url_or_path)
 
-    def chain_result(self, chain: list[BaseMessageComponent]) -> MessageEventResult:
+    def chain_result(
+        self,
+        chain: MessageChain | list[BaseMessageComponent],
+    ) -> MessageEventResult:
         """创建一个空的消息事件结果，包含指定的消息链。"""
-        mer = MessageEventResult()
-        mer.chain = chain
-        return mer
+        return MessageEventResult.from_chain(chain)
 
     """LLM 请求相关"""
 

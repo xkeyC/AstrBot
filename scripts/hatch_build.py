@@ -2,12 +2,13 @@
 Custom Hatchling build hook.
 
 Standard wheel builds automatically build the dashboard when compatible bundled
-assets are not already present. Editable installs remain unaffected.
+assets are not already present, including `uv tool install git+...`. Editable
+installs are skipped unless ASTRBOT_BUILD_DASHBOARD=1 is set.
 
 Set ASTRBOT_BUILD_DASHBOARD=1 to force a rebuild, or 0 to disable it.
 
 When enabled, this hook:
-1. Runs `npm run build` inside the `dashboard/` directory.
+1. Runs the dashboard package-manager build inside the `dashboard/` directory.
 2. Copies the resulting `dashboard/dist/` tree into
    `astrbot/dashboard/dist/` so the static assets are shipped
    inside the Python wheel.
@@ -25,12 +26,32 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
+    @staticmethod
+    def _run(command: list[str], cwd: Path) -> None:
+        print(f"[hatch_build] Running: {' '.join(command)}")
+        subprocess.run(command, cwd=cwd, check=True)
+
+    @staticmethod
+    def _resolve_command(command: str) -> str | None:
+        if os.name == "nt":
+            return shutil.which(f"{command}.cmd") or shutil.which(command)
+        return shutil.which(command)
+
+    @staticmethod
+    def _should_build_dashboard(build_version: str) -> bool:
+        env_value = os.environ.get("ASTRBOT_BUILD_DASHBOARD", "").strip().lower()
+        if env_value in {"1", "true", "yes", "on"}:
+            return True
+        if env_value in {"0", "false", "no", "off"}:
+            return False
+        return build_version != "editable"
+
     def initialize(self, version: str, build_data: dict) -> None:
-        build_setting = os.environ.get("ASTRBOT_BUILD_DASHBOARD", "").strip()
-        force_build = build_setting == "1"
-        if build_setting.lower() in {"0", "false", "no", "off"}:
-            return
-        if self.target_name != "wheel" or (version == "editable" and not force_build):
+        del build_data
+
+        build_setting = os.environ.get("ASTRBOT_BUILD_DASHBOARD", "").strip().lower()
+        force_build = build_setting in {"1", "true", "yes", "on"}
+        if self.target_name != "wheel" or not self._should_build_dashboard(version):
             return
 
         root = Path(self.root)
@@ -66,28 +87,49 @@ class CustomBuildHook(BuildHookInterface):
                 "Dashboard source and compatible bundled assets are both missing."
             )
 
-        npm_command = shutil.which("npm.cmd" if os.name == "nt" else "npm")
-        if npm_command is None:
-            raise RuntimeError(
-                "npm is required to build dashboard assets for the Python wheel."
-            )
+        uses_pnpm = (dashboard_src / "pnpm-lock.yaml").exists()
+        pnpm_executable = self._resolve_command("pnpm")
+        if uses_pnpm:
+            if pnpm_executable:
+                pnpm_command = [pnpm_executable]
+            else:
+                npx_executable = self._resolve_command("npx")
+                if npx_executable:
+                    pnpm_command = [npx_executable, "--yes", "pnpm@9"]
+                else:
+                    raise RuntimeError(
+                        "pnpm is required to build dashboard, and neither pnpm nor "
+                        "npx is available. Install Node.js/npm first."
+                    )
+        else:
+            npm_executable = self._resolve_command("npm")
+            if npm_executable is None:
+                raise RuntimeError(
+                    "npm is required to build dashboard assets for the Python wheel."
+                )
+            pnpm_command = []
 
-        # ── Install Node dependencies if node_modules is absent ─────────────
-        if not (dashboard_src / "node_modules").exists():
-            print("[hatch_build] Installing dashboard Node dependencies...")
-            subprocess.run(
-                [npm_command, "install"],
-                cwd=dashboard_src,
-                check=True,
-            )
+        package_manager = " ".join(pnpm_command) if uses_pnpm else "npm"
+        install_command = (
+            [*pnpm_command, "install", "--frozen-lockfile"]
+            if uses_pnpm
+            else [npm_executable, "install"]
+        )
+        build_command = (
+            [*pnpm_command, "run", "build-local"]
+            if uses_pnpm
+            else [npm_executable, "run", "build-local"]
+        )
+
+        # ── Sync Node dependencies before building ───────────────────────────
+        print(
+            f"[hatch_build] Installing dashboard Node dependencies with {package_manager}..."
+        )
+        self._run(install_command, cwd=dashboard_src)
 
         # ── Build the Vue/Vite dashboard ──────────────────────────────────────
-        print("[hatch_build] Building Vue dashboard (npm run build)...")
-        subprocess.run(
-            [npm_command, "run", "build"],
-            cwd=dashboard_src,
-            check=True,
-        )
+        print(f"[hatch_build] Building Vue dashboard ({' '.join(build_command)})...")
+        self._run(build_command, cwd=dashboard_src)
 
         if not dist_src.exists():
             raise RuntimeError("dashboard/dist was not created by npm run build.")

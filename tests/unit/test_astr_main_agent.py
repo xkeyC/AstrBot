@@ -898,6 +898,31 @@ class TestEnsurePersonaAndSkills:
         assert "Custom persona." in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
+    async def test_ensure_persona_from_event_override(self, mock_event, mock_context):
+        """Test applying event-level persona override."""
+        module = ama
+        persona = {"name": "event-persona", "prompt": "Event persona."}
+        mock_context.persona_manager.resolve_selected_persona = AsyncMock(
+            return_value=("event-persona", persona, None, False)
+        )
+        mock_event.get_extra.side_effect = lambda key, default=None: {
+            "selected_persona": "event-persona",
+        }.get(key, default)
+        req = ProviderRequest()
+        req.conversation = MagicMock(persona_id="conv-persona")
+
+        await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
+
+        mock_context.persona_manager.resolve_selected_persona.assert_awaited_once_with(
+            umo=mock_event.unified_msg_origin,
+            conversation_persona_id="conv-persona",
+            platform_name=mock_event.get_platform_name.return_value,
+            provider_settings={},
+            selected_persona_id="event-persona",
+        )
+        assert "Event persona." in req.system_prompt
+
+    @pytest.mark.asyncio
     async def test_inline_genui_prompt_is_added_with_custom_persona(
         self, mock_event, mock_context
     ):
@@ -1171,6 +1196,69 @@ class TestEnsurePersonaAndSkills:
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
 
         assert req.func_tool is not None
+
+    def test_filter_tools_by_persona_scope_removes_unallowed_tools(self, mock_event):
+        module = ama
+        allowed_mcp = MagicMock(spec=MCPTool)
+        allowed_mcp.name = "allowed_mcp"
+        blocked_mcp = MagicMock(spec=MCPTool)
+        blocked_mcp.name = "blocked_mcp"
+        local_tool = FunctionTool(
+            name="local_tool",
+            description="local",
+            parameters={"type": "object", "properties": {}},
+        )
+
+        tool_set = ToolSet()
+        tool_set.add_tool(allowed_mcp)
+        tool_set.add_tool(blocked_mcp)
+        tool_set.add_tool(local_tool)
+        req = ProviderRequest(func_tool=tool_set)
+        mock_event.get_extra.side_effect = lambda key=None, default=None: {
+            module.PERSONA_ALLOWED_TOOLS_EXTRA_KEY: {"allowed_mcp", "local_tool"},
+        }.get(key, default)
+
+        module._filter_tools_by_persona_scope(mock_event, req)
+
+        assert req.func_tool is not None
+        assert req.func_tool.names() == ["allowed_mcp", "local_tool"]
+
+    def test_filter_tools_by_persona_scope_empty_scope_removes_all_tools(
+        self, mock_event
+    ):
+        module = ama
+        tool = FunctionTool(
+            name="local_tool",
+            description="local",
+            parameters={"type": "object", "properties": {}},
+        )
+        tool_set = ToolSet()
+        tool_set.add_tool(tool)
+        req = ProviderRequest(func_tool=tool_set)
+        mock_event.get_extra.side_effect = lambda key=None, default=None: {
+            module.PERSONA_ALLOWED_TOOLS_EXTRA_KEY: set(),
+        }.get(key, default)
+
+        module._filter_tools_by_persona_scope(mock_event, req)
+
+        assert req.func_tool is not None
+        assert req.func_tool.names() == []
+
+    def test_filter_tools_by_persona_scope_none_allows_tools(self, mock_event):
+        module = ama
+        mcp_tool = MagicMock(spec=MCPTool)
+        mcp_tool.name = "mcp_tool"
+        tool_set = ToolSet()
+        tool_set.add_tool(mcp_tool)
+        req = ProviderRequest(func_tool=tool_set)
+        mock_event.get_extra.side_effect = lambda key=None, default=None: {
+            module.PERSONA_ALLOWED_TOOLS_EXTRA_KEY: None,
+        }.get(key, default)
+
+        module._filter_tools_by_persona_scope(mock_event, req)
+
+        assert req.func_tool is not None
+        assert req.func_tool.names() == ["mcp_tool"]
 
     @pytest.mark.asyncio
     async def test_persona_empty_tools_keeps_late_builtin_tools(
@@ -2192,6 +2280,37 @@ class TestBuildMainAgent:
 
         assert result is not None
         assert result.provider_request == existing_req
+
+    @pytest.mark.asyncio
+    async def test_build_main_agent_applies_selected_model_to_existing_request(
+        self, mock_event, mock_context, mock_provider
+    ):
+        """Test selected_model applies to a reused ProviderRequest."""
+        module = ama
+        existing_req = ProviderRequest(prompt="Existing prompt")
+        mock_event.get_extra.side_effect = lambda key=None, default=None: {
+            "provider_request": existing_req,
+            "selected_model": "override-model",
+        }.get(key, default)
+
+        with (
+            patch("astrbot.core.astr_main_agent.AgentRunner") as mock_runner_cls,
+            patch("astrbot.core.astr_main_agent.AstrAgentContext"),
+        ):
+            mock_runner = MagicMock()
+            mock_runner.reset = AsyncMock()
+            mock_runner_cls.return_value = mock_runner
+
+            result = await module.build_main_agent(
+                event=mock_event,
+                plugin_context=mock_context,
+                config=module.MainAgentBuildConfig(tool_call_timeout=60),
+                provider=mock_provider,
+            )
+
+        assert result is not None
+        assert result.provider_request is existing_req
+        assert existing_req.model == "override-model"
 
 
 class TestHandleWebchat:

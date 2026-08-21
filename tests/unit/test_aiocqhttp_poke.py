@@ -49,3 +49,38 @@ async def test_aiocqhttp_send_message_dispatches_onebot_v11_poke_payload():
         group_id=123456,
         message=[{"type": "poke", "data": {"type": "126", "id": "2003"}}],
     )
+
+
+@pytest.mark.asyncio
+async def test_aiocqhttp_send_message_keeps_plain_image_order_in_one_payload(
+    monkeypatch,
+):
+    async def fake_convert_to_base64(self):
+        return "encoded-image"
+
+    monkeypatch.setattr(Comp.Image, "convert_to_base64", fake_convert_to_base64)
+    bot = AsyncMock()
+    chain = MessageChain(
+        [
+            Comp.Plain("before"),
+            Comp.Image.fromBase64("raw-image"),
+            Comp.Plain("after"),
+        ]
+    )
+
+    await AiocqhttpMessageEvent.send_message(
+        bot=bot,
+        message_chain=chain,
+        event=None,
+        is_group=True,
+        session_id="123456",
+    )
+
+    bot.send_group_msg.assert_awaited_once_with(
+        group_id=123456,
+        message=[
+            {"type": "text", "data": {"text": "before"}},
+            {"type": "image", "data": {"file": "base64://encoded-image"}},
+            {"type": "text", "data": {"text": "after"}},
+        ],
+    )

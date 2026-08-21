@@ -73,7 +73,7 @@ sudo docker run -itd -p 6185:6185 -p 6199:6199 -v $PWD/data:/AstrBot/data -v /et
 > ```
 >
 > (感谢 DaoCloud ❤️)
-> 
+>
 > Windows 下不需要加 sudo，下同
 >
 Windows 同步 Host Time（需要WSL2）
@@ -106,7 +106,7 @@ docker run -itd -p 6185:6185 -p 6199:6199 -e TZ=Asia/Shanghai -v "%cd%\data:/Ast
 > ```
 >
 > (感谢 DaoCloud ❤️)
-> 
+>
 ### 使用`PowerShell`
 
 `TZ` 的值请设置为 **IANA 时区标准格式**（地区/城市），例如中国为 `Asia/Shanghai`
@@ -122,7 +122,7 @@ docker run -itd -p 6185:6185 -p 6199:6199 -e TZ=Asia/Shanghai -v "${PWD}\data:/A
 > ```
 >
 > (感谢 DaoCloud ❤️)
-> 
+>
 
 
 
