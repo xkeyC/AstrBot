@@ -172,6 +172,16 @@ class TestMCPToolSchemaNormalization:
 
         assert tool.name == "quote_lookup"
 
+    def test_mcp_tool_rejects_combined_name_over_provider_limit(self):
+        mcp_tool = SimpleNamespace(
+            name="quote",
+            description="Lookup a quote",
+            inputSchema={"type": "object", "properties": {}},
+        )
+
+        with pytest.raises(ValueError, match="Combined MCP tool prefix"):
+            MCPTool(mcp_tool, MagicMock(), "long-prefix", tool_prefix="p" * 60)
+
 
 class TestMCPConfigMetadata:
     def test_prepare_config_strips_tool_prefix_and_active_metadata(self):

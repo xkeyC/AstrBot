@@ -827,6 +827,11 @@ class MCPTool(FunctionTool, Generic[TContext]):
             "_",
             f"{validated_tool_prefix}{mcp_tool.name}",
         )
+        if len(llm_tool_name) > 64:
+            raise ValueError(
+                "Combined MCP tool prefix and tool name must be 64 characters or "
+                "fewer after sanitization."
+            )
         super().__init__(
             name=llm_tool_name,
             description=mcp_tool.description or "",
