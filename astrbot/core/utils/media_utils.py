@@ -215,6 +215,15 @@ def file_uri_to_path(file_uri: MediaRefStr) -> str:
     parsed = urlparse(file_uri)
     netloc = parsed.netloc or ""
     path = parsed.path or ""
+    decoded_netloc = url2pathname(netloc)
+    localhost_drive = decoded_netloc[len("localhost") :]
+    if (
+        decoded_netloc.lower().startswith("localhost")
+        and len(localhost_drive) == 2
+        and localhost_drive[0].isalpha()
+        and localhost_drive[1] == ":"
+    ):
+        return str(Path(url2pathname(f"{localhost_drive}{path}")))
     if netloc and netloc.lower() != "localhost":
         if len(netloc) == 2 and netloc[1] == ":" and netloc[0].isalpha():
             return str(Path(url2pathname(f"{netloc}{path}")))
