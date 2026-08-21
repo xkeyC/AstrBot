@@ -2,7 +2,7 @@ FROM node:lts-bookworm-slim AS dashboard-builder
 
 WORKDIR /build
 
-COPY dashboard/package.json dashboard/pnpm-lock.yaml ./dashboard/
+COPY dashboard/package.json dashboard/pnpm-lock.yaml dashboard/pnpm-workspace.yaml ./dashboard/
 WORKDIR /build/dashboard
 RUN npm install -g pnpm@9 \
     && pnpm install --frozen-lockfile

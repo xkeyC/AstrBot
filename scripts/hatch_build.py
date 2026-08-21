@@ -29,7 +29,11 @@ class CustomBuildHook(BuildHookInterface):
     @staticmethod
     def _run(command: list[str], cwd: Path) -> None:
         print(f"[hatch_build] Running: {' '.join(command)}")
-        subprocess.run(command, cwd=cwd, check=True)
+        build_env = os.environ.copy()
+        # Python package builds normally run without a TTY. pnpm otherwise
+        # aborts when it needs to refresh an existing node_modules directory.
+        build_env.setdefault("CI", "true")
+        subprocess.run(command, cwd=cwd, check=True, env=build_env)
 
     @staticmethod
     def _resolve_command(command: str) -> str | None:
