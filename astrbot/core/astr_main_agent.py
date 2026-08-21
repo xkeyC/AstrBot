@@ -1196,7 +1196,11 @@ async def _handle_webchat(
 
 def _apply_llm_safety_mode(config: MainAgentBuildConfig, req: ProviderRequest) -> None:
     if config.safety_mode_strategy == "system_prompt":
-        req.system_prompt = f"{LLM_SAFETY_MODE_SYSTEM_PROMPT}\n\n{req.system_prompt}"
+        _append_dynamic_user_context(
+            req,
+            "safety_mode",
+            LLM_SAFETY_MODE_SYSTEM_PROMPT,
+        )
     else:
         logger.warning(
             "Unsupported llm_safety_mode strategy: %s.",

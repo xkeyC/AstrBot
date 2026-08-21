@@ -2454,11 +2454,11 @@ class TestApplyLlmSafetyMode:
 
         module._apply_llm_safety_mode(config, req)
 
-        assert "You are running in Safe Mode" in req.system_prompt
-        assert "Original prompt" in req.system_prompt
+        assert "You are running in Safe Mode" in _dynamic_context_text(req)
+        assert req.system_prompt == "Original prompt"
 
-    def test_apply_llm_safety_mode_prepends_safety_prompt(self):
-        """Test that safety prompt is prepended before original system prompt."""
+    def test_apply_llm_safety_mode_uses_dynamic_user_context(self):
+        """Test that safety mode does not mutate the root system prompt."""
         module = ama
         config = module.MainAgentBuildConfig(
             tool_call_timeout=60,
@@ -2468,8 +2468,8 @@ class TestApplyLlmSafetyMode:
 
         module._apply_llm_safety_mode(config, req)
 
-        assert req.system_prompt.startswith("You are running in Safe Mode")
-        assert "My custom prompt" in req.system_prompt
+        assert "You are running in Safe Mode" in _dynamic_context_text(req)
+        assert req.system_prompt == "My custom prompt"
 
     def test_apply_llm_safety_mode_with_none_system_prompt(self):
         """Test applying safety mode when original system_prompt is None."""
@@ -2482,7 +2482,8 @@ class TestApplyLlmSafetyMode:
 
         module._apply_llm_safety_mode(config, req)
 
-        assert "You are running in Safe Mode" in req.system_prompt
+        assert "You are running in Safe Mode" in _dynamic_context_text(req)
+        assert req.system_prompt is None
 
     def test_apply_llm_safety_mode_unsupported_strategy(self):
         """Test that unsupported strategy logs warning and does nothing."""
@@ -2514,7 +2515,8 @@ class TestApplyLlmSafetyMode:
 
         module._apply_llm_safety_mode(config, req)
 
-        assert "You are running in Safe Mode" in req.system_prompt
+        assert "You are running in Safe Mode" in _dynamic_context_text(req)
+        assert req.system_prompt == ""
 
 
 class TestApplySandboxTools:

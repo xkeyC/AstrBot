@@ -255,7 +255,7 @@ jobs:
       - name: Build package
         shell: bash
         # Dashboard assets are already in astrbot/dashboard/dist/;
-        # ASTRBOT_BUILD_DASHBOARD is intentionally unset so the hatch hook skips npm.
+        # the Hatch hook verifies their version and skips npm when they match.
         run: uv build
 
       - name: Publish to PyPI

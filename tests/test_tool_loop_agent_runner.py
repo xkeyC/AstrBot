@@ -559,6 +559,22 @@ def _make_large_tool_result_text() -> str:
     return "x" * 100000
 
 
+def test_tool_requery_instruction_is_request_scoped_user_context(runner):
+    runner.run_context = SimpleNamespace(
+        messages=[
+            Message(role="system", content="root"),
+            Message(role="user", content="question"),
+        ]
+    )
+
+    contexts = runner._build_tool_requery_context(["weather"])
+
+    assert contexts[0] == {"role": "system", "content": "root"}
+    assert contexts[-1]["role"] == "user"
+    assert '<request_context name="tool_requery">' in contexts[-1]["content"]
+    assert "weather" in contexts[-1]["content"]
+
+
 @pytest.mark.asyncio
 async def test_max_step_limit_functionality(
     runner, mock_provider, provider_request, mock_tool_executor, mock_hooks

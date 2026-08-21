@@ -1422,11 +1422,18 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         )
         if extra_instruction:
             instruction = f"{instruction}\n{extra_instruction}"
-        if contexts and contexts[0].get("role") == "system":
-            content = contexts[0].get("content") or ""
-            contexts[0]["content"] = f"{content}\n{instruction}"
-        else:
-            contexts.insert(0, {"role": "system", "content": instruction})
+        contexts.append(
+            {
+                "role": "user",
+                "content": (
+                    '<request_context name="tool_requery">\n'
+                    "The following is trusted request-scoped application context. "
+                    "Follow it unless it conflicts with the root system message.\n"
+                    f"{instruction}\n"
+                    "</request_context>"
+                ),
+            }
+        )
         return contexts
 
     @staticmethod

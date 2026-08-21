@@ -119,7 +119,6 @@ def test_convert_chat_history_preserves_response_items_and_function_calls():
     )
 
     assert response_input == [
-        {"type": "message", "role": "system", "content": "system context"},
         {
             "type": "message",
             "role": "user",
@@ -187,8 +186,12 @@ async def test_prepare_payload_replays_full_history_without_server_state():
 
     payloads, context = await provider._prepare_chat_payload(
         prompt="current",
-        contexts=[{"role": "user", "content": "previous"}],
-        system_prompt="follow instructions",
+        contexts=[
+            {"role": "system", "content": "root instructions"},
+            {"role": "developer", "content": "application instructions"},
+            {"role": "user", "content": "previous"},
+        ],
+        system_prompt="request instructions",
     )
 
     assert context == [
@@ -198,7 +201,9 @@ async def test_prepare_payload_replays_full_history_without_server_state():
     assert payloads == {
         "model": "gpt-test",
         "store": False,
-        "instructions": "follow instructions",
+        "instructions": (
+            "request instructions\n\nroot instructions\n\napplication instructions"
+        ),
         "input": [
             {"type": "message", "role": "user", "content": "previous"},
             {"type": "message", "role": "user", "content": "current"},
@@ -206,6 +211,11 @@ async def test_prepare_payload_replays_full_history_without_server_state():
     }
     assert "previous_response_id" not in payloads
     assert "conversation" not in payloads
+    assert all(
+        item.get("role") not in {"system", "developer"}
+        for item in payloads["input"]
+        if item.get("type") == "message"
+    )
 
 
 @pytest.mark.asyncio

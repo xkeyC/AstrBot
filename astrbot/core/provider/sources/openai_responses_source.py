@@ -99,7 +99,7 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                 )
                 continue
 
-            if role not in {"user", "assistant", "system", "developer"}:
+            if role not in {"user", "assistant"}:
                 continue
 
             content = message.get("content")
@@ -231,6 +231,56 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
 
         return response_input
 
+    @staticmethod
+    def _split_response_instructions(
+        messages: list[dict],
+        base_instructions: str | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """Move privileged chat messages into Responses ``instructions``.
+
+        Responses accepts system and developer messages in ``input``, but some
+        compatible gateways only accept them through the top-level
+        ``instructions`` field. Keeping the mapping here also prevents retries
+        from accidentally rebuilding a payload with system messages in input.
+
+        Args:
+            messages: Chat-format source messages.
+            base_instructions: Existing request-level instructions.
+
+        Returns:
+            Input messages without privileged roles and merged instructions.
+        """
+        input_messages: list[dict] = []
+        instruction_parts = [base_instructions] if base_instructions else []
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") not in {
+                "system",
+                "developer",
+            }:
+                input_messages.append(message)
+                continue
+
+            content = message.get("content")
+            if isinstance(content, str):
+                instruction = content
+            elif isinstance(content, list):
+                instruction = "\n".join(
+                    str(part.get("text", ""))
+                    for part in content
+                    if isinstance(part, dict)
+                    and part.get("type") in {"text", "input_text"}
+                    and part.get("text")
+                )
+            elif content is None:
+                instruction = ""
+            else:
+                instruction = str(content)
+            if instruction.strip():
+                instruction_parts.append(instruction.strip())
+
+        instructions = "\n\n".join(instruction_parts) or None
+        return input_messages, instructions
+
     async def _prepare_chat_payload(
         self,
         prompt: str | None,
@@ -284,13 +334,17 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         if self._context_contains_image(context_query):
             context_query = await self._materialize_context_image_parts(context_query)
 
+        context_query, instructions = self._split_response_instructions(
+            context_query,
+            system_prompt,
+        )
         payloads: dict[str, Any] = {
             "input": self._convert_chat_messages_to_response_input(context_query),
             "model": model or self.get_model(),
             "store": False,
         }
-        if system_prompt:
-            payloads["instructions"] = system_prompt
+        if instructions:
+            payloads["instructions"] = instructions
 
         return payloads, context_query
 
@@ -668,9 +722,15 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             image_fallback_used,
         ) = result
         retry_payloads.pop("messages", None)
+        context_query, instructions = self._split_response_instructions(
+            context_query,
+            retry_payloads.pop("instructions", None),
+        )
         retry_payloads["input"] = self._convert_chat_messages_to_response_input(
             context_query
         )
+        if instructions:
+            retry_payloads["instructions"] = instructions
         retry_payloads["store"] = False
         return (
             success,
