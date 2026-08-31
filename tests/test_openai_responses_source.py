@@ -5,6 +5,7 @@ import pytest
 from openai.types.responses import Response
 
 import astrbot.core.message.components as Comp
+from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.config.default import CONFIG_METADATA_2
 from astrbot.core.provider.sources.openai_responses_source import (
     ProviderOpenAIResponses,
@@ -910,3 +911,498 @@ async def test_parse_failed_response_raises_provider_error():
 
     with pytest.raises(RuntimeError, match="server_error: failed"):
         await provider._parse_response(response, tools=None)
+
+
+@pytest.mark.asyncio
+async def test_parse_response_separates_independent_message_items():
+    provider = _make_provider()
+    response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Let me look that up.",
+                        "annotations": [],
+                    }
+                ],
+            },
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "AstrBot"},
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "AstrBot is a bot.",
+                        "annotations": [],
+                    },
+                ],
+            },
+        ]
+    )
+
+    result = await provider._parse_response(response, tools=None)
+
+    assert result.completion_text == "Let me look that up.\n\nAstrBot is a bot."
+
+
+@pytest.mark.asyncio
+async def test_parse_response_keeps_one_message_item_unsplit():
+    provider = _make_provider()
+    response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "first ", "annotations": []},
+                    {"type": "output_text", "text": "second", "annotations": []},
+                ],
+            }
+        ]
+    )
+
+    result = await provider._parse_response(response, tools=None)
+
+    assert result.completion_text == "first second"
+
+
+@pytest.mark.asyncio
+async def test_query_stream_separates_message_items(monkeypatch):
+    provider = _make_provider()
+    final_response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "searching", "annotations": []},
+                ],
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "answer", "annotations": []},
+                ],
+            },
+        ]
+    )
+
+    async def fake_stream():
+        yield SimpleNamespace(
+            type="response.created",
+            response=SimpleNamespace(id="resp_1"),
+        )
+        yield SimpleNamespace(type="response.output_text.delta", delta="searching")
+        yield SimpleNamespace(
+            type="response.output_item.done",
+            item=SimpleNamespace(type="message", id="msg_1"),
+        )
+        yield SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", id="msg_2"),
+        )
+        yield SimpleNamespace(type="response.output_text.delta", delta="answer")
+        yield SimpleNamespace(type="response.completed", response=final_response)
+
+    async def fake_create(**kwargs):
+        return fake_stream()
+
+    monkeypatch.setattr(provider.client.responses, "create", fake_create)
+
+    results = [
+        result
+        async for result in provider._query_stream(
+            {"model": "gpt-test", "input": "hi", "store": False},
+            tools=None,
+        )
+    ]
+
+    streamed = "".join(result.completion_text for result in results if result.is_chunk)
+    assert streamed == "searching\n\nanswer"
+    assert results[-1].completion_text == "searching\n\nanswer"
+
+
+def test_hosted_tools_restate_conversation_rules_in_instructions():
+    provider = _make_provider({"responses_web_search": True})
+    payloads = {"model": "gpt-test", "input": [], "instructions": "Root prompt."}
+
+    provider._prepare_response_request(payloads, tools=None)
+
+    assert payloads["instructions"].startswith("Root prompt.\n\n")
+    assert ProviderOpenAIResponses.HOSTED_TOOL_INSTRUCTION in payloads["instructions"]
+
+    # A retried request must not stack the same reinforcement twice.
+    provider._prepare_response_request(payloads, tools=None)
+    assert (
+        payloads["instructions"].count(ProviderOpenAIResponses.HOSTED_TOOL_INSTRUCTION)
+        == 1
+    )
+
+
+def test_function_tools_only_requests_keep_instructions_untouched():
+    provider = _make_provider()
+    tools = ToolSet(
+        [
+            FunctionTool(
+                name="ping",
+                description="ping",
+                parameters={"type": "object", "properties": {}},
+            )
+        ]
+    )
+    payloads = {"model": "gpt-test", "input": [], "instructions": "Root prompt."}
+
+    provider._prepare_response_request(payloads, tools=tools)
+
+    assert payloads["instructions"] == "Root prompt."
+
+
+@pytest.mark.asyncio
+async def test_commentary_phase_is_isolated_from_the_reply():
+    provider = _make_provider()
+    response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Let me search the web.",
+                        "annotations": [],
+                    }
+                ],
+                "phase": "commentary",
+            },
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "AstrBot"},
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "AstrBot is a bot.",
+                        "annotations": [],
+                    },
+                ],
+                "phase": "final_answer",
+            },
+        ]
+    )
+
+    result = await provider._parse_response(response, tools=None)
+
+    assert result.completion_text == "AstrBot is a bot."
+    assert result.reasoning_content == "Let me search the web."
+
+
+@pytest.mark.asyncio
+async def test_phase_labelled_messages_are_replayed_verbatim():
+    provider = _make_provider()
+    response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Working on it.", "annotations": []}
+                ],
+                "phase": "commentary",
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Done.", "annotations": []}
+                ],
+                "phase": "final_answer",
+            },
+        ]
+    )
+
+    result = await provider._parse_response(
+        response, tools=None, request_model="gpt-test"
+    )
+    state = json.loads(result.reasoning_signature)
+    response_input = provider._convert_chat_messages_to_response_input(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "think",
+                        "think": "Working on it.",
+                        "encrypted": result.reasoning_signature,
+                    },
+                    {"type": "text", "text": "Done."},
+                ],
+            }
+        ],
+        "gpt-test",
+    )
+
+    assert [item["phase"] for item in state["items"]] == ["commentary", "final_answer"]
+    # The flattened history copy must not duplicate the replayed messages.
+    assert response_input == state["items"]
+
+
+@pytest.mark.asyncio
+async def test_unlabelled_messages_keep_the_flattened_history_replay():
+    provider = _make_provider()
+    response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Done.", "annotations": []}
+                ],
+            }
+        ]
+    )
+
+    result = await provider._parse_response(response, tools=None)
+
+    assert result.reasoning_signature is None
+
+
+@pytest.mark.asyncio
+async def test_query_stream_isolates_commentary_and_hosted_search(monkeypatch):
+    provider = _make_provider()
+    final_response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "searching", "annotations": []},
+                ],
+                "phase": "commentary",
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "answer", "annotations": []},
+                ],
+                "phase": "final_answer",
+            },
+        ]
+    )
+
+    async def fake_stream():
+        yield SimpleNamespace(
+            type="response.created",
+            response=SimpleNamespace(id="resp_1"),
+        )
+        yield SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", id="msg_1", phase="commentary"),
+        )
+        yield SimpleNamespace(type="response.output_text.delta", delta="searching")
+        yield SimpleNamespace(
+            type="response.output_item.done",
+            item=SimpleNamespace(type="message", id="msg_1", phase="commentary"),
+        )
+        yield SimpleNamespace(type="response.web_search_call.in_progress")
+        yield SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", id="msg_2", phase="final_answer"),
+        )
+        yield SimpleNamespace(type="response.output_text.delta", delta="answer")
+        yield SimpleNamespace(type="response.completed", response=final_response)
+
+    async def fake_create(**kwargs):
+        return fake_stream()
+
+    monkeypatch.setattr(provider.client.responses, "create", fake_create)
+
+    results = [
+        result
+        async for result in provider._query_stream(
+            {"model": "gpt-test", "input": "hi", "store": False},
+            tools=None,
+        )
+    ]
+
+    chunks = [result for result in results if result.is_chunk]
+    assert [chunk.reasoning_content for chunk in chunks] == ["searching", None]
+    assert chunks[1].completion_text == "answer"
+    assert results[-1].completion_text == "answer"
+    assert results[-1].reasoning_content == "searching"
+
+
+@pytest.mark.asyncio
+async def test_message_items_become_separate_reply_messages():
+    provider = _make_provider()
+    response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Let me check.", "annotations": []}
+                ],
+            },
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "AstrBot"},
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "AstrBot is a bot.",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "start_index": 0,
+                                "end_index": 7,
+                                "url": "https://example.com/a",
+                                "title": "Example",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+    )
+
+    result = await provider._parse_response(response, tools=None)
+
+    assert [chain.get_plain_text() for chain in result.reply_segments] == [
+        "Let me check.",
+        "AstrBot is a bot. \n\nSources:\n- Example: https://example.com/a",
+    ]
+    # The merged chain still carries the whole turn for history.
+    assert result.completion_text.startswith("Let me check.\n\nAstrBot is a bot.")
+
+
+@pytest.mark.asyncio
+async def test_single_message_item_has_no_reply_segments():
+    provider = _make_provider()
+    response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Done.", "annotations": []}
+                ],
+            }
+        ]
+    )
+
+    result = await provider._parse_response(response, tools=None)
+
+    assert result.reply_segments == []
+    assert result.completion_text == "Done."
+
+
+@pytest.mark.asyncio
+async def test_query_stream_breaks_the_message_at_a_hosted_call(monkeypatch):
+    provider = _make_provider()
+    final_response = _make_response(
+        [
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "checking", "annotations": []}
+                ],
+            },
+            {
+                "type": "message",
+                "id": "msg_2",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "answer", "annotations": []}
+                ],
+            },
+        ]
+    )
+
+    async def fake_stream():
+        yield SimpleNamespace(
+            type="response.created",
+            response=SimpleNamespace(id="resp_1"),
+        )
+        yield SimpleNamespace(type="response.output_text.delta", delta="checking")
+        yield SimpleNamespace(type="response.web_search_call.in_progress")
+        yield SimpleNamespace(type="response.web_search_call.completed")
+        yield SimpleNamespace(type="response.output_text.delta", delta="answer")
+        yield SimpleNamespace(type="response.completed", response=final_response)
+
+    async def fake_create(**kwargs):
+        return fake_stream()
+
+    monkeypatch.setattr(provider.client.responses, "create", fake_create)
+
+    results = [
+        result
+        async for result in provider._query_stream(
+            {"model": "gpt-test", "input": "hi", "store": False},
+            tools=None,
+        )
+    ]
+
+    chunk_chains = [result.result_chain for result in results if result.is_chunk]
+    assert [chain.type for chain in chunk_chains] == [None, "break", None]
+    assert results[-1].completion_text == "checking\n\nanswer"
+    assert [chain.get_plain_text() for chain in results[-1].reply_segments] == [
+        "checking",
+        "answer",
+    ]
+

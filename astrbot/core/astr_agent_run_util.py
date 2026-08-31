@@ -107,6 +107,16 @@ def _merge_buffered_llm_chains(
 
     merged_chain = buffered_llm_chains[0].derive([])
     for chain in buffered_llm_chains:
+        # Buffered replies are independent messages. Keep a paragraph break
+        # between them so merging never glues two replies into one block.
+        if merged_chain.chain and chain.chain:
+            last_comp = merged_chain.chain[-1]
+            if (
+                isinstance(last_comp, Plain)
+                and isinstance(chain.chain[0], Plain)
+                and not last_comp.text.endswith("\n")
+            ):
+                merged_chain.chain[-1] = Plain(f"{last_comp.text}\n\n")
         merged_chain.chain.extend(chain.chain)
         if chain.use_t2i_ is not None and merged_chain.use_t2i_ is None:
             merged_chain.use_t2i_ = chain.use_t2i_
