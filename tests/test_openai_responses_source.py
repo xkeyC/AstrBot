@@ -385,6 +385,7 @@ async def test_query_combines_astrbot_and_responses_native_tools(monkeypatch):
         },
         {
             "type": "web_search",
+            "external_web_access": True,
             "search_context_size": "high",
             "filters": {"allowed_domains": ["example.com"]},
         },
@@ -429,7 +430,11 @@ def test_build_response_tools_deduplicates_configured_and_custom_tools():
 
     assert response_tools == [
         {"type": "function", "name": "weather", "parameters": {"type": "object"}},
-        {"type": "web_search", "search_context_size": "medium"},
+        {
+            "type": "web_search",
+            "external_web_access": True,
+            "search_context_size": "medium",
+        },
         {"type": "file_search", "vector_store_ids": ["vs_1"]},
         {"type": "code_interpreter", "container": {"type": "auto"}},
         {"type": "image_generation"},
@@ -1406,3 +1411,44 @@ async def test_query_stream_breaks_the_message_at_a_hosted_call(monkeypatch):
         "answer",
     ]
 
+
+@pytest.mark.parametrize(
+    ("access_mode", "expected"),
+    [
+        ("cached", {"external_web_access": False}),
+        (
+            "indexed",
+            {"external_web_access": True, "indexed_web_access": True},
+        ),
+        ("live", {"external_web_access": True}),
+        ("unknown-mode", {"external_web_access": True}),
+    ],
+)
+def test_web_search_access_mode_controls_external_reach(access_mode, expected):
+    provider = _make_provider(
+        {
+            "responses_web_search": True,
+            "responses_web_search_access": access_mode,
+        }
+    )
+
+    tools = provider._build_response_tools(None, None)
+
+    assert tools == [
+        {"type": "web_search", **expected, "search_context_size": "medium"}
+    ]
+
+
+def test_web_search_access_defaults_to_live_for_existing_configs():
+    provider = _make_provider({"responses_web_search": True})
+
+    tools = provider._build_response_tools(None, None)
+
+    assert tools[0]["external_web_access"] is True
+    assert "indexed_web_access" not in tools[0]
+
+
+def test_disabled_web_search_registers_no_native_tool():
+    provider = _make_provider({"responses_web_search": False})
+
+    assert provider._build_response_tools(None, None) == []

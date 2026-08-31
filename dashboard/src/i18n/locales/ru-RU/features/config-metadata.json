@@ -1214,6 +1214,10 @@
                 "description": "Включить нативный веб-поиск Responses",
                 "hint": "Использовать инструмент web_search OpenAI Responses API. Применимо только к провайдерам openai_responses."
             },
+            "responses_web_search_access": {
+                "description": "Режим доступа веб-поиска",
+                "hint": "cached: без обращения к внешней сети, только уже закэшированные результаты; indexed: доступ в сеть только к URL, уже попавшим в поисковый индекс; live: прямой доступ в сеть без требования индексации."
+            },
             "responses_web_search_context_size": {
                 "description": "Размер контекста веб-поиска",
                 "hint": "Объём контекста, получаемого нативным веб-поиском: low, medium или high."

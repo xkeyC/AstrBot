@@ -1213,6 +1213,10 @@
         "description": "Enable Responses web search",
         "hint": "Use the OpenAI Responses API web_search tool for online retrieval. Only applies to openai_responses providers."
       },
+      "responses_web_search_access": {
+        "description": "Web Search Access Mode",
+        "hint": "cached: no live external access, only already cached search content; indexed: live access limited to URLs already covered by the search index; live: direct live web access without the indexing requirement."
+      },
       "responses_web_search_context_size": {
         "description": "Web search context size",
         "hint": "Controls how much context the web search tool allocates to its results."

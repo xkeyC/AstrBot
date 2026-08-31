@@ -396,6 +396,7 @@ export function useProviderSources(options: UseProviderSourcesOptions) {
     if (source.type === 'openai_responses') {
       const responseToolDefaults = {
         responses_web_search: false,
+        responses_web_search_access: 'live',
         responses_web_search_context_size: 'medium',
         responses_web_search_allowed_domains: [],
         responses_file_search_vector_store_ids: [],

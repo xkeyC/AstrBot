@@ -1215,6 +1215,10 @@
         "description": "启用 Responses 原生网页搜索",
         "hint": "通过 OpenAI Responses API 的 web_search 工具联网检索。仅对 openai_responses 提供商生效。"
       },
+      "responses_web_search_access": {
+        "description": "网页搜索联网方式",
+        "hint": "cached：不实时访问外网，只用已有的搜索缓存内容；indexed：可以联网，但实时抓取仅限已被搜索引擎收录的 URL；live：可直接实时访问外网，不要求 URL 已被收录。"
+      },
       "responses_web_search_context_size": {
         "description": "网页搜索上下文大小",
         "hint": "控制网页搜索为结果分配的上下文量。"

@@ -31,6 +31,12 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
     """Separator between the independent message items of a single response."""
     COMMENTARY_PHASE = "commentary"
     """Message phase of intermediate updates, such as pre-tool-call preambles."""
+    WEB_SEARCH_ACCESS_MODES = {
+        "cached": {"external_web_access": False},
+        "indexed": {"external_web_access": True, "indexed_web_access": True},
+        "live": {"external_web_access": True},
+    }
+    """Reach of the native web_search tool, keyed by the configured mode."""
     HOSTED_TOOL_TYPES = frozenset(
         {"web_search", "file_search", "code_interpreter", "image_generation"}
     )
@@ -229,6 +235,14 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
 
         if self.provider_config.get("responses_web_search"):
             web_search: dict[str, Any] = {"type": "web_search"}
+            # How far the tool may reach out: cached content only, live fetches
+            # restricted to already indexed URLs, or unrestricted live access.
+            web_search.update(
+                self.WEB_SEARCH_ACCESS_MODES.get(
+                    self.provider_config.get("responses_web_search_access", "live"),
+                    self.WEB_SEARCH_ACCESS_MODES["live"],
+                )
+            )
             context_size = self.provider_config.get(
                 "responses_web_search_context_size",
                 "medium",

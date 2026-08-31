@@ -1183,6 +1183,7 @@ CONFIG_METADATA_2 = {
                         "proxy": "",
                         "custom_headers": {},
                         "responses_web_search": False,
+                        "responses_web_search_access": "live",
                         "responses_web_search_context_size": "medium",
                         "responses_web_search_allowed_domains": [],
                         "responses_file_search_vector_store_ids": [],
@@ -1313,6 +1314,7 @@ CONFIG_METADATA_2 = {
                         "proxy": "",
                         "custom_headers": {},
                         "responses_web_search": False,
+                        "responses_web_search_access": "live",
                         "responses_web_search_context_size": "medium",
                         "responses_web_search_allowed_domains": [],
                         "responses_file_search_vector_store_ids": [],
@@ -1345,6 +1347,7 @@ CONFIG_METADATA_2 = {
                         "proxy": "",
                         "custom_headers": {},
                         "responses_web_search": False,
+                        "responses_web_search_access": "live",
                         "responses_web_search_context_size": "medium",
                         "responses_web_search_allowed_domains": [],
                         "responses_file_search_vector_store_ids": [],
@@ -2067,6 +2070,20 @@ CONFIG_METADATA_2 = {
                         "type": "bool",
                         "hint": "通过 OpenAI Responses API 的 web_search 工具联网检索。仅对 openai_responses 提供商生效。",
                         "condition": {"type": "openai_responses"},
+                    },
+                    "responses_web_search_access": {
+                        "description": "网页搜索联网方式",
+                        "type": "string",
+                        "options": ["cached", "indexed", "live"],
+                        "hint": (
+                            "cached：不实时访问外网，只用已有的搜索缓存内容；"
+                            "indexed：可以联网，但实时抓取仅限已被搜索引擎收录的 URL；"
+                            "live：可直接实时访问外网，不要求 URL 已被收录。"
+                        ),
+                        "condition": {
+                            "type": "openai_responses",
+                            "responses_web_search": True,
+                        },
                     },
                     "responses_web_search_context_size": {
                         "description": "网页搜索上下文大小",
