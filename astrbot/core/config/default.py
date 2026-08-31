@@ -137,7 +137,7 @@ DEFAULT_CONFIG = {
         "llm_compress_keep_recent_ratio": 0.15,
         "llm_compress_provider_id": "",
         "max_context_length": -1,  # 默认不限制
-        "dequeue_context_length": 1,
+        "dequeue_context_length": 10,
         "streaming_response": False,
         "show_tool_use_status": False,
         "show_tool_call_result": False,
@@ -3779,7 +3779,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.dequeue_context_length": {
                         "description": "轮次超限时一次丢弃轮数",
                         "type": "int",
-                        "hint": "当超过“压缩前最多保留对话轮数”且无法使用 LLM 压缩时，一次丢弃多少轮旧对话；请求期截断也会复用该值。",
+                        "hint": "当超过“压缩前最多保留对话轮数”且无法使用 LLM 压缩时，一次丢弃多少轮旧对话；请求期 token 超限截断也会复用该值。设得太小会让上下文每轮都变化，导致模型的提示词缓存持续失效。",
                         "condition": {
                             "provider_settings.agent_runner_type": "local",
                         },

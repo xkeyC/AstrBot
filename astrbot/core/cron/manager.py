@@ -403,6 +403,7 @@ class CronJobManager:
         """Woke the main agent to handle the cron job message."""
         from astrbot.core.astr_main_agent import (
             MainAgentBuildConfig,
+            _append_dynamic_user_context,
             _get_session_conv,
             build_main_agent,
         )
@@ -451,21 +452,14 @@ class CronJobManager:
         req = ProviderRequest()
         conv = await _get_session_conv(event=cron_event, plugin_context=self.ctx)
         req.conversation = conv
-        # finetine the messages
-        context = json.loads(conv.history)
-        if context:
-            req.contexts = context
-            context_dump = req._print_friendly_context()
-            req.contexts = []
-            req.system_prompt += (
-                "\n\nBellow is you and user previous conversation history:\n"
-                f"---\n"
-                f"{context_dump}\n"
-                f"---\n"
-            )
+        # The conversation history stays real, immutable context: it is the same
+        # prefix the interactive agent sends, so the prompt cache is reused.
+        req.contexts = json.loads(conv.history)
         cron_job_str = json.dumps(extras.get("cron_job", {}), ensure_ascii=False)
-        req.system_prompt += PROACTIVE_AGENT_CRON_WOKE_SYSTEM_PROMPT.format(
-            cron_job=cron_job_str
+        _append_dynamic_user_context(
+            req,
+            "cron_task",
+            PROACTIVE_AGENT_CRON_WOKE_SYSTEM_PROMPT.format(cron_job=cron_job_str),
         )
         req.prompt = (
             "You are now responding to a scheduled task. "

@@ -231,9 +231,13 @@ class ToolSet:
         return result
 
     def anthropic_schema(self) -> list[dict]:
-        """Convert tools to Anthropic API format."""
+        """Convert tools to a deterministic Anthropic API schema.
+
+        Tool definitions sit in front of the prompt-cache prefix, so they are
+        sorted by name to stay stable when registration order changes.
+        """
         result = []
-        for tool in self.tools:
+        for tool in sorted(self.tools, key=lambda item: item.name):
             input_schema = {"type": "object"}
             if tool.parameters:
                 input_schema["properties"] = tool.parameters.get("properties", {})
@@ -245,7 +249,11 @@ class ToolSet:
         return result
 
     def google_schema(self) -> dict:
-        """Convert tools to Google GenAI API format."""
+        """Convert tools to a deterministic Google GenAI API schema.
+
+        Tool declarations are part of the cached prompt prefix, so they are
+        sorted by name to stay stable when registration order changes.
+        """
 
         def convert_schema(schema: dict) -> dict:
             """Convert schema to Gemini API format."""
@@ -329,7 +337,7 @@ class ToolSet:
             return result
 
         tools = []
-        for tool in self.tools:
+        for tool in sorted(self.tools, key=lambda item: item.name):
             d: dict[str, Any] = {"name": tool.name}
             if tool.description:
                 d["description"] = tool.description

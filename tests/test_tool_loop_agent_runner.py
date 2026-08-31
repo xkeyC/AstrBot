@@ -21,6 +21,7 @@ from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunne
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.exceptions import EmptyModelOutputError
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
 from astrbot.core.provider.provider import Provider
 
@@ -667,9 +668,7 @@ def test_tool_requery_instruction_is_request_scoped_user_context(runner):
 
 
 @pytest.mark.asyncio
-async def test_provider_internal_tool_is_executed(
-    runner, provider_request, mock_hooks
-):
+async def test_provider_internal_tool_is_executed(runner, provider_request, mock_hooks):
     provider = InternalToolProvider()
     ordinary_tool_handler = AsyncMock(return_value="ordinary result")
     ordinary_tool = FunctionTool(
@@ -704,9 +703,7 @@ async def test_provider_internal_tool_is_executed(
 
 
 @pytest.mark.asyncio
-async def test_ordinary_tool_search_is_executed_as_regular_function(
-    runner, mock_hooks
-):
+async def test_ordinary_tool_search_is_executed_as_regular_function(runner, mock_hooks):
     ordinary_tool_search = FunctionTool(
         name="tool_search",
         description="An ordinary same-name plugin tool",
@@ -1315,14 +1312,15 @@ async def test_compaction_preserves_dynamic_context_and_active_tool_round(
     ]
     assert len(active_user_indexes) == 1
     active_user_index = active_user_indexes[0]
-    assert sent_contexts[active_user_index]["content"][1] == {
-        "type": "text",
-        "text": "Current request",
+    # The user's own message follows the request-scoped context message.
+    assert sent_contexts[active_user_index + 1] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "Current request"}],
     }
-    assert sent_contexts[active_user_index + 1]["tool_calls"][0]["id"] == (
+    assert sent_contexts[active_user_index + 2]["tool_calls"][0]["id"] == (
         "call_active"
     )
-    assert sent_contexts[active_user_index + 2] == {
+    assert sent_contexts[active_user_index + 3] == {
         "role": "tool",
         "content": "Active tool result",
         "tool_call_id": "call_active",
@@ -2978,3 +2976,70 @@ async def test_follow_up_after_stop_not_merged_into_tool_result(
 if __name__ == "__main__":
     # 运行测试
     pytest.main([__file__, "-v"])
+
+
+class SegmentedReplyProvider(MockProvider):
+    """Provider that splits one response into independent replies."""
+
+    async def text_chat(self, **kwargs) -> LLMResponse:
+        response = LLMResponse(
+            role="assistant",
+            completion_text="preamble\n\nanswer",
+            usage=TokenUsage(input_other=10, output=5),
+        )
+        response.reply_segments = [
+            MessageChain().message("preamble"),
+            MessageChain().message("answer"),
+        ]
+        return response
+
+
+@pytest.mark.asyncio
+async def test_reply_segments_are_delivered_as_separate_messages(
+    runner, provider_request, mock_tool_executor, mock_hooks
+):
+    """A server-side tool call splits the response into separate messages."""
+    await runner.reset(
+        provider=SegmentedReplyProvider(),
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    responses = [response async for response in runner.step_until_done(3)]
+
+    llm_results = [
+        response.data["chain"].get_plain_text()
+        for response in responses
+        if response.type == "llm_result"
+    ]
+    assert llm_results == ["preamble", "answer"]
+    # History keeps the merged reply.
+    assert runner.run_context.messages[-1].content[0].text == "preamble\n\nanswer"
+
+
+@pytest.mark.asyncio
+async def test_single_reply_still_yields_one_message(
+    runner, provider_request, mock_tool_executor, mock_hooks
+):
+    mock_provider = MockProvider()
+    mock_provider.should_call_tools = False
+    await runner.reset(
+        provider=mock_provider,
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    responses = [response async for response in runner.step_until_done(3)]
+
+    llm_results = [
+        response.data["chain"].get_plain_text()
+        for response in responses
+        if response.type == "llm_result"
+    ]
+    assert llm_results == ["这是我的最终回答"]

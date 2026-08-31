@@ -215,6 +215,31 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             logger.error(f"Error in on_agent_done hook: {e}", exc_info=True)
         self._resolve_unconsumed_follow_ups()
 
+    @staticmethod
+    def _build_llm_result_responses(llm_resp: LLMResponse) -> list[AgentResponse]:
+        """Build the reply messages carried by one LLM response.
+
+        A provider can split one response into independent replies, for example
+        the text a model wrote before and after a server-side tool call. Each
+        one is delivered as its own message, like the per-step replies produced
+        by the local tool loop.
+
+        Args:
+            llm_resp: Completed (non-chunk) response from the provider.
+
+        Returns:
+            One ``llm_result`` agent response per reply message.
+        """
+        chains = list(llm_resp.reply_segments)
+        if not chains and llm_resp.result_chain:
+            chains = [llm_resp.result_chain]
+        if not chains and llm_resp.completion_text:
+            chains = [MessageChain().message(llm_resp.completion_text)]
+        return [
+            AgentResponse(type="llm_result", data=AgentResponseData(chain=chain))
+            for chain in chains
+        ]
+
     def _persona_allowed_tool_names(self) -> set[str] | None:
         """Return the current request's persona tool allowlist, if restricted."""
         event = getattr(self.run_context.context, "event", None)
@@ -445,18 +470,22 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         # append existing messages in the run context
         messages = bind_checkpoint_messages(request.contexts or [])
         self._active_request_message: Message | None = None
+        # Request-scoped context is its own message in front of the user's own
+        # message: the user's message keeps only what the user sent, and the
+        # immutable history before it stays byte-identical across requests.
+        if dynamic_context := request.assemble_dynamic_context():
+            dynamic_context_message = Message.model_validate(dynamic_context)
+            dynamic_context_message._no_save = True
+            messages.append(dynamic_context_message)
+            self._active_request_message = dynamic_context_message
         if (
             request.prompt is not None
             or request.image_urls
             or request.audio_urls
-            or request.dynamic_user_context_parts
             or request.extra_user_content_parts
         ):
             m = await self._assemble_request_context_for_provider(request)
-            assembled_request_message = Message.model_validate(m)
-            messages.append(assembled_request_message)
-            if request.dynamic_user_context_parts:
-                self._active_request_message = assembled_request_message
+            messages.append(Message.model_validate(m))
         if request.system_prompt:
             messages.insert(
                 0,
@@ -1097,18 +1126,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     ),
                 ),
             )
-        if llm_resp.result_chain:
-            yield AgentResponse(
-                type="llm_result",
-                data=AgentResponseData(chain=llm_resp.result_chain),
-            )
-        elif llm_resp.completion_text:
-            yield AgentResponse(
-                type="llm_result",
-                data=AgentResponseData(
-                    chain=MessageChain().message(llm_resp.completion_text),
-                ),
-            )
+        for llm_result in self._build_llm_result_responses(llm_resp):
+            yield llm_result
 
         # 如果有工具调用，还需处理工具调用
         if llm_resp.tools_call_name:
@@ -1131,18 +1150,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                 ),
                             ),
                         )
-                    if llm_resp.result_chain:
-                        yield AgentResponse(
-                            type="llm_result",
-                            data=AgentResponseData(chain=llm_resp.result_chain),
-                        )
-                    elif llm_resp.completion_text:
-                        yield AgentResponse(
-                            type="llm_result",
-                            data=AgentResponseData(
-                                chain=MessageChain().message(llm_resp.completion_text),
-                            ),
-                        )
+                    for llm_result in self._build_llm_result_responses(llm_resp):
+                        yield llm_result
 
                     await self._complete_with_assistant_response(llm_resp)
                     return

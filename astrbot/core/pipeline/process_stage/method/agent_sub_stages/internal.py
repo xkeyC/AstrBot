@@ -18,6 +18,8 @@ from astrbot.core.astr_main_agent import (
     MainAgentBuildConfig,
     MainAgentBuildResult,
     build_main_agent,
+    relocate_plugin_injected_context,
+    snapshot_plugin_context_baseline,
 )
 from astrbot.core.message.components import File, Image, Record, Reply, Video
 from astrbot.core.message.message_event_result import (
@@ -108,12 +110,17 @@ class InternalAgentSubStage(Stage):
             "llm_compress_provider_id", ""
         )
         self.max_context_length = settings["max_context_length"]  # int
-        self.dequeue_context_length: int = min(
-            max(1, settings["dequeue_context_length"]),
-            self.max_context_length - 1,
-        )
-        if self.dequeue_context_length <= 0:
-            self.dequeue_context_length = 1
+        # Dropping more turns than are kept would empty the context, so the
+        # value is capped only while turn-based limiting is enabled. With it
+        # disabled (-1) the value is used as configured: it still drives the
+        # request-time token truncation, where dropping a larger chunk keeps the
+        # prompt-cache prefix stable for many more turns.
+        self.dequeue_context_length: int = max(1, settings["dequeue_context_length"])
+        if self.max_context_length > 1:
+            self.dequeue_context_length = min(
+                self.dequeue_context_length,
+                self.max_context_length - 1,
+            )
         self.fallback_max_context_tokens: int = settings.get(
             "fallback_max_context_tokens", 128000
         )
@@ -270,10 +277,13 @@ class InternalAgentSubStage(Stage):
                         and not event.platform_meta.support_streaming_message
                     )
 
+                    plugin_context_baseline = snapshot_plugin_context_baseline(req)
                     if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
                         if reset_coro:
                             reset_coro.close()
                         return
+                    # Keep plugin-injected instructions out of the cache prefix.
+                    relocate_plugin_injected_context(req, plugin_context_baseline)
 
                     # apply reset
                     if reset_coro:

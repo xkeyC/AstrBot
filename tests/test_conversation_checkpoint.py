@@ -138,16 +138,17 @@ async def test_provider_request_assemble_context_preserves_temp_content_part_mar
         extra_user_content_parts=[TextPart(text="temporary").mark_as_temp()],
     )
 
+    dynamic_message = Message.model_validate(request.assemble_dynamic_context())
     message = Message.model_validate(await request.assemble_context())
 
+    # Request-scoped context is a message of its own, before the user's message.
+    assert isinstance(dynamic_message.content, list)
+    assert [part.text for part in dynamic_message.content] == ["context-before-user"]
+    assert dynamic_message.content[0]._no_save is True
+
     assert isinstance(message.content, list)
-    assert [part.text for part in message.content] == [
-        "context-before-user",
-        "hello",
-        "temporary",
-    ]
-    assert message.content[0]._no_save is True
-    assert message.content[2]._no_save is True
+    assert [part.text for part in message.content] == ["hello", "temporary"]
+    assert message.content[1]._no_save is True
     assert dump_messages_with_checkpoints([message]) == [
         {"role": "user", "content": [{"type": "text", "text": "hello"}]},
     ]

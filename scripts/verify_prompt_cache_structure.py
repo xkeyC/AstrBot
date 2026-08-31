@@ -14,7 +14,11 @@ from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
 from astrbot.core.agent.tool import FunctionTool, ToolSet
-from astrbot.core.astr_main_agent import _append_dynamic_user_context
+from astrbot.core.astr_main_agent import (
+    _append_dynamic_user_context,
+    relocate_plugin_injected_context,
+    snapshot_plugin_context_baseline,
+)
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
 from astrbot.core.provider.provider import Provider
 
@@ -110,8 +114,20 @@ async def capture_framework_payload(
     reverse_tools: bool,
     persona: str,
     user_prompt: str,
+    plugin_injection: str = "",
 ) -> dict[str, Any]:
-    """Run one request through the real runner and capture its provider payload."""
+    """Run one request through the real runner and capture its provider payload.
+
+    Args:
+        reverse_tools: Register the same tools in the opposite order.
+        persona: Persona text injected as request-scoped dynamic context.
+        user_prompt: The user's own input for this request.
+        plugin_injection: Request-scoped text an ``OnLLMRequestEvent`` hook adds
+            to the system prompt and to the context list.
+
+    Returns:
+        The provider payload captured at AstrBot's model boundary.
+    """
     request = ProviderRequest(
         prompt=user_prompt,
         system_prompt="Stable root system prompt.",
@@ -123,6 +139,13 @@ async def capture_framework_payload(
     )
     _append_dynamic_user_context(request, "persona", persona)
     _append_dynamic_user_context(request, "skills", "Available skill: repository audit")
+
+    if plugin_injection:
+        # Reproduce how a plugin hook mutates the request after it was built.
+        baseline = snapshot_plugin_context_baseline(request)
+        request.system_prompt += f"\n{plugin_injection}"
+        request.contexts.append({"role": "system", "content": plugin_injection})
+        relocate_plugin_injected_context(request, baseline)
 
     model = CapturingMockModel()
     runner = ToolLoopAgentRunner()
@@ -172,33 +195,58 @@ async def verify_structure() -> dict[str, Any]:
         persona="Helpful persona version B.",
         user_prompt="User request B.",
     )
+    plugin_injected = await capture_framework_payload(
+        reverse_tools=False,
+        persona="Helpful persona version A.",
+        user_prompt="User request A.",
+        plugin_injection="Plugin memory captured at 12:03.",
+    )
 
     if _canonical_bytes(baseline) != _canonical_bytes(reordered):
         raise AssertionError("Equivalent requests produced unstable payloads.")
 
+    # The reusable prefix is everything before the request-scoped context
+    # message and the user's own message that follow the immutable history.
     baseline_prefix = {
-        "messages": baseline["messages"][:-1],
+        "messages": baseline["messages"][:-2],
         "tools": baseline["tools"],
     }
     changed_prefix = {
-        "messages": dynamic_change["messages"][:-1],
+        "messages": dynamic_change["messages"][:-2],
         "tools": dynamic_change["tools"],
     }
     if _canonical_bytes(baseline_prefix) != _canonical_bytes(changed_prefix):
         raise AssertionError("Dynamic request data changed the reusable prefix.")
 
-    current_user = baseline["messages"][-1]
-    content = current_user.get("content")
-    if current_user.get("role") != "user" or not isinstance(content, list):
-        raise AssertionError("The current user message must use content blocks.")
-    if len(content) < 3:
-        raise AssertionError("Expected persona, skills, and raw user input blocks.")
+    plugin_prefix = {
+        "messages": plugin_injected["messages"][:-2],
+        "tools": plugin_injected["tools"],
+    }
+    if _canonical_bytes(baseline_prefix) != _canonical_bytes(plugin_prefix):
+        raise AssertionError("Plugin-injected context changed the reusable prefix.")
+    if (
+        "Plugin memory captured at 12:03."
+        not in _canonical_bytes(plugin_injected["messages"][-2]).decode()
+    ):
+        raise AssertionError("Plugin-injected context is missing from the request.")
+
+    dynamic_message = baseline["messages"][-2]
+    content = dynamic_message.get("content")
+    if dynamic_message.get("role") != "user" or not isinstance(content, list):
+        raise AssertionError("Dynamic context must be its own user message.")
+    if len(content) < 2:
+        raise AssertionError("Expected persona and skills context blocks.")
     if 'name="persona"' not in content[0].get("text", ""):
-        raise AssertionError("Persona context is not before the user input.")
+        raise AssertionError("Persona context is not in the dynamic context message.")
     if 'name="skills"' not in content[1].get("text", ""):
-        raise AssertionError("Skills context is not before the user input.")
-    if content[2] != {"type": "text", "text": "User request A."}:
-        raise AssertionError("Raw user input must follow all dynamic context blocks.")
+        raise AssertionError("Skills context is not in the dynamic context message.")
+
+    current_user = baseline["messages"][-1]
+    if current_user != {
+        "role": "user",
+        "content": [{"type": "text", "text": "User request A."}],
+    }:
+        raise AssertionError("The user message must carry only the user's own input.")
 
     return {
         "equivalent_payload_sha256": _sha256(baseline),

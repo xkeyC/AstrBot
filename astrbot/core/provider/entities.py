@@ -187,21 +187,33 @@ class ProviderRequest:
 
         return "\n".join(result_parts)
 
+    def assemble_dynamic_context(self) -> dict | None:
+        """Wrap the request-scoped context into its own message.
+
+        The message is delivered right before the user's own message, after the
+        immutable history: cache checkpoints of the history stay reusable, and
+        the user's message keeps only what the user actually sent.
+
+        Returns:
+            A user message carrying the request-scoped context blocks, or None
+            when this request has no dynamic context.
+        """
+        if not self.dynamic_user_context_parts:
+            return None
+
+        content_blocks = []
+        for part in self.dynamic_user_context_parts:
+            dynamic_part = part.model_dump_for_context()
+            dynamic_part["_no_save"] = True
+            content_blocks.append(dynamic_part)
+        return {"role": "user", "content": content_blocks}
+
     async def assemble_context(self) -> dict:
         """将请求(prompt、image_urls 和 audio_urls)包装成统一消息格式。"""
         # 构建内容块列表
         content_blocks = []
 
-        # 1. Request-scoped instructions/context precede the user's own input.
-        # The complete user message is still appended after immutable history, so
-        # historical cache checkpoints remain reusable while the user's text keeps
-        # the final semantic position within the message.
-        for part in self.dynamic_user_context_parts:
-            dynamic_part = part.model_dump_for_context()
-            dynamic_part["_no_save"] = True
-            content_blocks.append(dynamic_part)
-
-        # 2. 用户原始发言
+        # 1. 用户原始发言
         if self.prompt and self.prompt.strip():
             content_blocks.append({"type": "text", "text": self.prompt})
         elif self.image_urls:
@@ -211,12 +223,12 @@ class ProviderRequest:
             # 如果没有文本但有音频，添加占位文本
             content_blocks.append({"type": "text", "text": "[音频]"})
 
-        # 3. 额外的内容块（附件、引用等）
+        # 2. 额外的内容块（附件、引用等）
         if self.extra_user_content_parts:
             for part in self.extra_user_content_parts:
                 content_blocks.append(part.model_dump_for_context())
 
-        # 4. 图片内容
+        # 3. 图片内容
         if self.image_urls:
             for image_url in self.image_urls:
                 image_data = await MediaResolver(
@@ -262,7 +274,6 @@ class ProviderRequest:
         if (
             len(content_blocks) == 1
             and content_blocks[0]["type"] == "text"
-            and not self.dynamic_user_context_parts
             and not self.extra_user_content_parts
             and not self.image_urls
             and not self.audio_urls
@@ -311,6 +322,10 @@ class LLMResponse:
     """The role of the message, e.g., assistant, tool, err"""
     result_chain: MessageChain | None = None
     """A chain of message components representing the text completion from LLM."""
+    reply_segments: list[MessageChain] = field(default_factory=list)
+    """Independent replies of one response, e.g. the text written before and
+    after a server-side tool call. Empty when the response is a single reply;
+    `result_chain` always keeps the merged content."""
     tools_call_args: list[dict[str, Any]] = field(default_factory=list)
     """Tool call arguments."""
     tools_call_name: list[str] = field(default_factory=list)
@@ -388,6 +403,7 @@ class LLMResponse:
         self.role = role
         self.completion_text = completion_text
         self.result_chain = result_chain
+        self.reply_segments = []
         self.tools_call_args = tools_call_args
         self.tools_call_name = tools_call_name
         self.tools_call_ids = tools_call_ids

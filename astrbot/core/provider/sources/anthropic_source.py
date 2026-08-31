@@ -483,13 +483,42 @@ class ProviderAnthropic(Provider):
 
     @classmethod
     def _apply_explicit_prompt_cache_breakpoints(cls, payloads: dict) -> None:
-        system_blocks = payloads.get("system")
-        if not isinstance(system_blocks, list) or not system_blocks:
-            return
+        """Mark the reusable prefix so Anthropic caches it like OpenAI does.
 
-        last_block = system_blocks[-1]
-        if isinstance(last_block, dict) and "cache_control" not in last_block:
-            last_block["cache_control"] = dict(cls._PROMPT_CACHE_CONTROL)
+        OpenAI-compatible providers cache the longest stable prefix on their
+        own, while Anthropic only caches up to an explicit breakpoint. The
+        breakpoints below reproduce the automatic behaviour: one after the
+        system prompt, and one at the end of the conversation history, which is
+        the last assistant message. Everything after it (this request's
+        context, the user's message and the running tool round) is volatile.
+
+        Args:
+            payloads: Anthropic request payload, updated in place.
+        """
+        system_blocks = payloads.get("system")
+        if isinstance(system_blocks, list) and system_blocks:
+            last_block = system_blocks[-1]
+            if isinstance(last_block, dict) and "cache_control" not in last_block:
+                last_block["cache_control"] = dict(cls._PROMPT_CACHE_CONTROL)
+
+        messages = payloads.get("messages")
+        if not isinstance(messages, list):
+            return
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                if not content:
+                    return
+                content = [{"type": "text", "text": content}]
+                message["content"] = content
+            if not isinstance(content, list) or not content:
+                return
+            last_block = content[-1]
+            if isinstance(last_block, dict) and "cache_control" not in last_block:
+                last_block["cache_control"] = dict(cls._PROMPT_CACHE_CONTROL)
+            return
 
     async def _query(
         self,
@@ -509,9 +538,11 @@ class ProviderAnthropic(Provider):
 
         if "max_tokens" not in payloads:
             payloads["max_tokens"] = 65536
-        self._apply_explicit_prompt_cache_breakpoints(payloads)
         self._apply_thinking_config(payloads)
         self._sanitize_assistant_messages(payloads)
+        # After sanitization: merging and pruning messages would otherwise move
+        # or drop the breakpoint that marks the end of the reusable prefix.
+        self._apply_explicit_prompt_cache_breakpoints(payloads)
 
         try:
             completion = await retry_provider_request(
@@ -611,9 +642,11 @@ class ProviderAnthropic(Provider):
 
         if "max_tokens" not in payloads:
             payloads["max_tokens"] = 65536
-        self._apply_explicit_prompt_cache_breakpoints(payloads)
         self._apply_thinking_config(payloads)
         self._sanitize_assistant_messages(payloads)
+        # After sanitization: merging and pruning messages would otherwise move
+        # or drop the breakpoint that marks the end of the reusable prefix.
+        self._apply_explicit_prompt_cache_breakpoints(payloads)
 
         async with retry_provider_request_context(
             "Anthropic",

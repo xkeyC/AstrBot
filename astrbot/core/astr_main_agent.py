@@ -448,6 +448,86 @@ def _append_dynamic_user_context(
     req.dynamic_user_context_parts.append(TextPart(text=wrapped).mark_as_temp())
 
 
+def snapshot_plugin_context_baseline(req: ProviderRequest) -> tuple[str, set[int]]:
+    """Record the request state that exists before plugin hooks may change it.
+
+    Args:
+        req: Provider request that is about to be exposed to plugin hooks.
+
+    Returns:
+        The current system prompt and the identities of the current context
+        messages, consumed by :func:`relocate_plugin_injected_context`.
+    """
+    return req.system_prompt or "", {id(message) for message in req.contexts or []}
+
+
+def relocate_plugin_injected_context(
+    req: ProviderRequest,
+    baseline: tuple[str, set[int]],
+) -> None:
+    """Move plugin-injected instructions to the request-scoped dynamic tail.
+
+    Plugins conventionally inject per-request data (memories, user profiles,
+    timestamps) by appending to ``system_prompt`` or by adding a system message
+    to ``contexts``. Both land in the cache prefix, so every request invalidates
+    the whole chat tree cache. Relocating them behind the immutable history
+    keeps the prefix stable, exactly like the persona system does.
+
+    Args:
+        req: Provider request already processed by the plugin hooks.
+        baseline: Snapshot returned by :func:`snapshot_plugin_context_baseline`.
+    """
+    baseline_system_prompt, baseline_context_ids = baseline
+
+    system_prompt = req.system_prompt or ""
+    if system_prompt != baseline_system_prompt:
+        if system_prompt.startswith(baseline_system_prompt):
+            injected = system_prompt[len(baseline_system_prompt) :]
+        elif baseline_system_prompt and system_prompt.endswith(baseline_system_prompt):
+            injected = system_prompt[: -len(baseline_system_prompt)]
+        else:
+            # The hooks replaced the prompt instead of extending it; the whole
+            # replacement is request-scoped plugin content.
+            injected = system_prompt
+            baseline_system_prompt = ""
+        req.system_prompt = baseline_system_prompt
+        _append_dynamic_user_context(req, "plugin_instructions", injected)
+        logger.debug(
+            "Relocated %d chars of plugin system prompt to the dynamic context tail.",
+            len(injected),
+        )
+
+    # Only messages added by the hooks are relocated. Messages that were already
+    # part of the conversation stay in place: they are a stable prefix already.
+    injected_messages = [
+        message
+        for message in req.contexts or []
+        if id(message) not in baseline_context_ids
+        and isinstance(message, dict)
+        and message.get("role") in {"system", "developer"}
+    ]
+    if not injected_messages:
+        return
+
+    injected_ids = {id(message) for message in injected_messages}
+    req.contexts = [
+        message for message in req.contexts if id(message) not in injected_ids
+    ]
+    for message in injected_messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("text")
+            )
+        _append_dynamic_user_context(req, "plugin_instructions", str(content or ""))
+    logger.debug(
+        "Relocated %d plugin system message(s) to the dynamic context tail.",
+        len(injected_messages),
+    )
+
+
 async def _get_workspace_path_for_umo(umo: str, plugin_context: Context) -> Path:
     """Resolve the workspace path for the current request.
 

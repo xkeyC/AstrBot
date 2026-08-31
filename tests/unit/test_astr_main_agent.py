@@ -2831,3 +2831,77 @@ class TestApplySandboxTools:
 
         assert isinstance(req.system_prompt, str)
         assert "sandboxed environment" in _dynamic_context_text(req)
+
+
+class TestRelocatePluginInjectedContext:
+    """Tests for keeping plugin injections out of the prompt cache prefix."""
+
+    def test_appended_system_prompt_moves_to_dynamic_tail(self):
+        req = ProviderRequest(prompt="Hello", system_prompt="Root prompt.")
+        baseline = ama.snapshot_plugin_context_baseline(req)
+
+        req.system_prompt += "\n[Memory] The user likes tea."
+        ama.relocate_plugin_injected_context(req, baseline)
+
+        assert req.system_prompt == "Root prompt."
+        assert "[Memory] The user likes tea." in _dynamic_context_text(req)
+
+    def test_prepended_system_prompt_moves_to_dynamic_tail(self):
+        req = ProviderRequest(prompt="Hello", system_prompt="Root prompt.")
+        baseline = ama.snapshot_plugin_context_baseline(req)
+
+        req.system_prompt = f"[Memory] 12:03\n{req.system_prompt}"
+        ama.relocate_plugin_injected_context(req, baseline)
+
+        assert req.system_prompt == "Root prompt."
+        assert "[Memory] 12:03" in _dynamic_context_text(req)
+
+    def test_replaced_system_prompt_moves_to_dynamic_tail(self):
+        req = ProviderRequest(prompt="Hello", system_prompt="Root prompt.")
+        baseline = ama.snapshot_plugin_context_baseline(req)
+
+        req.system_prompt = "Completely different prompt."
+        ama.relocate_plugin_injected_context(req, baseline)
+
+        assert req.system_prompt == ""
+        assert "Completely different prompt." in _dynamic_context_text(req)
+
+    def test_unchanged_request_keeps_prefix_untouched(self):
+        req = ProviderRequest(
+            prompt="Hello",
+            system_prompt="Root prompt.",
+            contexts=[{"role": "system", "content": "historical rule"}],
+        )
+        baseline = ama.snapshot_plugin_context_baseline(req)
+
+        ama.relocate_plugin_injected_context(req, baseline)
+
+        assert req.system_prompt == "Root prompt."
+        assert req.contexts == [{"role": "system", "content": "historical rule"}]
+        assert req.dynamic_user_context_parts == []
+
+    def test_injected_system_message_moves_to_dynamic_tail(self):
+        req = ProviderRequest(
+            prompt="Hello",
+            contexts=[{"role": "user", "content": "history"}],
+        )
+        baseline = ama.snapshot_plugin_context_baseline(req)
+
+        req.contexts.append({"role": "system", "content": "plugin rule"})
+        req.contexts.append({"role": "user", "content": "plugin seeded turn"})
+        ama.relocate_plugin_injected_context(req, baseline)
+
+        assert req.contexts == [
+            {"role": "user", "content": "history"},
+            {"role": "user", "content": "plugin seeded turn"},
+        ]
+        assert "plugin rule" in _dynamic_context_text(req)
+
+    def test_relocated_context_is_not_persisted(self):
+        req = ProviderRequest(prompt="Hello")
+        baseline = ama.snapshot_plugin_context_baseline(req)
+
+        req.system_prompt = "[Memory] volatile"
+        ama.relocate_plugin_injected_context(req, baseline)
+
+        assert all(part._no_save for part in req.dynamic_user_context_parts)

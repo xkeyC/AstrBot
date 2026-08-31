@@ -870,3 +870,57 @@ async def test_tool_choice_empty_tool_list_skips_tool_choice(monkeypatch):
     kwargs = _capture_payloads_create.last_kwargs
     assert "tools" not in kwargs
     assert "tool_choice" not in kwargs
+
+
+def test_prompt_cache_breakpoints_cover_system_and_history():
+    payloads = {
+        "system": [{"type": "text", "text": "root prompt"}],
+        "messages": [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": [{"type": "text", "text": "new question"}]},
+        ],
+    }
+
+    anthropic_source.ProviderAnthropic._apply_explicit_prompt_cache_breakpoints(
+        payloads
+    )
+
+    assert payloads["system"][-1]["cache_control"] == {"type": "ephemeral"}
+    # The reusable prefix ends at the last assistant message; a plain string
+    # content is converted so it can carry the breakpoint.
+    assert payloads["messages"][1]["content"] == [
+        {"type": "text", "text": "old answer", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert "cache_control" not in payloads["messages"][2]["content"][-1]
+
+
+def test_prompt_cache_breakpoint_marks_history_without_system_prompt():
+    payloads = {
+        "messages": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": [{"type": "text", "text": "a1"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "a2"}]},
+            {"role": "user", "content": "q2"},
+        ]
+    }
+
+    anthropic_source.ProviderAnthropic._apply_explicit_prompt_cache_breakpoints(
+        payloads
+    )
+
+    # Only the newest assistant message carries the breakpoint.
+    assert "cache_control" not in payloads["messages"][1]["content"][-1]
+    assert payloads["messages"][2]["content"][-1]["cache_control"] == {
+        "type": "ephemeral"
+    }
+
+
+def test_prompt_cache_breakpoint_is_noop_without_assistant_history():
+    payloads = {"messages": [{"role": "user", "content": "first turn"}]}
+
+    anthropic_source.ProviderAnthropic._apply_explicit_prompt_cache_breakpoints(
+        payloads
+    )
+
+    assert payloads == {"messages": [{"role": "user", "content": "first turn"}]}

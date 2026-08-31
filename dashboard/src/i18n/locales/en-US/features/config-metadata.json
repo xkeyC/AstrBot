@@ -259,7 +259,7 @@
         },
         "dequeue_context_length": {
           "description": "Turns to Discard When Limit Exceeded",
-          "hint": "When history exceeds 'Max Turns Before Compression' and LLM compression is unavailable, discard this many oldest turns at once. Request-time truncation also reuses this value."
+          "hint": "How many old turns to drop at once when the kept-turn limit is exceeded and LLM compression is unavailable; request-time token truncation reuses this value too. A very small value changes the context every turn and keeps invalidating the model's prompt cache."
         },
         "context_limit_reached_strategy": {
           "description": "Handling for History Limits or Context Window Pressure",
