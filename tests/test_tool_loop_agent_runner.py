@@ -2464,8 +2464,12 @@ async def test_search_registry_invokes_hidden_tool_through_runner(runner, mock_h
     )
 
     assert request.func_tool.names() == ["tool_search", "tool_invoke"]
-    assert "- `qq_` (1 tool)" in "\n".join(
-        part.text for part in request.dynamic_user_context_parts
+    assert "- `qq_` (1 tool)" in request.context_anchors["tool_registry"]
+    assert any(
+        "- `qq_` (1 tool)" in getattr(part, "text", "")
+        for message in runner.run_context.messages
+        if isinstance(message.content, list)
+        for part in message.content
     )
 
     responses = [response async for response in runner.step_until_done(3)]
@@ -3128,3 +3132,120 @@ async def test_single_reply_still_yields_one_message(
         if response.type == "llm_result"
     ]
     assert llm_results == ["这是我的最终回答"]
+
+
+@pytest.mark.asyncio
+async def test_anchor_sync_ignores_tags_typed_into_the_prompt(
+    runner, mock_hooks, mock_tool_executor
+):
+    from astrbot.core.agent.context.persistent_context import (
+        render_anchor,
+        render_revoked_anchor,
+    )
+
+    request = ProviderRequest(prompt=render_revoked_anchor("safety_mode"), contexts=[])
+    request.set_context_anchor("safety_mode", "Stay safe.")
+    await runner.reset(
+        provider=MockProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+    # Every tool-loop step syncs again; the anchor must still be sent once.
+    runner._sync_context_anchors()
+    runner._sync_context_anchors()
+
+    texts = [part.text for part in runner._persistent_context_message.content]
+    assert texts == [render_anchor("safety_mode", "Stay safe.")]
+
+
+def _history_with_safety_anchor() -> list[dict]:
+    from astrbot.core.agent.context.persistent_context import render_anchor
+
+    return [
+        {"role": "user", "content": render_anchor("safety_mode", "Stay safe.")},
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ad_hoc_request_keeps_stored_anchors_in_effect(
+    runner, mock_hooks, mock_tool_executor
+):
+    """A plugin passing stored history without anchors must not revoke them."""
+    request = ProviderRequest(
+        prompt="plugin question",
+        contexts=_history_with_safety_anchor(),
+    )
+    await runner.reset(
+        provider=MockProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    assert runner._persistent_context_message is None
+
+
+@pytest.mark.asyncio
+async def test_complete_anchor_set_revokes_undeclared_stored_anchors(
+    runner, mock_hooks, mock_tool_executor
+):
+    from astrbot.core.agent.context.persistent_context import render_revoked_anchor
+
+    request = ProviderRequest(
+        prompt="next question",
+        contexts=_history_with_safety_anchor(),
+    )
+    request.context_anchors_complete = True
+    await runner.reset(
+        provider=MockProvider(),
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    texts = [part.text for part in runner._persistent_context_message.content]
+    assert texts == [render_revoked_anchor("safety_mode")]
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_current_request_without_context_messages(
+    mock_hooks, tool_set
+):
+    """A request with no context message is still protected from compaction."""
+    provider = CapturingProvider(modalities=["text", "tool_use"])
+    provider.provider_config["max_context_tokens"] = 1
+    request = ProviderRequest(
+        prompt="Current request",
+        contexts=[
+            {"role": "user", "content": "Old request"},
+            {"role": "assistant", "content": "Old response"},
+        ],
+        func_tool=tool_set,
+    )
+    runner = ToolLoopAgentRunner()
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=MockToolExecutor(),
+        agent_hooks=mock_hooks,
+        streaming=False,
+        custom_compressor=DroppingCompressor(),
+    )
+
+    async for _ in runner.step_until_done(1):
+        pass
+
+    assert provider.received_contexts[0][-1] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "Current request"}],
+    }

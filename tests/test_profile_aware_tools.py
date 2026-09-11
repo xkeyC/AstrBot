@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
+from astrbot.core.provider.entities import ProviderRequest
+
 # ═══════════════════════════════════════════════════════════════
 # ShipyardNeoBooter.capabilities
 # ═══════════════════════════════════════════════════════════════
@@ -64,7 +66,7 @@ def _make_config(booter_type: str = "shipyard_neo"):
 
 
 def _make_req():
-    return SimpleNamespace(func_tool=None, system_prompt="")
+    return ProviderRequest()
 
 
 def _import_apply_sandbox_tools():
@@ -99,6 +101,8 @@ class TestApplySandboxToolsConditional:
         assert "astrbot_execute_browser" in names
         assert "astrbot_execute_browser_batch" in names
         assert "astrbot_run_browser_skill" in names
+        # Sandbox rules are standing instructions: sent once as an anchor.
+        assert "sandbox_runtime" in req.context_anchors
 
     def test_with_browser_capability(self):
         """Booted session with browser capability → browser tools registered."""

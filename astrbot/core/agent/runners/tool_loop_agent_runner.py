@@ -60,6 +60,11 @@ from astrbot.core.tools.registry import get_builtin_tool_name
 from ..context.compressor import ContextCompressor
 from ..context.config import ContextConfig
 from ..context.manager import ContextManager
+from ..context.persistent_context import (
+    anchors_to_send,
+    stored_unit_ids,
+    unit_id_of,
+)
 from ..context.token_counter import EstimateTokenCounter, TokenCounter
 from ..hooks import BaseAgentRunHooks
 from ..message import (
@@ -433,18 +438,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
                 self.req.func_tool = direct_tool_set
                 registry_prompt = build_tool_prefix_index(deferred_tool_set.tools)
-                self.req.dynamic_user_context_parts.append(
-                    TextPart(
-                        text=(
-                            '<request_context name="tool_registry">\n'
-                            "The following is trusted request-scoped application "
-                            "context. Follow it unless it conflicts with the root "
-                            "system message.\n"
-                            f"{registry_prompt}\n"
-                            "</request_context>"
-                        )
-                    ).mark_as_temp()
-                )
+                self.req.set_context_anchor("tool_registry", registry_prompt)
 
         self.request_context_manager_config = ContextConfig(
             # <=0 disables token-based guarding.
@@ -470,14 +464,31 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         # append existing messages in the run context
         messages = bind_checkpoint_messages(request.contexts or [])
         self._active_request_message: Message | None = None
-        # Request-scoped context is its own message in front of the user's own
-        # message: the user's message keeps only what the user sent, and the
-        # immutable history before it stays byte-identical across requests.
+        self._persistent_context_message: Message | None = None
+        self._request_user_message: Message | None = None
+        # This turn's persisted context message comes first. Message units
+        # (sender, time, preceding group messages) and changed anchors are
+        # stored with the turn, so the next request reuses them from the cached
+        # history. A unit an earlier turn already stored is not repeated.
+        stored_ids = stored_unit_ids(messages)
+        unit_parts = [
+            part
+            for part in request.persistent_user_context_parts
+            if unit_id_of(getattr(part, "text", "")) not in stored_ids
+        ]
+        if unit_parts:
+            self._persistent_context_message = Message(
+                role="user",
+                content=unit_parts,
+            )
+            messages.append(self._persistent_context_message)
+        # Temporary context follows as its own unsaved message in front of the
+        # user's own message, which keeps only what the user sent.
+        temporary_context_message: Message | None = None
         if dynamic_context := request.assemble_dynamic_context():
-            dynamic_context_message = Message.model_validate(dynamic_context)
-            dynamic_context_message._no_save = True
-            messages.append(dynamic_context_message)
-            self._active_request_message = dynamic_context_message
+            temporary_context_message = Message.model_validate(dynamic_context)
+            temporary_context_message._no_save = True
+            messages.append(temporary_context_message)
         if (
             request.prompt is not None
             or request.image_urls
@@ -485,16 +496,71 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             or request.extra_user_content_parts
         ):
             m = await self._assemble_request_context_for_provider(request)
-            messages.append(Message.model_validate(m))
+            self._request_user_message = Message.model_validate(m)
+            messages.append(self._request_user_message)
+        # The current request round is protected from compaction. It starts at
+        # its first message, which is the user's own message when the request
+        # carries no context message.
+        self._active_request_message = (
+            self._persistent_context_message
+            or temporary_context_message
+            or self._request_user_message
+        )
         if request.system_prompt:
             messages.insert(
                 0,
                 Message(role="system", content=request.system_prompt),
             )
         self.run_context.messages = messages
+        self._sync_context_anchors()
 
         self.stats = AgentStats()
         self.stats.start_time = time.time()
+
+    def _sync_context_anchors(self) -> None:
+        """Send the anchors the model would otherwise miss.
+
+        An anchor is sent when the conversation does not hold its current
+        version: the first time it appears, after it changes, or after
+        compaction dropped it. Anchors travel in this turn's persisted context
+        message, so they are stored with the turn.
+        """
+        messages = self.run_context.messages
+        # Only the conversation up to this turn's persisted context message
+        # counts. The prompt and whatever the tool loop appends after it are
+        # not stored context: counting them would let typed text decide what is
+        # sent, and would make anchors added to that message look missing again.
+        head = (
+            self._persistent_context_message
+            or self._active_request_message
+            or self._request_user_message
+        )
+        head_index = next(
+            (position for position, item in enumerate(messages) if item is head),
+            len(messages),
+        )
+        scanned_end = head_index
+        if head is not None and head is self._persistent_context_message:
+            scanned_end += 1
+        missing = anchors_to_send(
+            messages[:scanned_end],
+            self.req.context_anchors,
+            revoke_missing=self.req.context_anchors_complete,
+        )
+        if not missing:
+            return
+        parts = [TextPart(text=text) for text in missing]
+        if self._persistent_context_message is not None:
+            content = self._persistent_context_message.content
+            self._persistent_context_message.content = [
+                *parts,
+                *(content if isinstance(content, list) else []),
+            ]
+            return
+        message = Message(role="user", content=parts)
+        messages.insert(head_index, message)
+        self._persistent_context_message = message
+        self._active_request_message = message
 
     def _get_active_request_round(self) -> list[Message]:
         """Return the current request round that must survive compaction."""
@@ -520,18 +586,17 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             for message in processed_messages
             if id(message) not in active_message_ids
         ]
-        for active_message in reversed(active_request_round):
-            active_structure = active_message.model_dump()
-            matching_index = next(
-                (
-                    index
-                    for index in range(len(compacted_prefix) - 1, -1, -1)
-                    if compacted_prefix[index].model_dump() == active_structure
-                ),
-                None,
-            )
-            if matching_index is not None:
-                compacted_prefix.pop(matching_index)
+        # A compressor that copies the active round returns the copies at the
+        # end of its output, so only such trailing copies are dropped. An equal
+        # message earlier in the history (the same sender writing within the
+        # same minute) is real history and must stay.
+        active_structures = [message.model_dump() for message in active_request_round]
+        while compacted_prefix:
+            structure = compacted_prefix[-1].model_dump()
+            if structure not in active_structures:
+                break
+            active_structures.remove(structure)
+            compacted_prefix.pop()
         return [*compacted_prefix, *active_request_round]
 
     def _read_tool_hint(self) -> str:
@@ -1040,6 +1105,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             processed_messages,
             active_request_round,
         )
+        # Compaction may have dropped stored anchors; restore the current ones.
+        self._sync_context_anchors()
         self._simple_print_message_role("[AftCompact]", self.run_context.messages)
 
         async for llm_response in self._iter_llm_responses_with_fallback():

@@ -23,7 +23,6 @@ from astrbot.api.message_components import (
 )
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import Provider, ProviderRequest
-from astrbot.core.agent.message import TextPart
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 
 """
@@ -182,6 +181,7 @@ class GroupChatContext:
                 return
 
             records_to_inject = raw_list[:prompt_idx]
+            injected_ids = id_list[:prompt_idx]
             remaining = raw_list[prompt_idx + 1 :]
             remaining_ids = id_list[prompt_idx + 1 :] if id_list else []
             records.clear()
@@ -192,8 +192,13 @@ class GroupChatContext:
                 record_ids.extend(remaining_ids)
 
         if records_to_inject:
-            req.extra_user_content_parts.append(
-                TextPart(text=_format_group_history_block(records_to_inject))
+            # Stored with this turn in front of the triggering message, so later
+            # requests reuse the delta from the cached history; the unit id keeps
+            # a replayed delta from being stored twice.
+            req.add_persistent_context(
+                "group_history",
+                _format_group_history_block(records_to_inject),
+                unit_id=injected_ids[-1] if injected_ids else None,
             )
 
     async def _format_message(self, event: AstrMessageEvent, cfg: dict) -> str:

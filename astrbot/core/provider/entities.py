@@ -13,9 +13,14 @@ from openai.types.responses import Response
 
 import astrbot.core.message.components as Comp
 from astrbot import logger
+from astrbot.core.agent.context.persistent_context import (
+    MESSAGE_META_UNIT,
+    render_unit,
+)
 from astrbot.core.agent.message import (
     AssistantMessageSegment,
     ContentPart,
+    TextPart,
     ToolCall,
     ToolCallMessageSegment,
     is_checkpoint_message,
@@ -98,7 +103,14 @@ class ProviderRequest:
     audio_urls: list[str] = field(default_factory=list)
     """音频 URL 列表，也支持本地路径"""
     dynamic_user_context_parts: list[ContentPart] = field(default_factory=list)
-    """请求级动态上下文，放在当前用户原始输入之前且不应持久化。"""
+    """临时上下文：只随本次请求发送，放在用户原始输入之前，不持久化。"""
+    persistent_user_context_parts: list[ContentPart] = field(default_factory=list)
+    """消息单元：描述本条消息（发言人、时间、之前的群消息），随本轮持久化。"""
+    context_anchors: dict[str, str] = field(default_factory=dict)
+    """锚点：常驻指令，首次出现或内容变化时才发送并持久化。"""
+    context_anchors_complete: bool = False
+    """为 True 时 context_anchors 是该会话完整的常驻指令，历史里有而本次未声明的锚点会被撤销。
+    主 Agent 构建的请求会设置；插件等临时请求保持 False，只补发不撤销，历史锚点继续生效。"""
     extra_user_content_parts: list[ContentPart] = field(default_factory=list)
     """用户输入后的附件、引用等额外内容块。"""
     func_tool: ToolSet | None = None
@@ -186,6 +198,92 @@ class ProviderRequest:
                 result_parts.append(f"{role}: {''.join(msg_parts)}")
 
         return "\n".join(result_parts)
+
+    def add_temporary_context(self, name: str, content: str) -> None:
+        """Send context with this request only; it is never stored.
+
+        Use it for one-shot loads such as retrieval results or file contents.
+
+        Args:
+            name: Stable machine-readable context category.
+            content: Context or instructions to expose to the model.
+        """
+        content = content.strip()
+        if not content:
+            return
+        wrapped = (
+            f'<request_context name="{name}">\n'
+            "The following is trusted request-scoped application context. Follow it "
+            "unless it conflicts with the root system message.\n"
+            f"{content}\n"
+            "</request_context>"
+        )
+        if any(
+            isinstance(part, TextPart) and part.text == wrapped
+            for part in self.dynamic_user_context_parts
+        ):
+            return
+        self.dynamic_user_context_parts.append(TextPart(text=wrapped).mark_as_temp())
+
+    def set_context_anchor(self, name: str, content: str) -> None:
+        """Declare standing instructions for the conversation.
+
+        An anchor is stored the first time it is sent and sent again only when
+        its content changes or compaction dropped it, so unchanged instructions
+        stay in the cached history prefix. Anchors a request stops declaring are
+        revoked.
+
+        Args:
+            name: Stable machine-readable anchor name.
+            content: Instructions the anchor carries; empty removes the anchor.
+        """
+        content = content.strip()
+        if content:
+            self.context_anchors[name] = content
+        else:
+            self.context_anchors.pop(name, None)
+
+    def add_persistent_context(
+        self,
+        name: str,
+        content: str,
+        unit_id: str | None = None,
+    ) -> None:
+        """Store context with this turn, such as who sent the message.
+
+        Args:
+            name: Stable machine-readable unit category.
+            content: Facts describing the current message.
+            unit_id: Optional stable id. A unit whose id the conversation
+                already stores is not stored again.
+        """
+        content = content.strip()
+        if not content:
+            return
+        text = render_unit(name, content, unit_id)
+        if any(
+            isinstance(part, TextPart) and part.text == text
+            for part in self.persistent_user_context_parts
+        ):
+            return
+        part = TextPart(text=text)
+        # Units about earlier messages (such as the group messages that
+        # preceded this one) stay in front of the metadata of the message
+        # being answered, which sits right before that message.
+        meta_prefix = f'<context_unit name="{MESSAGE_META_UNIT}"'
+        meta_index = next(
+            (
+                index
+                for index, existing in enumerate(self.persistent_user_context_parts)
+                if isinstance(existing, TextPart)
+                and existing.text.startswith(meta_prefix)
+            ),
+            None,
+        )
+        if name != MESSAGE_META_UNIT and meta_index is not None:
+            self.persistent_user_context_parts.insert(meta_index, part)
+        else:
+            self.persistent_user_context_parts.append(part)
 
     def assemble_dynamic_context(self) -> dict | None:
         """Wrap the request-scoped context into its own message.

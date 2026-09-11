@@ -404,7 +404,6 @@ class CronJobManager:
         """Woke the main agent to handle the cron job message."""
         from astrbot.core.astr_main_agent import (
             MainAgentBuildConfig,
-            _append_dynamic_user_context,
             _get_session_conv,
             build_main_agent,
         )
@@ -479,8 +478,7 @@ class CronJobManager:
         # prefix the interactive agent sends, so the prompt cache is reused.
         req.contexts = json.loads(conv.history)
         cron_job_str = json.dumps(extras.get("cron_job", {}), ensure_ascii=False)
-        _append_dynamic_user_context(
-            req,
+        req.add_temporary_context(
             "cron_task",
             PROACTIVE_AGENT_CRON_WOKE_SYSTEM_PROMPT.format(cron_job=cron_job_str),
         )

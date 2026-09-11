@@ -145,8 +145,14 @@ def _setup_conversation_for_build(conv_mgr, cid: str = "conv-id") -> MagicMock:
 
 
 def _dynamic_context_text(req: ProviderRequest) -> str:
-    """Join request-scoped context injected before the user's input."""
-    return "\n".join(part.text for part in req.dynamic_user_context_parts)
+    """Join every request-scoped context: anchors, stored units and temporary."""
+    return "\n".join(
+        [
+            *req.context_anchors.values(),
+            *(part.text for part in req.persistent_user_context_parts),
+            *(part.text for part in req.dynamic_user_context_parts),
+        ]
+    )
 
 
 @pytest.mark.asyncio
@@ -260,16 +266,14 @@ def test_append_system_reminders_includes_weekday(mock_event):
             return fixed_now
 
     with patch("astrbot.core.astr_main_agent.datetime.datetime", FixedDateTime):
-        ama._append_system_reminders(
+        ama._append_message_meta(
             mock_event,
             req,
             {"datetime_system_prompt": True},
             "UTC",
         )
 
-    assert "Current datetime: 2026-06-08 12:34 (UTC), Weekday: Monday" in (
-        _dynamic_context_text(req)
-    )
+    assert "Sent at: 2026-06-08 12:34 (UTC), Monday" in (_dynamic_context_text(req))
 
 
 def test_local_mode_prompt_uses_windows_powershell_51():
@@ -3005,3 +3009,31 @@ class TestRelocatePluginInjectedContext:
         ama.relocate_plugin_injected_context(req, baseline)
 
         assert all(part._no_save for part in req.dynamic_user_context_parts)
+
+
+def test_message_meta_names_group_sender_without_exposing_id(mock_event):
+    mock_event.message_obj.group_id = "group-1"
+    mock_event.message_obj.group = None
+    req = ProviderRequest(prompt="Hello")
+
+    ama._append_message_meta(mock_event, req, {"identifier": False}, None)
+
+    text = _dynamic_context_text(req)
+    assert "Sender: TestUser" in text
+    assert "(ID:" not in text
+
+
+def test_message_meta_exposes_sender_id_when_identifier_enabled(mock_event):
+    req = ProviderRequest(prompt="Hello")
+
+    ama._append_message_meta(mock_event, req, {"identifier": True}, None)
+
+    assert "Sender: TestUser (ID: user123)" in _dynamic_context_text(req)
+
+
+def test_message_meta_omits_sender_in_private_chat_by_default(mock_event):
+    req = ProviderRequest(prompt="Hello")
+
+    ama._append_message_meta(mock_event, req, {"identifier": False}, None)
+
+    assert req.persistent_user_context_parts == []

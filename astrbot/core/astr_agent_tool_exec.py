@@ -527,7 +527,6 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
     ) -> None:
         from astrbot.core.astr_main_agent import (
             MainAgentBuildConfig,
-            _append_dynamic_user_context,
             _get_session_conv,
             build_main_agent,
         )
@@ -587,8 +586,7 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         # prefix the interactive agent sends, so the prompt cache is reused.
         req.contexts = json.loads(conv.history)
         bg = json.dumps(extras["background_task_result"], ensure_ascii=False)
-        _append_dynamic_user_context(
-            req,
+        req.add_temporary_context(
             "background_task_result",
             BACKGROUND_TASK_RESULT_WOKE_SYSTEM_PROMPT.format(background_task_result=bg),
         )

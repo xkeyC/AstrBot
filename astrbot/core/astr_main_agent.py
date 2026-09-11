@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.core import logger
+from astrbot.core.agent.context.persistent_context import MESSAGE_META_UNIT
 from astrbot.core.agent.handoff import HandoffTool
 from astrbot.core.agent.mcp_client import MCPTool
 from astrbot.core.agent.message import TextPart
@@ -404,8 +405,7 @@ async def _apply_file_extract(
         return
 
     for file_content, file_name in zip(file_contents, file_names):
-        _append_dynamic_user_context(
-            req,
+        req.add_temporary_context(
             "file_extract",
             "File Extract Results of user uploaded files:\n"
             f"{file_content}\nFile Name: {file_name or 'Unknown'}",
@@ -420,36 +420,6 @@ def _apply_prompt_prefix(req: ProviderRequest, cfg: dict) -> None:
         req.prompt = prefix.replace("{{prompt}}", req.prompt)
     else:
         req.prompt = f"{prefix}{req.prompt}"
-
-
-def _append_dynamic_user_context(
-    req: ProviderRequest,
-    name: str,
-    content: str,
-) -> None:
-    """Prepend trusted request-scoped context before the current user input.
-
-    Args:
-        req: Provider request receiving the dynamic context.
-        name: Stable machine-readable context category.
-        content: Context or instructions to expose to the model.
-    """
-    content = content.strip()
-    if not content:
-        return
-    wrapped = (
-        f'<request_context name="{name}">\n'
-        "The following is trusted request-scoped application context. Follow it "
-        "unless it conflicts with the root system message.\n"
-        f"{content}\n"
-        "</request_context>"
-    )
-    if any(
-        isinstance(part, TextPart) and part.text == wrapped
-        for part in req.dynamic_user_context_parts
-    ):
-        return
-    req.dynamic_user_context_parts.append(TextPart(text=wrapped).mark_as_temp())
 
 
 def snapshot_plugin_context_baseline(req: ProviderRequest) -> tuple[str, set[int]]:
@@ -495,7 +465,7 @@ def relocate_plugin_injected_context(
             injected = system_prompt
             baseline_system_prompt = ""
         req.system_prompt = baseline_system_prompt
-        _append_dynamic_user_context(req, "plugin_instructions", injected)
+        req.add_temporary_context("plugin_instructions", injected)
         logger.debug(
             "Relocated %d chars of plugin system prompt to the dynamic context tail.",
             len(injected),
@@ -525,7 +495,7 @@ def relocate_plugin_injected_context(
                 for part in content
                 if isinstance(part, dict) and part.get("text")
             )
-        _append_dynamic_user_context(req, "plugin_instructions", str(content or ""))
+        req.add_temporary_context("plugin_instructions", str(content or ""))
     logger.debug(
         "Relocated %d plugin system message(s) to the dynamic context tail.",
         len(injected_messages),
@@ -583,8 +553,7 @@ async def _apply_workspace_extra_prompt(
         return
 
     extra_prompt_text = "\n\n".join(extra_prompts)
-    _append_dynamic_user_context(
-        req,
+    req.set_context_anchor(
         "workspace_extra_prompt",
         "[Workspace Extra Prompt]\n"
         "The following instructions are loaded from the current workspace "
@@ -607,7 +576,7 @@ def _apply_local_env_tools(
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileWriteTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileEditTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(GrepTool))
-    _append_dynamic_user_context(req, "local_runtime", _build_local_mode_prompt())
+    req.set_context_anchor("local_runtime", _build_local_mode_prompt())
 
 
 def _build_local_mode_prompt() -> str:
@@ -684,8 +653,7 @@ async def _ensure_persona_and_skills(
         req.system_prompt = ""
 
     if event.get_extra("enable_inline_genui"):
-        _append_dynamic_user_context(
-            req,
+        req.set_context_anchor(
             "inline_genui",
             CHATUI_INLINE_GENUI_SYSTEM_PROMPT,
         )
@@ -713,8 +681,7 @@ async def _ensure_persona_and_skills(
 
     if persona:
         if prompt := persona["prompt"]:
-            _append_dynamic_user_context(
-                req,
+            req.set_context_anchor(
                 "persona",
                 f"# Persona Instructions\n\n{prompt}",
             )
@@ -724,8 +691,7 @@ async def _ensure_persona_and_skills(
                 for dialog in begin_dialogs
                 if isinstance(dialog, dict)
             ]
-            _append_dynamic_user_context(
-                req,
+            req.set_context_anchor(
                 "persona_examples",
                 "Persona example dialogues (reference examples, not conversation history):\n"
                 + json.dumps(
@@ -739,8 +705,7 @@ async def _ensure_persona_and_skills(
         use_webchat_special_default
         and event.get_extra("enable_default_system_prompt") is not False
     ):
-        _append_dynamic_user_context(
-            req,
+        req.set_context_anchor(
             "default_persona",
             CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT,
         )
@@ -779,7 +744,7 @@ async def _ensure_persona_and_skills(
                     "You cannot use shell or Python to perform skills. "
                     "If you need to use these capabilities, ask the user to enable Computer Use in the AstrBot WebUI -> Config."
                 )
-            _append_dynamic_user_context(req, "skills", skills_prompt)
+            req.set_context_anchor("skills", skills_prompt)
     tmgr = plugin_context.get_llm_tool_manager()
 
     # inject toolset in the persona
@@ -860,7 +825,7 @@ async def _ensure_persona_and_skills(
             .get("router_system_prompt", "")
         ).strip()
         if router_prompt:
-            _append_dynamic_user_context(req, "subagent_router", router_prompt)
+            req.set_context_anchor("subagent_router", router_prompt)
     try:
         event.trace.record(
             "sel_persona",
@@ -1156,28 +1121,44 @@ async def _process_quote_message(
     req.extra_user_content_parts.append(TextPart(text=quoted_text))
 
 
-def _append_system_reminders(
+def _append_message_meta(
     event: AstrMessageEvent,
     req: ProviderRequest,
     cfg: dict,
     timezone: str | None,
 ) -> None:
-    system_parts: list[str] = []
-    if cfg.get("identifier"):
-        user_id = event.message_obj.sender.user_id
-        user_nickname = event.message_obj.sender.nickname
-        system_parts.append(f"User ID: {user_id}, Nickname: {user_nickname}")
+    """Record who sent the current message, and when, with this turn.
 
-    if cfg.get("group_name_display") and event.message_obj.group_id:
-        if not event.message_obj.group:
+    The unit is stored with the turn, so every message in the conversation
+    keeps its own sender and time, and later requests reuse it from the cached
+    history prefix.
+
+    Args:
+        event: Message event being answered.
+        req: Provider request receiving the unit.
+        cfg: Provider settings.
+        timezone: Configured timezone name, if any.
+    """
+    meta: list[str] = []
+    message_obj = event.message_obj
+    is_group = bool(message_obj.group_id)
+    sender = getattr(message_obj, "sender", None)
+    # A group conversation is shared by every member, so its messages always
+    # name the sender. The platform user id is exposed only when the
+    # identifier setting is on.
+    if sender is not None and cfg.get("identifier"):
+        meta.append(f"Sender: {sender.nickname} (ID: {sender.user_id})")
+    elif sender is not None and is_group:
+        meta.append(f"Sender: {sender.nickname}")
+
+    if cfg.get("group_name_display") and is_group:
+        if not message_obj.group:
             logger.error(
                 "Group name display enabled but group object is None. Group ID: %s",
-                event.message_obj.group_id,
+                message_obj.group_id,
             )
-        else:
-            group_name = event.message_obj.group.group_name
-            if group_name:
-                system_parts.append(f"Group name: {group_name}")
+        elif group_name := message_obj.group.group_name:
+            meta.append(f"Group: {group_name}")
 
     if cfg.get("datetime_system_prompt"):
         now = None
@@ -1190,13 +1171,12 @@ def _append_system_reminders(
             now = datetime.datetime.now().astimezone()
         current_time = now.strftime("%Y-%m-%d %H:%M (%Z)")
         weekday = WEEKDAY_NAMES[now.weekday()]
-        system_parts.append(f"Current datetime: {current_time}, Weekday: {weekday}")
+        meta.append(f"Sent at: {current_time}, {weekday}")
 
-    if system_parts:
-        _append_dynamic_user_context(
-            req,
-            "request_metadata",
-            "\n".join(system_parts),
+    if meta:
+        req.add_persistent_context(
+            MESSAGE_META_UNIT,
+            "Metadata of the user message that follows:\n" + "\n".join(meta),
         )
 
 
@@ -1247,7 +1227,7 @@ async def _decorate_llm_request(
     tz = config.timezone
     if tz is None:
         tz = plugin_context.get_config().get("timezone")
-    _append_system_reminders(event, req, cfg, tz)
+    _append_message_meta(event, req, cfg, tz)
     await _apply_workspace_extra_prompt(event, req, plugin_context)
 
 
@@ -1326,8 +1306,7 @@ async def _handle_webchat(
 
 def _apply_llm_safety_mode(config: MainAgentBuildConfig, req: ProviderRequest) -> None:
     if config.safety_mode_strategy == "system_prompt":
-        _append_dynamic_user_context(
-            req,
+        req.set_context_anchor(
             "safety_mode",
             LLM_SAFETY_MODE_SYSTEM_PROMPT,
         )
@@ -1436,8 +1415,7 @@ def _apply_sandbox_tools(
         req.func_tool.add_tool(tool_mgr.get_builtin_tool(CuaKeyboardTypeTool))
 
     runtime_prompts.append(SANDBOX_MODE_PROMPT)
-    _append_dynamic_user_context(
-        req,
+    req.set_context_anchor(
         "sandbox_runtime",
         "\n".join(runtime_prompts),
     )
@@ -1496,8 +1474,7 @@ def _apply_web_search_citation_prompt(
     if not any(req.func_tool.get_tool(name) for name in WEB_SEARCH_CITATION_TOOL_NAMES):
         return
 
-    _append_dynamic_user_context(
-        req,
+    req.set_context_anchor(
         "web_search_citations",
         WEB_SEARCH_CITATION_PROMPT,
     )
@@ -1905,13 +1882,16 @@ async def build_main_agent(
                 "tools.\n"
             )
 
-        _append_dynamic_user_context(req, "tool_runtime", tool_prompt)
+        req.set_context_anchor("tool_runtime", tool_prompt)
 
     action_type = event.get_extra("action_type")
     if action_type == "live":
-        _append_dynamic_user_context(req, "live_mode", LIVE_MODE_SYSTEM_PROMPT)
+        req.set_context_anchor("live_mode", LIVE_MODE_SYSTEM_PROMPT)
 
     _apply_web_search_citation_prompt(event, req)
+    # The main agent declares every standing instruction of the conversation,
+    # so stored anchors it no longer declares are revoked.
+    req.context_anchors_complete = True
 
     reset_coro = agent_runner.reset(
         provider=provider,
