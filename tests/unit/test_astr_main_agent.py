@@ -9,8 +9,11 @@ import pytest
 from astrbot.core import astr_main_agent as ama
 from astrbot.core.agent.mcp_client import MCPTool
 from astrbot.core.agent.message import Message, dump_messages_with_checkpoints
+from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.conversation_mgr import Conversation
+from astrbot.core.cron.manager import CronJobManager
 from astrbot.core.message.components import File, Image, Plain, Reply, Video
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.platform_metadata import PlatformMetadata
@@ -146,6 +149,97 @@ def _dynamic_context_text(req: ProviderRequest) -> str:
     return "\n".join(part.text for part in req.dynamic_user_context_parts)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["cron", "background"])
+@pytest.mark.parametrize("runtime", ["none", "local", "sandbox", None])
+@pytest.mark.parametrize("safety_mode", [True, False])
+async def test_proactive_agent_respects_runtime_and_safety_settings(
+    entrypoint,
+    runtime,
+    safety_mode,
+    mock_context,
+    mock_provider,
+    mock_event,
+    mock_conversation,
+    tmp_path,
+):
+    """Build real proactive requests without loading tools outside the runtime."""
+    provider_settings = {
+        "computer_use_require_admin": False,
+        "sandbox": {"booter": "cua"},
+    }
+    if runtime is not None:
+        provider_settings["computer_use_runtime"] = runtime
+    mock_context.get_config.return_value = {
+        "admins_id": [],
+        "provider_settings": provider_settings,
+        "agent_runner": {"config": {"persona": {"safety_mode": safety_mode}}},
+    }
+    mock_context.get_using_provider_async.return_value = mock_provider
+    mock_context.get_using_provider_async.side_effect = None
+    mock_event.unified_msg_origin = "test:FriendMessage:user123"
+    mock_event.role = "member"
+
+    with (
+        patch.object(
+            ama, "_get_session_conv", AsyncMock(return_value=mock_conversation)
+        ),
+        patch.object(ama, "_decorate_llm_request", AsyncMock()),
+        patch.object(ama, "_apply_kb", AsyncMock()),
+        patch.object(
+            ama, "_get_workspace_path_for_umo", AsyncMock(return_value=tmp_path)
+        ),
+        patch.object(ama, "AstrAgentContext"),
+        patch.object(ama, "AgentRunner") as runner_cls,
+        patch("astrbot.core.cron.manager.persist_agent_history", AsyncMock()),
+        patch("astrbot.core.astr_agent_tool_exec.persist_agent_history", AsyncMock()),
+    ):
+        runner = runner_cls.return_value
+        runner.reset = AsyncMock()
+        runner.step_until_done.return_value.__aiter__.return_value = []
+        runner.get_final_llm_resp.return_value = None
+
+        if entrypoint == "cron":
+            manager = CronJobManager(MagicMock())
+            manager.ctx = mock_context
+            await manager._woke_main_agent(
+                message="run scheduled task",
+                session_str=mock_event.unified_msg_origin,
+                delivery_session_str=mock_event.unified_msg_origin,
+                extras={"cron_job": {"id": "job-1"}, "cron_payload": {}},
+            )
+        else:
+            await FunctionToolExecutor._wake_main_agent_for_background_result(
+                ContextWrapper(
+                    context=MagicMock(context=mock_context, event=mock_event)
+                ),
+                task_id="task-1",
+                tool_name="long_tool",
+                result_text="done",
+                tool_args={},
+                note="task finished",
+                summary_name="BackgroundTask",
+            )
+
+        runner.reset.assert_awaited_once()
+        request = runner.reset.call_args.kwargs["request"]
+
+    tool_names = request.func_tool.names()
+    assert "send_message_to_user" in tool_names
+    assert "future_task" in tool_names
+    assert ("astrbot_execute_python" in tool_names) == (runtime == "local")
+    if runtime == "sandbox":
+        assert "astrbot_execute_ipython" in tool_names
+        assert "astrbot_cua_screenshot" in tool_names
+        assert "CUA Desktop Control" in _dynamic_context_text(request)
+    else:
+        assert "astrbot_execute_ipython" not in tool_names
+    assert ("astrbot_execute_shell" in tool_names) == (runtime in {"local", "sandbox"})
+    assert (
+        ama.LLM_SAFETY_MODE_SYSTEM_PROMPT.strip() in _dynamic_context_text(request)
+    ) == safety_mode
+
+
 def test_append_system_reminders_includes_weekday(mock_event):
     """Test datetime reminder includes weekday information."""
     req = ProviderRequest(prompt="Hello")
@@ -247,6 +341,7 @@ class TestMainAgentBuildConfig:
         assert config.kb_agentic_mode is False
         assert config.file_extract_enabled is False
         assert config.llm_safety_mode is True
+        assert config.computer_use_runtime == "none"
 
     def test_config_with_custom_values(self):
         """Test MainAgentBuildConfig with custom values."""
@@ -1112,14 +1207,21 @@ class TestEnsurePersonaAndSkills:
         req = ProviderRequest()
         req.conversation = MagicMock(persona_id="no-skills")
 
-        await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
+        await module._ensure_persona_and_skills(
+            req, {"computer_use_runtime": "local"}, mock_context, mock_event
+        )
 
         assert "Workspace scoped skill." not in _dynamic_context_text(req)
         assert "## Skills" not in _dynamic_context_text(req)
 
     @pytest.mark.asyncio
-    async def test_ensure_skills_skips_workspace_skills_in_sandbox_runtime(
+    @pytest.mark.parametrize(
+        "runtime_settings",
+        [{}, {"computer_use_runtime": "none"}, {"computer_use_runtime": "sandbox"}],
+    )
+    async def test_ensure_skills_skips_workspace_skills_outside_local_runtime(
         self,
+        runtime_settings,
         monkeypatch,
         tmp_path,
         mock_event,
@@ -1166,7 +1268,7 @@ class TestEnsurePersonaAndSkills:
 
         await module._ensure_persona_and_skills(
             req,
-            {"computer_use_runtime": "sandbox"},
+            runtime_settings,
             mock_context,
             mock_event,
         )
@@ -1982,9 +2084,7 @@ class TestBuildMainAgent:
                     llm_safety_mode=False,
                     computer_use_runtime="none",
                     add_cron_tools=False,
-                    provider_settings={
-                        "fallback_chat_models": ["image-provider"],
-                    },
+                    fallback_provider_ids=["image-provider"],
                 ),
                 provider=text_provider,
                 req=req,

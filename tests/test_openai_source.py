@@ -912,20 +912,22 @@ async def test_prepare_chat_payload_materializes_context_file_uri_image_urls(tmp
 
 
 def test_file_uri_to_path_preserves_windows_drive_letter():
-    assert file_uri_to_path("file:///C:/tmp/quoted-image.png") == str(
-        Path("C:/tmp/quoted-image.png")
+    # Compare as Path objects so the assertion is independent of the host
+    # path separator convention.
+    assert Path(file_uri_to_path("file:///C:/tmp/quoted-image.png")) == Path(
+        "C:/tmp/quoted-image.png"
     )
 
 
 def test_file_uri_to_path_preserves_windows_netloc_drive_letter():
-    assert file_uri_to_path("file://C:/tmp/quoted-image.png") == str(
-        Path("C:/tmp/quoted-image.png")
+    assert Path(file_uri_to_path("file://C:/tmp/quoted-image.png")) == Path(
+        "C:/tmp/quoted-image.png"
     )
 
 
 def test_file_uri_to_path_preserves_remote_netloc_as_unc_path():
-    assert file_uri_to_path("file://server/share/quoted-image.png") == str(
-        Path("//server/share/quoted-image.png")
+    assert Path(file_uri_to_path("file://server/share/quoted-image.png")) == Path(
+        "//server/share/quoted-image.png"
     )
 
 

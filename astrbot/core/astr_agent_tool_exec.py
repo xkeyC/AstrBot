@@ -47,6 +47,7 @@ from astrbot.core.tools.computer_tools import (
 )
 from astrbot.core.tools.message_tools import SendMessageToUserTool
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+from astrbot.core.utils.config_number import coerce_int_config
 from astrbot.core.utils.history_saver import persist_agent_history
 from astrbot.core.utils.image_ref_utils import is_supported_image_ref
 from astrbot.core.utils.string_utils import normalize_and_dedupe_strings
@@ -253,7 +254,7 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         event = run_context.context.event
         cfg = ctx.get_config(umo=event.unified_msg_origin)
         provider_settings = cfg.get("provider_settings", {})
-        runtime = str(provider_settings.get("computer_use_runtime", "local"))
+        runtime = str(provider_settings.get("computer_use_runtime", "none"))
         tool_mgr = (
             ctx.get_llm_tool_manager()
             if hasattr(ctx, "get_llm_tool_manager")
@@ -356,8 +357,14 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
                 except Exception:
                     continue
 
-        prov_settings: dict = ctx.get_config(umo=umo).get("provider_settings", {})
-        agent_max_step = int(prov_settings.get("max_agent_step", 30))
+        config = ctx.get_config(umo=umo)
+        prov_settings: dict = config.get("provider_settings", {})
+        agent_max_step = int(
+            config.get("agent_runner", {})
+            .get("config", {})
+            .get("misc", {})
+            .get("max_steps", 30)
+        )
         stream = prov_settings.get("streaming_response", False)
         llm_resp = await ctx.tool_loop_agent(
             event=event,
@@ -549,9 +556,27 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         cron_event.role = event.role
         cfg = ctx.get_config(umo=event.unified_msg_origin) or {}
         provider_settings = cfg.get("provider_settings") or {}
+        persona_config = (
+            cfg.get("agent_runner", {}).get("config", {}).get("persona", {})
+        )
+        agent_max_step = coerce_int_config(
+            cfg.get("agent_runner", {})
+            .get("config", {})
+            .get("misc", {})
+            .get("max_steps", 30),
+            default=30,
+            min_value=1,
+            field_name="agent_runner.config.misc.max_steps",
+        )
         config = MainAgentBuildConfig(
             tool_call_timeout=run_context.tool_call_timeout,
             streaming_response=provider_settings.get("stream", False),
+            llm_safety_mode=persona_config.get("safety_mode", True),
+            safety_mode_strategy=persona_config.get(
+                "safety_mode_strategy", "system_prompt"
+            ),
+            computer_use_runtime=provider_settings.get("computer_use_runtime", "none"),
+            sandbox_cfg=provider_settings.get("sandbox", {}),
             provider_settings=provider_settings,
         )
 
@@ -589,7 +614,7 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             return
 
         runner = result.agent_runner
-        async for _ in runner.step_until_done(30):
+        async for _ in runner.step_until_done(agent_max_step):
             # agent will send message to user via using tools
             pass
         llm_resp = runner.get_final_llm_resp()
