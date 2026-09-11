@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from deprecated import deprecated
 
 from astrbot.core import sp
+from astrbot.core.agent.context.persistent_context import is_context_message
 from astrbot.core.agent.message import AssistantMessageSegment, UserMessageSegment
 from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import Conversation, ConversationV2
@@ -415,6 +416,10 @@ class ConversationManager:
         contexts_groups: list[list[str]] = []
         temp_contexts: list[str] = []
         for record in history:
+            # Stored context messages (persona, safety and tool rules, sender
+            # metadata) are instructions for the model, not conversation.
+            if is_context_message(record):
+                continue
             if record["role"] == "user":
                 temp_contexts.append(f"User: {record['content']}")
             elif record["role"] == "assistant":

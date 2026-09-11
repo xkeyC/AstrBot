@@ -1,4 +1,6 @@
 from ..message import Message
+from .persistent_context import is_context_message
+from .round_utils import split_into_rounds
 
 
 class ContextTruncator:
@@ -10,6 +12,18 @@ class ContextTruncator:
             message.role == "assistant"
             and message.tool_calls is not None
             and len(message.tool_calls) > 0
+        )
+
+    @staticmethod
+    def _has_reply(round_messages: list[Message]) -> bool:
+        """Check whether a round already holds the assistant's final reply.
+
+        An assistant message that only calls tools is not a reply yet: a round
+        still in its tool loop is the request being answered.
+        """
+        return any(
+            message.role == "assistant" and not message.tool_calls
+            for message in round_messages
         )
 
     @staticmethod
@@ -105,7 +119,9 @@ class ContextTruncator:
     ) -> list[Message]:
         """
         Turn-based truncation strategy, which drops the oldest turns while keeping the most recent N turns.
-        A turn consists of a user message and an assistant message.
+        A turn starts at a user message, together with the context message right
+        before it (anchors, message units), and runs through the assistant's
+        reply and tool calls.
         This method ensures that the truncated context list conforms to OpenAI's context format.
 
         Args:
@@ -120,15 +136,19 @@ class ContextTruncator:
             return messages
 
         system_messages, non_system_messages = self._split_system_rest(messages)
+        rounds = split_into_rounds(non_system_messages)
+        # The request still being answered is not a finished turn: it is neither
+        # counted nor dropped.
+        in_flight = rounds.pop() if rounds and not self._has_reply(rounds[-1]) else []
 
-        if len(non_system_messages) // 2 <= keep_most_recent_turns:
+        if len(rounds) <= keep_most_recent_turns:
             return messages
 
         num_to_keep = keep_most_recent_turns - drop_turns + 1
-        if num_to_keep <= 0:
-            truncated_contexts = []
-        else:
-            truncated_contexts = non_system_messages[-num_to_keep * 2 :]
+        kept_rounds = rounds[-num_to_keep:] if num_to_keep > 0 else []
+        truncated_contexts = [
+            message for round_messages in kept_rounds for message in round_messages
+        ] + in_flight
 
         # Find the first user message
         index = next(
@@ -153,11 +173,14 @@ class ContextTruncator:
             return messages
 
         system_messages, non_system_messages = self._split_system_rest(messages)
-
-        if len(non_system_messages) // 2 <= drop_turns:
-            truncated_non_system = []
-        else:
-            truncated_non_system = non_system_messages[drop_turns * 2 :]
+        rounds = split_into_rounds(non_system_messages)
+        # The request still being answered always survives.
+        in_flight = rounds.pop() if rounds and not self._has_reply(rounds[-1]) else []
+        truncated_non_system = [
+            message
+            for round_messages in rounds[drop_turns:]
+            for message in round_messages
+        ] + in_flight
 
         # Find the first user message
         index = next(
@@ -186,15 +209,22 @@ class ContextTruncator:
         if messages_to_delete == 0:
             return messages
 
-        truncated_non_system = non_system_messages[messages_to_delete:]
-
-        # Find the first user message
-        index = next(
-            (i for i, item in enumerate(truncated_non_system) if item.role == "user"),
+        # Start at the first user message after the cut, moving back over the
+        # context messages right before it so a prompt keeps its context.
+        start = next(
+            (
+                index
+                for index in range(messages_to_delete, len(non_system_messages))
+                if non_system_messages[index].role == "user"
+            ),
             None,
         )
-        if index is not None:
-            truncated_non_system = truncated_non_system[index:]
+        if start is None:
+            truncated_non_system = non_system_messages[messages_to_delete:]
+        else:
+            while start > 0 and is_context_message(non_system_messages[start - 1]):
+                start -= 1
+            truncated_non_system = non_system_messages[start:]
 
         result = self._ensure_user_message(
             system_messages, truncated_non_system, messages

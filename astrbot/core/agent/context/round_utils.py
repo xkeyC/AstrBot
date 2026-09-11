@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..message import ContentPart, Message, ToolCall
+from .persistent_context import is_context_message
 
 RoundSegment = dict[str, Any] | Message
 
@@ -21,12 +22,18 @@ def split_into_rounds(
     """Split a flat contexts list into logical rounds.
 
     A round begins at a ``user`` segment and includes all subsequent
-    ``assistant`` / ``tool`` segments until the next ``user`` segment.
+    ``assistant`` / ``tool`` segments until the next round. A context message
+    (anchors, message units or temporary context) belongs to the round of the
+    prompt that follows it.
     """
     rounds: list[list[RoundSegment]] = []
     current: list[RoundSegment] = []
     for seg in contexts:
-        if _segment_role(seg) == "user" and current:
+        if (
+            _segment_role(seg) == "user"
+            and current
+            and not is_context_message(current[-1])
+        ):
             rounds.append(current)
             current = []
         current.append(seg)

@@ -222,8 +222,9 @@ class LLMSummaryCompressor:
             total_tokens: Token count of the full pre-compression context.
 
         Returns:
-            A complete small first turn, a small first user message for an
-            oversized tool turn, or an empty list when no safe anchor exists.
+            A complete small first turn, the small opening request (with its
+            context message) of an oversized tool turn, or an empty list when
+            no safe anchor exists.
         """
         first_round: list[Message] = []
         for round_messages in rounds:
@@ -274,12 +275,15 @@ class LLMSummaryCompressor:
         ):
             return first_round
 
-        first_user = first_round[0]
-        if (
-            has_tool_chain
-            and self.token_counter.count_tokens([first_user]) <= anchor_budget
-        ):
-            return [first_user]
+        # The opening request is the first user message and the user messages
+        # right after it, so a context message keeps the prompt it describes.
+        opening = [first_round[0]]
+        for message in first_round[1:]:
+            if message.role != "user":
+                break
+            opening.append(message)
+        if has_tool_chain and self.token_counter.count_tokens(opening) <= anchor_budget:
+            return opening
         return []
 
     async def __call__(self, messages: list[Message]) -> list[Message]:
