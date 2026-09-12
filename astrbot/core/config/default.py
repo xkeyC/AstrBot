@@ -1302,6 +1302,7 @@ CONFIG_METADATA_2 = {
                         "timeout": 120,
                         "proxy": "",
                         "custom_headers": {},
+                        "enable_prompt_cache_key": True,
                     },
                     "OpenAI Responses": {
                         "id": "openai-responses",
@@ -1323,6 +1324,7 @@ CONFIG_METADATA_2 = {
                         "responses_image_generation": False,
                         "responses_tool_choice": "auto",
                         "responses_compact_threshold": 0,
+                        "enable_prompt_cache_key": True,
                     },
                     "Google Gemini": {
                         "id": "google_gemini",
@@ -2235,7 +2237,10 @@ CONFIG_METADATA_2 = {
                         "description": "发送 prompt_cache_key",
                         "type": "bool",
                         "hint": "每轮执行生成一个临时短 ID 作为 prompt_cache_key，让这一轮内的连续请求路由到同一缓存节点，提高前缀缓存命中率。上游不支持该参数而报错时请关闭。",
-                        "condition": {"provider": "openai"},
+                        "condition": {
+                            "provider": "openai",
+                            "provider_type": "chat_completion",
+                        },
                     },
                     "rerank_api_base": {
                         "description": "重排序模型 API Base URL",

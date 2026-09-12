@@ -403,7 +403,11 @@ export function useProviderSources(options: UseProviderSourcesOptions) {
       source.ollama_disable_thinking = false
     }
 
-    if (source.provider === 'openai' && source.enable_prompt_cache_key === undefined) {
+    if (
+      source.provider === 'openai' &&
+      source.provider_type === 'chat_completion' &&
+      source.enable_prompt_cache_key === undefined
+    ) {
       source.enable_prompt_cache_key = true
     }
 
