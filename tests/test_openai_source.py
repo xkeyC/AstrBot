@@ -164,6 +164,7 @@ async def test_text_chat_passes_request_max_retries_to_query():
     provider = ProviderOpenAIOfficial.__new__(ProviderOpenAIOfficial)
     provider.api_keys = ["test-key"]
     provider.client = SimpleNamespace(api_key=None)
+    provider.provider_config = {}
 
     async def fake_prepare_chat_payload(*args, **kwargs):
         return {"messages": [], "model": "gpt-4o-mini"}, []

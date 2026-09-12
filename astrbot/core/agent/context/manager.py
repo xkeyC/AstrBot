@@ -44,12 +44,22 @@ class ContextManager:
             )
 
     async def process(
-        self, messages: list[Message], trusted_token_usage: int = 0
+        self,
+        messages: list[Message],
+        trusted_token_usage: int = 0,
+        *,
+        hard_limit_only: bool = False,
     ) -> list[Message]:
         """Process the messages.
 
         Args:
             messages: The original message list.
+            trusted_token_usage: Total tokens the provider reported for the
+                request that produced the latest assistant message, if known.
+            hard_limit_only: Compress only once the context no longer fits
+                the window. The later steps of a run set it, so the prefix the
+                run has already sent stays unchanged, and cached, until the
+                window is actually full.
 
         Returns:
             The processed message list.
@@ -67,19 +77,46 @@ class ContextManager:
 
             # 2. 基于 token 的压缩
             if self.config.max_context_tokens > 0:
-                total_tokens = self.token_counter.count_tokens(
-                    result, trusted_token_usage
-                )
+                total_tokens = self._count_tokens(result, trusted_token_usage)
 
-                if self.compressor.should_compress(
-                    result, total_tokens, self.config.max_context_tokens
-                ):
+                if hard_limit_only:
+                    needs_compression = total_tokens > self.config.max_context_tokens
+                else:
+                    needs_compression = self.compressor.should_compress(
+                        result, total_tokens, self.config.max_context_tokens
+                    )
+                if needs_compression:
                     result = await self._run_compression(result, total_tokens)
 
             return result
         except Exception as e:
             logger.error(f"Error during context processing: {e}", exc_info=True)
             return messages
+
+    def _count_tokens(self, messages: list[Message], trusted_token_usage: int) -> int:
+        """Count tokens, estimating what the reported usage does not cover.
+
+        Reported usage belongs to the request that produced the latest
+        assistant message, so tool results and prompts added after it are
+        estimated on top of it.
+
+        Args:
+            messages: The message list.
+            trusted_token_usage: Total tokens the provider reported, or 0.
+
+        Returns:
+            The token count of the message list.
+        """
+        total = self.token_counter.count_tokens(messages, trusted_token_usage)
+        if trusted_token_usage <= 0:
+            return total
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].role == "assistant":
+                pending = messages[index + 1 :]
+                if pending:
+                    total += self.token_counter.count_tokens(pending)
+                break
+        return total
 
     async def _run_compression(
         self, messages: list[Message], prev_tokens: int

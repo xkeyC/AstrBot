@@ -2231,6 +2231,12 @@ CONFIG_METADATA_2 = {
                         "hint": "达到该输入 token 数时启用服务端 compaction；0 表示禁用。建议设为模型上下文上限的 80% 以下，以早于 AstrBot 本地压缩触发。仅支持实现 OpenAI 原生 compaction 的接口。",
                         "condition": {"type": "openai_responses"},
                     },
+                    "enable_prompt_cache_key": {
+                        "description": "发送 prompt_cache_key",
+                        "type": "bool",
+                        "hint": "每轮执行生成一个临时短 ID 作为 prompt_cache_key，让这一轮内的连续请求路由到同一缓存节点，提高前缀缓存命中率。上游不支持该参数而报错时请关闭。",
+                        "condition": {"provider": "openai"},
+                    },
                     "rerank_api_base": {
                         "description": "重排序模型 API Base URL",
                         "type": "string",

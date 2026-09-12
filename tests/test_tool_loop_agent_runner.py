@@ -805,7 +805,7 @@ async def test_max_step_final_request_includes_limit_prompt(
         streaming=False,
     )
 
-    async def snapshot_context_manager(messages, trusted_token_usage=0):
+    async def snapshot_context_manager(messages, trusted_token_usage=0, **kwargs):
         return list(messages)
 
     runner.request_context_manager.process = snapshot_context_manager
@@ -835,7 +835,7 @@ async def test_tool_loop_next_request_includes_tool_result(
         streaming=False,
     )
 
-    async def snapshot_context_manager(messages, trusted_token_usage=0):
+    async def snapshot_context_manager(messages, trusted_token_usage=0, **kwargs):
         return list(messages)
 
     runner.request_context_manager.process = snapshot_context_manager
@@ -2640,8 +2640,8 @@ async def test_search_registry_releases_results_removed_during_step_compression(
         ]
     )
 
-    async def compress_old_tool_messages(messages, trusted_token_usage=0):
-        del trusted_token_usage
+    async def compress_old_tool_messages(messages, trusted_token_usage=0, **kwargs):
+        del trusted_token_usage, kwargs
         return [
             message for message in messages if message.role not in {"assistant", "tool"}
         ]

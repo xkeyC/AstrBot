@@ -946,6 +946,24 @@ class ProviderOpenAIOfficial(Provider):
 
         return llm_response
 
+    def _apply_prompt_cache_key(self, payloads: dict, cache_key: str | None) -> None:
+        """Route the requests of one agent run to the same OpenAI prompt cache.
+
+        OpenAI combines this key with the prompt prefix to pick a cache node,
+        so the steps of a run, which resend a growing common prefix, reach the
+        node that already holds it.
+
+        Args:
+            payloads: Request payload that is updated in place.
+            cache_key: Short id the agent run generated for its requests.
+        """
+        enabled = self.provider_config.get(
+            "enable_prompt_cache_key",
+            self.provider_config.get("provider") == "openai",
+        )
+        if enabled and cache_key and "prompt_cache_key" not in payloads:
+            payloads["prompt_cache_key"] = cache_key
+
     async def _prepare_chat_payload(
         self,
         prompt: str | None,
@@ -1228,6 +1246,7 @@ class ProviderOpenAIOfficial(Provider):
         )
         if func_tool and not func_tool.empty():
             payloads["tool_choice"] = tool_choice
+        self._apply_prompt_cache_key(payloads, kwargs.get("prompt_cache_key"))
 
         llm_response = None
         max_retries = 10
@@ -1305,6 +1324,7 @@ class ProviderOpenAIOfficial(Provider):
         )
         if func_tool and not func_tool.empty():
             payloads["tool_choice"] = tool_choice
+        self._apply_prompt_cache_key(payloads, kwargs.get("prompt_cache_key"))
 
         max_retries = 10
         available_api_keys = self.api_keys.copy()

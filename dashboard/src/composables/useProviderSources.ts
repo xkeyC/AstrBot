@@ -403,6 +403,10 @@ export function useProviderSources(options: UseProviderSourcesOptions) {
       source.ollama_disable_thinking = false
     }
 
+    if (source.provider === 'openai' && source.enable_prompt_cache_key === undefined) {
+      source.enable_prompt_cache_key = true
+    }
+
     if (source.type === 'openai_responses') {
       const responseToolDefaults = {
         responses_web_search: false,

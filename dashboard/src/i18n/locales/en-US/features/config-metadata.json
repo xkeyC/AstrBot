@@ -1375,6 +1375,10 @@
         "description": "Responses native compaction threshold",
         "hint": "Run server-side compaction at this input-token threshold; 0 disables it. Set it below 80% of the model context limit so it runs before AstrBot's local compression. Requires an API with native OpenAI compaction support."
       },
+      "enable_prompt_cache_key": {
+        "description": "Send prompt_cache_key",
+        "hint": "Each agent run sends a temporary short ID as prompt_cache_key, so the consecutive requests of that run are routed to the same cache node, improving prefix cache hits. Turn it off if the upstream rejects the parameter."
+      },
       "rerank_api_base": {
         "description": "Rerank Model API Base URL",
         "hint": "The full request URL is formed by combining the Base URL and a path suffix (defaults to /v1/rerank)."

@@ -465,6 +465,12 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         messages = bind_checkpoint_messages(request.contexts or [])
         self._active_request_message: Message | None = None
         self._persistent_context_message: Message | None = None
+        # Set once the run has processed its first request; later steps only
+        # append to the prefix that request sent.
+        self._request_prefix_sent = False
+        # Routes every request of this run to the provider cache holding its
+        # prefix; it lives only as long as the run.
+        self._prompt_cache_key = uuid.uuid4().hex[:8]
         self._request_user_message: Message | None = None
         # This turn's persisted context message comes first. Message units
         # (sender, time, preceding group messages) and changed anchors are
@@ -782,6 +788,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             "extra_user_content_parts": self.req.extra_user_content_parts,  # list[ContentPart]
             "abort_signal": self._abort_signal,
             "request_max_retries": self.request_max_retries,
+            "prompt_cache_key": self._prompt_cache_key,
         }
         if include_model:
             # For primary provider we keep explicit model selection if provided.
@@ -1096,6 +1103,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             self.request_context_manager.process(
                 self.run_context.messages,
                 trusted_token_usage=token_usage,
+                # Within a run, only a full window may rewrite the prefix the
+                # run has already sent; the soft threshold applies at its start.
+                hard_limit_only=self._request_prefix_sent,
             )
         )
         if processed_messages is None:
@@ -1105,6 +1115,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             processed_messages,
             active_request_round,
         )
+        self._request_prefix_sent = True
         # Compaction may have dropped stored anchors; restore the current ones.
         self._sync_context_anchors()
         self._simple_print_message_role("[AftCompact]", self.run_context.messages)
