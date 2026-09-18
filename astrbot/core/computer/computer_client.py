@@ -550,6 +550,54 @@ async def _sync_skills_to_sandbox(booter: ComputerBooter) -> None:
                 logger.warning(f"Failed to remove temp skills zip: {zip_path}")
 
 
+SANDBOX_BINDING_KEY = "sandbox_binding"
+
+
+async def _load_sandbox_binding(
+    session_id: str, booter_type: str, endpoint: str
+) -> str:
+    """Sandbox id persisted for this session, if it was on the same Bay."""
+    from astrbot.core import sp
+
+    try:
+        bound = await sp.get_async(
+            scope="umo", scope_id=session_id, key=SANDBOX_BINDING_KEY, default={}
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    if (
+        isinstance(bound, dict)
+        and bound.get("booter") == booter_type
+        and bound.get("endpoint", "") == endpoint
+    ):
+        return str(bound.get("sandbox_id") or "")
+    return ""
+
+
+async def _save_sandbox_binding(
+    session_id: str, booter_type: str, sandbox_cfg: dict, client: ComputerBooter
+) -> None:
+    """Persist session -> sandbox so a restart reuses it (B7)."""
+    sandbox_id = str(getattr(client, "sandbox_id", "") or "")
+    if booter_type != "shipyard_neo" or not sandbox_id:
+        return
+    from astrbot.core import sp
+
+    try:
+        await sp.put_async(
+            scope="umo",
+            scope_id=session_id,
+            key=SANDBOX_BINDING_KEY,
+            value={
+                "booter": booter_type,
+                "endpoint": sandbox_cfg.get("shipyard_neo_endpoint", ""),
+                "sandbox_id": sandbox_id,
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[Computer] Failed to persist sandbox binding: %s", e)
+
+
 async def get_booter(
     context: Context,
     session_id: str,
@@ -618,11 +666,13 @@ async def get_booter(
             logger.info(
                 f"[Computer] Shipyard Neo config: endpoint={ep}, profile={profile}, ttl={ttl}"
             )
+            bound = await _load_sandbox_binding(session_id, booter_type, ep)
             client = ShipyardNeoBooter(
                 endpoint_url=ep,
                 access_token=token,
                 profile=profile,
                 ttl=ttl,
+                reuse_sandbox_id=bound,
             )
         elif booter_type == "cua":
             from .booters.cua import CuaBooter, build_cua_booter_kwargs
@@ -663,6 +713,7 @@ async def get_booter(
             raise e
 
         session_booter[session_id] = client
+        await _save_sandbox_binding(session_id, booter_type, sandbox_cfg, client)
     if booter_type == "cua":
         _schedule_cua_idle_cleanup(session_id, cua_idle_timeout)
     return session_booter[session_id]

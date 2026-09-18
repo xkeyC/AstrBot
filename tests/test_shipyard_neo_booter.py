@@ -345,3 +345,36 @@ class TestGetBooterRebuild:
         # No delete_sandbox kwarg for non-neo booters
         call_kwargs = stale.shutdown.call_args.kwargs
         assert call_kwargs == {}
+
+
+class TestSandboxReuse:
+    def _booter(self, reuse_id: str, client):
+        from astrbot.core.computer.booters.shipyard_neo import ShipyardNeoBooter
+
+        booter = ShipyardNeoBooter(
+            endpoint_url="http://localhost:8114",
+            access_token="sk-bay-test",
+            reuse_sandbox_id=reuse_id,
+        )
+        booter._client = client
+        return booter
+
+    @pytest.mark.asyncio
+    async def test_reuses_live_sandbox(self):
+        sandbox = _make_sandbox_mock(["idle"])
+        client = SimpleNamespace(get_sandbox=AsyncMock(return_value=sandbox))
+        assert await self._booter("sandbox-test-1", client)._reuse_sandbox() is sandbox
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "expired"])
+    async def test_terminal_sandbox_is_not_reused(self, status):
+        client = SimpleNamespace(
+            get_sandbox=AsyncMock(return_value=_make_sandbox_mock([status]))
+        )
+        assert await self._booter("sandbox-test-1", client)._reuse_sandbox() is None
+
+    @pytest.mark.asyncio
+    async def test_missing_sandbox_or_no_binding(self):
+        client = SimpleNamespace(get_sandbox=AsyncMock(side_effect=RuntimeError("404")))
+        assert await self._booter("gone", client)._reuse_sandbox() is None
+        assert await self._booter("", client)._reuse_sandbox() is None

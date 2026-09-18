@@ -355,7 +355,10 @@ class ShipyardNeoBooter(ComputerBooter):
         access_token: str,
         profile: str = "",
         ttl: int = 43200,
+        reuse_sandbox_id: str = "",
     ) -> None:
+        # Sandbox bound to this session before a restart; reused if still alive.
+        self._reuse_sandbox_id = reuse_sandbox_id
         self._endpoint_url = endpoint_url
         self._access_token = access_token
         self._profile = profile.strip() if profile else ""
@@ -436,13 +439,15 @@ class ShipyardNeoBooter(ComputerBooter):
         # honoured as an explicit choice, including "python-default".
         resolved_profile = await self._resolve_profile(self._client)
 
-        self._sandbox = await self._client.create_sandbox(
-            profile=resolved_profile,
-            ttl=self._ttl,
-        )
-
-        # --- Readiness gate: wait until sandbox session is READY ---
-        await self._wait_until_ready(self._sandbox)
+        self._sandbox = await self._reuse_sandbox()
+        if self._sandbox is None:
+            self._sandbox = await self._client.create_sandbox(
+                profile=resolved_profile,
+                ttl=self._ttl,
+            )
+            # --- Readiness gate: wait until sandbox session is READY ---
+            await self._wait_until_ready(self._sandbox)
+        # A reused (idle) sandbox starts a session on its next call.
 
         self._shell = NeoShellComponent(self._sandbox)
         self._fs = NeoFileSystemComponent(self._sandbox, self._shell)
@@ -460,6 +465,28 @@ class ShipyardNeoBooter(ComputerBooter):
             list(caps),
             bool(self._bay_manager),
         )
+
+    @property
+    def sandbox_id(self) -> str:
+        return str(getattr(self._sandbox, "id", "") or "")
+
+    async def _reuse_sandbox(self) -> Sandbox | None:
+        if not self._reuse_sandbox_id or self._client is None:
+            return None
+        try:
+            sandbox = await self._client.get_sandbox(self._reuse_sandbox_id)
+        except Exception as e:  # noqa: BLE001 - gone or unreachable: make a new one
+            logger.info(
+                "[Computer] Bound sandbox %s unavailable (%s); creating a new one",
+                self._reuse_sandbox_id,
+                e,
+            )
+            return None
+        status = str(getattr(sandbox.status, "value", sandbox.status)).lower()
+        if status in ("failed", "expired"):
+            return None
+        logger.info("[Computer] Reusing bound sandbox %s", sandbox.id)
+        return sandbox
 
     async def _wait_until_ready(self, sandbox: Sandbox) -> None:
         """Poll sandbox status until READY, or raise on FAILED / timeout.
