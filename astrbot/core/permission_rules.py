@@ -175,3 +175,37 @@ def tool_mcp_server(tool: Any) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+DYNAMIC_PERSONA_CONFIG = "astrbot_plugin_DynamicPersona_config.json"
+
+
+def rules_from_dynamic_persona(plugin_conf: Any) -> list[dict]:
+    """Convert DynamicPersona ``persona_bindings`` into permission rules.
+
+    Match lines and persona carry over; the plugin's per-rule chat provider
+    has no Codex equivalent and is dropped (set ``model`` on the rule instead).
+    """
+    if not isinstance(plugin_conf, dict):
+        return []
+    rules: list[dict] = []
+    for binding in plugin_conf.get("persona_bindings") or []:
+        if not isinstance(binding, dict):
+            continue
+        match = [
+            line.strip()
+            for line in str(binding.get("match_conditions") or "").splitlines()
+            if line.strip()
+        ]
+        if not match:
+            continue
+        rules.append(
+            {
+                "name": str(binding.get("rule_name") or "") or "DynamicPersona",
+                "enabled": bool(binding.get("rule_enabled", True))
+                and bool(plugin_conf.get("enabled", True)),
+                "match": match,
+                "persona_id": str(binding.get("persona_id") or ""),
+            }
+        )
+    return rules

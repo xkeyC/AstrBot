@@ -69,3 +69,40 @@ def test_tools_allow_combined_with_mcp_lists():
         resolve_policy([{"match": ["*"], "enabled": "false"}], facts())
         is DEFAULT_POLICY
     )
+
+
+def test_dynamic_persona_bindings_migrate_once(tmp_path):
+    import json
+
+    from astrbot.core.utils.migra_helper import migrate_config_on_load
+
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "astrbot_plugin_DynamicPersona_config.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "persona_bindings": [
+                    {
+                        "rule_enabled": True,
+                        "rule_name": "vip",
+                        "match_conditions": "p_1\n\n g_2 ",
+                        "persona_id": "admin",
+                        "provider_id": "gpt",
+                    },
+                    {"match_conditions": ""},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    conf = {"agent_runner": {"runner_type": "codex", "config": {}}, "config_version": 3}
+    migrate_config_on_load(conf, tmp_path / "cmd_config.json")
+    assert conf["permission_rules"] == [
+        {"name": "vip", "enabled": True, "match": ["p_1", "g_2"], "persona_id": "admin"}
+    ]
+    conf["permission_rules"][0]["persona_id"] = "edited"
+    migrate_config_on_load(conf, tmp_path / "cmd_config.json")
+    assert conf["permission_rules"][0]["persona_id"] == "edited"
+    other = {"agent_runner": {"runner_type": "codex", "config": {}}}
+    migrate_config_on_load(other, tmp_path / "abconf_x.json")
+    assert "permission_rules" not in other

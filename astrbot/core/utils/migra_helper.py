@@ -167,9 +167,42 @@ def migrate_config_on_load(config: dict[str, Any], config_path: Path) -> bool:
     """
     original = copy.deepcopy(config)
     changed = _migrate_agent_runner_config(config)
+    changed = _migrate_dynamic_persona_bindings(config, config_path) or changed
     if changed and original.get("agent_runner") != config.get("agent_runner"):
         _backup_pre_codex_config(original, config_path)
     return changed
+
+
+def _migrate_dynamic_persona_bindings(
+    config: dict[str, Any], config_path: Path
+) -> bool:
+    """Import DynamicPersona plugin bindings as permission rules, once."""
+    from astrbot.core.permission_rules import (
+        CONFIG_KEY,
+        DYNAMIC_PERSONA_CONFIG,
+        rules_from_dynamic_persona,
+    )
+
+    if config.get(CONFIG_KEY) or config_path.name != "cmd_config.json":
+        return False
+    plugin_path = config_path.parent / "config" / DYNAMIC_PERSONA_CONFIG
+    if not plugin_path.is_file():
+        return False
+    try:
+        plugin_conf = json.loads(plugin_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot read DynamicPersona config %s: %s", plugin_path, exc)
+        return False
+    rules = rules_from_dynamic_persona(plugin_conf)
+    if not rules:
+        return False
+    config[CONFIG_KEY] = rules
+    logger.warning(
+        "Imported %d DynamicPersona binding(s) into permission_rules; "
+        "disable the DynamicPersona plugin.",
+        len(rules),
+    )
+    return True
 
 
 def _backup_pre_codex_config(original: dict[str, Any], config_path: Path) -> None:
