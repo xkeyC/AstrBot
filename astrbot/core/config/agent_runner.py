@@ -66,6 +66,10 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "developer_instructions": "",
         "base_instructions": "",
         "thread_config": {},
+        # Codex native memories: per-chat local store, global store only for
+        # private chats of users whose permission rule sets global_memory.
+        "memory_enabled": False,
+        "memory_auto_consolidate": True,
         "show_commentary": False,
         "safety_mode": False,
         "sync_history": True,

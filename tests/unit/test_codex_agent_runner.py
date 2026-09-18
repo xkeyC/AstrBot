@@ -226,3 +226,46 @@ def test_native_exec_approvals_follow_permission_rules(tmp_path):
     assert native_exec_decision(event(PermissionPolicy(native_exec=True)))[0] is True
     denied = native_exec_decision(event(PermissionPolicy(native_exec=False)))
     assert denied[0] is False and "not permitted" in denied[1]
+    off = native_exec_decision(event(PermissionPolicy(native_exec=True)), False)
+    assert off[0] is False and "turned off" in off[1]
+    assert native_exec_decision(event(None), True) == (True, "")
+
+
+def test_memory_thread_config_limits_global_to_permitted_private_chats(tmp_path):
+    from astrbot.core.agent.runners.codex.codex_agent_runner import (
+        memory_thread_config,
+    )
+    from astrbot.core.permission_rules import EVENT_EXTRA_KEY, PermissionPolicy
+
+    def event(policy, group=""):
+        return SimpleNamespace(
+            get_extra=lambda key: policy if key == EVENT_EXTRA_KEY else None,
+            get_group_id=lambda: group,
+        )
+
+    allowed = PermissionPolicy(global_memory=True)
+    cfg = {"memory_auto_consolidate": False}
+    conf = memory_thread_config(cfg, "qq:FriendMessage:1", event(allowed))
+    assert conf["memories.scope_key"] == "qq:FriendMessage:1"
+    assert conf["memories.may_write_global"] is True
+    assert conf["memories.auto_consolidate"] is False
+    assert conf["memories.extra_session_sources"] == ["astrbot"]
+    assert (
+        memory_thread_config(cfg, "u", event(allowed, group="9"))[
+            "memories.may_write_global"
+        ]
+        is False
+    )
+    assert (
+        memory_thread_config(cfg, "u", event(None))["memories.may_write_global"]
+        is False
+    )
+    opts = engine_options(
+        {
+            "codex_home": str(tmp_path),
+            "tool_mode": "direct",
+            "memory_enabled": True,
+            "codex_self_exe": "C:/codex.exe",
+        }
+    )
+    assert opts["codex_self_exe"] == "C:/codex.exe"

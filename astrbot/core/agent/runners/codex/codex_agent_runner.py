@@ -9,6 +9,7 @@ by default — and executed back in AstrBot with the triggering event.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import sys
@@ -26,7 +27,11 @@ from ...hooks import BaseAgentRunHooks
 from ...response import AgentResponseData
 from ...run_context import ContextWrapper, TContext
 from ..base import AgentResponse, AgentState, BaseAgentRunner
-from .constants import CODEX_THREAD_STATE_KEY, DEFAULT_SYSTEM_PROMPT
+from .constants import (
+    CODEX_THREAD_STATE_KEY,
+    DEFAULT_SYSTEM_PROMPT,
+    NATIVE_EXEC_SESSION_KEY,
+)
 from .native import (
     ACTIVE_TURNS,
     TERMINAL_EVENTS,
@@ -112,7 +117,11 @@ def engine_options(cfg: dict) -> JsonObject:
                 "codex-code-mode-host not found; set code_mode_host or install Codex CLI. "
                 "code_mode_only turns will fail."
             )
-    if native_exec and (exe := cfg.get("codex_self_exe")):
+    if (native_exec or cfg.get("memory_enabled")) and (
+        exe := cfg.get("codex_self_exe")
+    ):
+        # Also needed by memory consolidation, which runs as a Codex sub-agent
+        # editing the memory folder; chat threads still start without it.
         options["codex_self_exe"] = exe
     if native_exec and (cfg.get("approval_policy") or "never") == "never":
         # Every native command asks for approval; AstrBot answers it from the
@@ -141,8 +150,42 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
     return out
 
 
-def native_exec_decision(event: T.Any) -> tuple[bool, str]:
-    """Approve native execution unless the sender's rule sets native_exec: false."""
+def memory_thread_config(cfg: dict, umo: str, event: T.Any) -> JsonObject:
+    """Per-thread Codex memory settings (R16–R18).
+
+    Each chat gets its own local store (scope = UMO). Only a private chat whose
+    sender's rule grants ``global_memory`` may promote memories to the global
+    store; group chats stay local because many people's details mix there.
+    The flag is fixed when the thread starts (Codex keeps it sticky-false).
+    """
+    get_extra = getattr(event, "get_extra", None)
+    policy = get_extra(POLICY_EXTRA_KEY) if callable(get_extra) else None
+    is_private = False
+    with contextlib.suppress(Exception):
+        is_private = not event.get_group_id()
+    may_write_global = bool(
+        is_private
+        and isinstance(policy, PermissionPolicy)
+        and policy.global_memory is True
+    )
+    return {
+        "features.memories": True,
+        "memories.dedicated_tools": True,
+        "memories.extra_session_sources": ["astrbot"],
+        "memories.scope_key": umo,
+        "memories.may_write_global": may_write_global,
+        "memories.auto_consolidate": bool(cfg.get("memory_auto_consolidate", True)),
+    }
+
+
+def native_exec_decision(
+    event: T.Any, session_enabled: bool | None = None
+) -> tuple[bool, str]:
+    """Approve native execution unless this chat turned it off (K3) or the
+    sender's rule sets native_exec: false. Deciding per command keeps the
+    thread's tool set, history and prompt cache unchanged when toggled."""
+    if session_enabled is False:
+        return False, "Native command execution is turned off in this chat."
     get_extra = getattr(event, "get_extra", None)
     policy = get_extra(POLICY_EXTRA_KEY) if callable(get_extra) else None
     if isinstance(policy, PermissionPolicy) and policy.native_exec is False:
@@ -323,6 +366,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         }
         if extra := str(self.cfg.get("developer_instructions") or "").strip():
             params["developer_instructions"] = extra
+        if self.cfg.get("memory_enabled"):
+            event = getattr(getattr(self.run_context, "context", None), "event", None)
+            params["config"] = memory_thread_config(self.cfg, self.umo, event)
         return params
 
     async def _open_thread(self, engine: CodexEngine) -> tuple[str, list | None]:
@@ -358,8 +404,14 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
     async def _handle_approval(self, kind: str, msg: JsonObject) -> tuple[bool, str]:
         """Native exec / patch approvals follow the sender's permission rule (B15)."""
+        session_setting = await sp.get_async(
+            scope="umo", scope_id=self.umo, key=NATIVE_EXEC_SESSION_KEY, default=None
+        )
         return native_exec_decision(
-            getattr(getattr(self.run_context, "context", None), "event", None)
+            getattr(getattr(self.run_context, "context", None), "event", None),
+            session_enabled=session_setting
+            if isinstance(session_setting, bool)
+            else None,
         )
 
     def _turn_request(self, tools_update: list | None) -> JsonObject:

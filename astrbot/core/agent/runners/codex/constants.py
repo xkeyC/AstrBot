@@ -1,4 +1,6 @@
 CODEX_RUNNER_TYPE = "codex"
+# Per-chat native execution switch (bool; absent = follow the global setting).
+NATIVE_EXEC_SESSION_KEY = "codex_native_exec"
 CODEX_THREAD_STATE_KEY = "codex_thread"
 """Preference key (scope ``umo``) holding ``{thread_id, rollout_path, tools_fp}``."""
 CODEX_TOOL_NAMESPACE = "astrbot"
