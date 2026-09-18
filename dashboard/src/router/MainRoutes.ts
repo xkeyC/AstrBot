@@ -221,6 +221,11 @@ const MainRoutes = {
       redirect: redirectToDataTab('Stats')
     },
     {
+      name: 'Codex',
+      path: '/codex',
+      component: () => import('@/views/CodexPage.vue')
+    },
+    {
       name: 'SubAgent',
       path: '/subagent',
       component: () => import('@/views/SubAgentPage.vue')

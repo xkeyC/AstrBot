@@ -13,6 +13,7 @@
     "trace": "追踪"
   },
   "subagent": "子代理编排",
+  "codex": "Codex",
   "toolUse": "MCP",
   "extension": "插件",
   "extensionTabs": {

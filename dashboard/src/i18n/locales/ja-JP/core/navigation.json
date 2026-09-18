@@ -13,6 +13,7 @@
     "trace": "トレース"
   },
   "subagent": "サブエージェント編成",
+  "codex": "Codex",
   "toolUse": "MCP",
   "extension": "プラグイン",
   "extensionTabs": {

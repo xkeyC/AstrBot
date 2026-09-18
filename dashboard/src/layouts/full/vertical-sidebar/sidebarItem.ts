@@ -42,6 +42,11 @@ const sidebarItem: menu[] = [
     to: '/extension',
   },
   {
+    title: 'core.navigation.codex',
+    icon: 'mdi-code-braces-box',
+    to: '/codex',
+  },
+  {
     title: 'core.navigation.config',
     icon: 'mdi-cog',
     to: '/config',

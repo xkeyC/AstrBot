@@ -1,4 +1,4 @@
-/* Auto-generated MDI subset – 273 icons */
+/* Auto-generated MDI subset – 276 icons */
 /* Do not edit manually. Run: pnpm run subset-icons */
 
 @font-face {
@@ -22,6 +22,10 @@
 
 .mdi-account::before {
   content: "\F0004";
+}
+
+.mdi-account-alert-outline::before {
+  content: "\F0B50";
 }
 
 .mdi-account-edit::before {
@@ -152,6 +156,10 @@
   content: "\F00F3";
 }
 
+.mdi-cancel::before {
+  content: "\F073A";
+}
+
 .mdi-chat::before {
   content: "\F0B79";
 }
@@ -254,6 +262,10 @@
 
 .mdi-cloud-upload::before {
   content: "\F0167";
+}
+
+.mdi-code-braces-box::before {
+  content: "\F10D6";
 }
 
 .mdi-code-json::before {
