@@ -359,6 +359,8 @@ class ShipyardNeoBooter(ComputerBooter):
     ) -> None:
         # Sandbox bound to this session before a restart; reused if still alive.
         self._reuse_sandbox_id = reuse_sandbox_id
+        # Constructor settings, before boot resolves auto mode.
+        self._init_settings = (endpoint_url, access_token, profile, ttl)
         self._endpoint_url = endpoint_url
         self._access_token = access_token
         self._profile = profile.strip() if profile else ""
@@ -439,7 +441,7 @@ class ShipyardNeoBooter(ComputerBooter):
         # honoured as an explicit choice, including "python-default".
         resolved_profile = await self._resolve_profile(self._client)
 
-        self._sandbox = await self._reuse_sandbox()
+        self._sandbox = await self._reuse_sandbox(resolved_profile)
         if self._sandbox is None:
             self._sandbox = await self._client.create_sandbox(
                 profile=resolved_profile,
@@ -470,7 +472,24 @@ class ShipyardNeoBooter(ComputerBooter):
     def sandbox_id(self) -> str:
         return str(getattr(self._sandbox, "id", "") or "")
 
-    async def _reuse_sandbox(self) -> Sandbox | None:
+    def without_reuse(self) -> ShipyardNeoBooter:
+        """A fresh booter with the same settings that creates a new sandbox."""
+        endpoint_url, access_token, profile, ttl = self._init_settings
+        return type(self)(
+            endpoint_url=endpoint_url,
+            access_token=access_token,
+            profile=profile,
+            ttl=ttl,
+        )
+
+    @property
+    def reused_sandbox(self) -> bool:
+        """Whether boot attached to the previously bound sandbox."""
+        return (
+            bool(self._reuse_sandbox_id) and self.sandbox_id == self._reuse_sandbox_id
+        )
+
+    async def _reuse_sandbox(self, profile: str = "") -> Sandbox | None:
         if not self._reuse_sandbox_id or self._client is None:
             return None
         try:
@@ -484,6 +503,15 @@ class ShipyardNeoBooter(ComputerBooter):
             return None
         status = str(getattr(sandbox.status, "value", sandbox.status)).lower()
         if status in ("failed", "expired"):
+            return None
+        bound_profile = str(getattr(sandbox, "profile", "") or "")
+        if profile and bound_profile and bound_profile != profile:
+            logger.info(
+                "[Computer] Bound sandbox %s uses profile %s, not %s; creating a new one",
+                sandbox.id,
+                bound_profile,
+                profile,
+            )
             return None
         logger.info("[Computer] Reusing bound sandbox %s", sandbox.id)
         return sandbox

@@ -36,12 +36,13 @@ class CodexService:
 
     async def _call(self, name: str, *args):
         engine = await self._engine()
-        try:
-            return await getattr(engine.rt, name)(*args)
-        except AttributeError as exc:
+        method = getattr(engine.rt, name, None)
+        if method is None:
             raise CodexServiceError(
                 "codex_astrbot binding is outdated; rebuild it with maturin"
-            ) from exc
+            )
+        try:
+            return await method(*args)
         except RuntimeError as exc:
             raise CodexServiceError(str(exc)) from exc
 

@@ -378,3 +378,49 @@ class TestSandboxReuse:
         client = SimpleNamespace(get_sandbox=AsyncMock(side_effect=RuntimeError("404")))
         assert await self._booter("gone", client)._reuse_sandbox() is None
         assert await self._booter("", client)._reuse_sandbox() is None
+
+    @pytest.mark.asyncio
+    async def test_profile_mismatch_is_not_reused(self):
+        sandbox = _make_sandbox_mock(["idle"])
+        client = SimpleNamespace(get_sandbox=AsyncMock(return_value=sandbox))
+        booter = self._booter("sandbox-test-1", client)
+        assert await booter._reuse_sandbox("browser-python") is None
+        assert await booter._reuse_sandbox("python-default") is sandbox
+
+    @pytest.mark.asyncio
+    async def test_failed_reused_sandbox_falls_back_to_new_one(self, monkeypatch):
+        from astrbot.core.computer import computer_client
+        from astrbot.core.computer.booters.shipyard_neo import ShipyardNeoBooter
+
+        monkeypatch.delitem(computer_client.session_booter, "s-reuse", raising=False)
+        ctx = TestGetBooterRebuild()._make_fake_context()
+
+        async def _fake_boot(_self, _sid):
+            sid = _self._reuse_sandbox_id or "fresh-sandbox"
+            _self._sandbox = SimpleNamespace(id=sid)  # type: ignore[assignment]
+
+        async def _sync(booter):
+            if booter.sandbox_id == "old-sandbox":
+                raise RuntimeError("session start failed")
+
+        shutdown = AsyncMock()
+        save = AsyncMock()
+        with (
+            patch.object(ShipyardNeoBooter, "boot", _fake_boot),
+            patch.object(ShipyardNeoBooter, "shutdown", shutdown),
+            patch(
+                "astrbot.core.computer.computer_client._load_sandbox_binding",
+                AsyncMock(return_value="old-sandbox"),
+            ),
+            patch("astrbot.core.computer.computer_client._save_sandbox_binding", save),
+            patch(
+                "astrbot.core.computer.computer_client._sync_skills_to_sandbox", _sync
+            ),
+        ):
+            booter = await computer_client.get_booter(ctx, "s-reuse")
+
+        assert booter.sandbox_id == "fresh-sandbox"
+        # The bound sandbox is closed but not deleted.
+        shutdown.assert_awaited_once_with()
+        assert save.await_args.args[3] is booter
+        computer_client.session_booter.pop("s-reuse", None)

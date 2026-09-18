@@ -179,6 +179,15 @@ def memory_thread_config(cfg: dict, umo: str, event: T.Any) -> JsonObject:
     }
 
 
+def approvals_disabled(cfg: dict) -> bool:
+    """An explicit non-"never" approval policy with auto_approve off denies
+    every approval request, as the setting documents. With the default
+    "never" policy and native exec on, approve_every_command is used and the
+    permission rules decide instead."""
+    policy = str(cfg.get("approval_policy") or "never")
+    return policy != "never" and not cfg.get("auto_approve")
+
+
 def native_exec_decision(
     event: T.Any, session_enabled: bool | None = None
 ) -> tuple[bool, str]:
@@ -405,6 +414,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
     async def _handle_approval(self, kind: str, msg: JsonObject) -> tuple[bool, str]:
         """Native exec / patch approvals follow the sender's permission rule (B15)."""
+        if approvals_disabled(self.cfg):
+            return False, "Approval requests are disabled (auto_approve is off)."
         session_setting = await sp.get_async(
             scope="umo", scope_id=self.umo, key=NATIVE_EXEC_SESSION_KEY, default=None
         )

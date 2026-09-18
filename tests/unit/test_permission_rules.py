@@ -103,6 +103,10 @@ def test_dynamic_persona_bindings_migrate_once(tmp_path):
     conf["permission_rules"][0]["persona_id"] = "edited"
     migrate_config_on_load(conf, tmp_path / "cmd_config.json")
     assert conf["permission_rules"][0]["persona_id"] == "edited"
+    # Rules the user cleared afterwards are not imported again.
+    conf["permission_rules"] = []
+    migrate_config_on_load(conf, tmp_path / "cmd_config.json")
+    assert conf["permission_rules"] == []
     other = {"agent_runner": {"runner_type": "codex", "config": {}}}
     migrate_config_on_load(other, tmp_path / "abconf_x.json")
     assert "permission_rules" not in other

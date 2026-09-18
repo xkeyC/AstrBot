@@ -186,7 +186,9 @@ def _migrate_dynamic_persona_bindings(
     if config.get(CONFIG_KEY) or config_path.name != "cmd_config.json":
         return False
     plugin_path = config_path.parent / "config" / DYNAMIC_PERSONA_CONFIG
-    if not plugin_path.is_file():
+    # Marks a completed import so rules the user later clears stay cleared.
+    marker = plugin_path.with_name(f"{plugin_path.name}.imported")
+    if not plugin_path.is_file() or marker.exists():
         return False
     try:
         plugin_conf = json.loads(plugin_path.read_text(encoding="utf-8-sig"))
@@ -197,6 +199,13 @@ def _migrate_dynamic_persona_bindings(
     if not rules:
         return False
     config[CONFIG_KEY] = rules
+    try:
+        marker.write_text(
+            "DynamicPersona bindings were imported into permission_rules.\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("Cannot write DynamicPersona import marker %s: %s", marker, exc)
     logger.warning(
         "Imported %d DynamicPersona binding(s) into permission_rules; "
         "disable the DynamicPersona plugin.",

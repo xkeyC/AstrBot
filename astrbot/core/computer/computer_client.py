@@ -691,11 +691,34 @@ async def get_booter(
             raise ValueError(f"Unknown booter type: {booter_type}")
 
         try:
-            await client.boot(uuid_str)
+            try:
+                await client.boot(uuid_str)
+                await _sync_skills_to_sandbox(client)
+            except Exception as reuse_err:
+                if getattr(client, "reused_sandbox", False) is not True:
+                    raise
+                # The persisted sandbox is unusable: keep it (Bay GC reclaims
+                # it by TTL) and fall back to a fresh one.
+                logger.warning(
+                    "[Computer] Reused sandbox %s failed for session %s (%s); "
+                    "creating a new one",
+                    getattr(client, "sandbox_id", ""),
+                    session_id,
+                    reuse_err,
+                )
+                try:
+                    await client.shutdown()
+                except Exception as shutdown_err:  # noqa: BLE001
+                    logger.warning(
+                        "[Computer] Error closing reused sandbox client: %s",
+                        shutdown_err,
+                    )
+                client = client.without_reuse()
+                await client.boot(uuid_str)
+                await _sync_skills_to_sandbox(client)
             logger.info(
                 f"[Computer] Sandbox booted successfully: type={booter_type}, session={session_id}"
             )
-            await _sync_skills_to_sandbox(client)
         except Exception as e:
             logger.error(f"Error booting sandbox for session {session_id}: {e}")
             try:

@@ -193,7 +193,11 @@ class ThreadPump:
                     task.add_done_callback(self.tool_tasks.discard)
                     continue
                 if (kind := APPROVAL_EVENTS.get(msg.get("type") or "")) is not None:
-                    task = asyncio.create_task(self._answer_approval(kind, msg))
+                    # Bind the request to the turn open now, not whichever
+                    # turn is open when the task gets to run.
+                    task = asyncio.create_task(
+                        self._answer_approval(kind, msg, self.route)
+                    )
                     self.tool_tasks.add(task)
                     task.add_done_callback(self.tool_tasks.discard)
                 if self.route is not None:
@@ -212,9 +216,10 @@ class ThreadPump:
             self.closed = True
             self.engine.pumps.pop(self.thread_id, None)
 
-    async def _answer_approval(self, kind: str, msg: JsonObject) -> None:
+    async def _answer_approval(
+        self, kind: str, msg: JsonObject, route: _TurnRoute | None
+    ) -> None:
         """Decide a native exec / patch approval; unattended requests are denied."""
-        route = self.route
         approved, reason = False, "No AstrBot session is attached to this request."
         try:
             if route is not None and route.approval_handler is not None:

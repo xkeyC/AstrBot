@@ -271,3 +271,44 @@ def test_memory_thread_config_limits_global_to_permitted_private_chats(tmp_path)
         }
     )
     assert opts["codex_self_exe"] == str(exe)
+
+
+def test_auto_approve_off_denies_explicit_approval_policies():
+    from astrbot.core.agent.runners.codex.codex_agent_runner import (
+        approvals_disabled,
+    )
+
+    assert approvals_disabled({}) is False
+    assert approvals_disabled({"approval_policy": "never"}) is False
+    assert approvals_disabled({"approval_policy": "on-request"}) is True
+    assert (
+        approvals_disabled({"approval_policy": "on-request", "auto_approve": True})
+        is False
+    )
+
+
+def test_approval_is_answered_for_the_turn_it_arrived_in():
+    from astrbot.core.agent.runners.codex.native import ThreadPump, _TurnRoute
+
+    decisions: list[str] = []
+
+    class Rt:
+        async def review_decision(self, thread_id, request):
+            decisions.append(request)
+
+    async def approve(kind, msg):
+        return True, ""
+
+    async def run():
+        import json
+
+        pump = ThreadPump(SimpleNamespace(rt=Rt(), pumps={}), "t1")
+        route = _TurnRoute(asyncio.Queue(), None, approve)
+        msg = {"type": "exec_approval_request", "call_id": "c1", "turn_id": "u1"}
+        await pump._answer_approval("exec", msg, route)
+        await pump._answer_approval("exec", msg, None)
+        first, second = (json.loads(d) for d in decisions)
+        assert first["approved"] is True and first["id"] == "c1"
+        assert second["approved"] is False and second["reason"]
+
+    asyncio.run(run())
