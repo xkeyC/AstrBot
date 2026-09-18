@@ -220,7 +220,29 @@ class ProviderManager:
 
     async def get_provider_by_id(self, provider_id: str) -> Providers | None:
         """根据提供商 ID 获取提供商实例"""
-        return self.inst_map.get(provider_id)
+        provider = self.inst_map.get(provider_id)
+        if provider is None:
+            # Codex-native: plugin APIs naming an unknown (or removed) chat
+            # provider are served by Codex.
+            provider = self._codex_chat_provider()
+        return provider
+
+    def _codex_chat_provider(self, umo: str | None = None) -> Providers | None:
+        """The Codex-backed chat provider when Codex is the agent runner."""
+        config = self.acm.get_conf(umo)
+        agent_runner = config.get("agent_runner", {}) or {}
+        if agent_runner.get("runner_type") != "codex":
+            return None
+        runner_config = agent_runner.get("config", {}) or {}
+        cached = getattr(self, "_codex_provider", None)
+        if cached is None or cached.runner_config != runner_config:
+            from astrbot.core.agent.runners.codex.provider_adapter import (
+                make_codex_provider,
+            )
+
+            cached = make_codex_provider(dict(runner_config))
+            self._codex_provider = cached
+        return cached
 
     def _resolve_using_provider(
         self,
@@ -247,6 +269,8 @@ class ProviderManager:
             # default setting
             config = self.acm.get_conf(umo)
             if provider_type == ProviderType.CHAT_COMPLETION:
+                if codex_provider := self._codex_chat_provider(umo):
+                    return codex_provider
                 agent_runner = config.get("agent_runner", {})
                 provider_id = (
                     agent_runner.get("config", {}).get("model", {}).get("provider_id")
