@@ -312,3 +312,28 @@ def test_approval_is_answered_for_the_turn_it_arrived_in():
         assert second["approved"] is False and second["reason"]
 
     asyncio.run(run())
+
+
+def test_persona_catalog_only_when_personas_alternate():
+    from astrbot.core.agent.runners.codex.codex_agent_runner import persona_context
+
+    def req(persona):
+        r = ProviderRequest(prompt="hi")
+        if persona:
+            r.set_context_anchor("persona", persona)
+        return r
+
+    catalog, ctx, active = persona_context(req("cat"), {})
+    assert active is None and ctx["astrbot_persona"]["value"] == "cat"
+    same, ctx, active = persona_context(req("cat"), catalog)
+    assert same == catalog and active is None
+
+    both, ctx_dog, active = persona_context(req("dog"), catalog)
+    assert len(both) == 2 and "astrbot_persona" not in ctx_dog
+    assert "cat" in ctx_dog["astrbot_personas"]["value"]
+    assert active["text"].startswith("<active_persona id=")
+    # Alternating back does not change the standing context (cache-safe).
+    again, ctx_cat, active_cat = persona_context(req("cat"), both)
+    assert again == both and ctx_cat == ctx_dog and active_cat != active
+    _, _, none_active = persona_context(req(""), both)
+    assert "none" in none_active["text"]

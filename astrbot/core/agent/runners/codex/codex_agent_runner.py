@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import re
 import sys
@@ -271,6 +272,52 @@ def build_additional_context(req: ProviderRequest) -> dict[str, JsonObject]:
     return ctx
 
 
+PERSONA_ANCHORS = ("persona", "persona_examples", "default_persona")
+
+
+def persona_context(
+    req: ProviderRequest, catalog: dict[str, str]
+) -> tuple[dict[str, str], dict[str, JsonObject], JsonObject | None]:
+    """Cache-friendly personas when one thread serves several (B16).
+
+    With a single persona per thread the anchors are sent as before. Once a
+    second persona shows up (per-user persona rules in a group), all personas
+    seen in the thread go out as one catalog that only changes when a new one
+    appears, and each turn just names the active one, instead of re-sending
+    the full persona text every time speakers alternate.
+
+    Returns (updated catalog, additional_context, per-turn input item or None).
+    """
+    context = build_additional_context(req)
+    block = "\n\n".join(
+        req.context_anchors[name]
+        for name in PERSONA_ANCHORS
+        if req.context_anchors.get(name)
+    )
+    key = hashlib.sha1(block.encode("utf-8")).hexdigest()[:8] if block else ""
+    updated = dict(catalog)
+    if key:
+        updated.setdefault(key, block)
+    if len(updated) <= 1:
+        return updated, context, None
+    for name in PERSONA_ANCHORS:
+        context.pop(f"astrbot_{name}", None)
+    catalog_text = "\n\n".join(
+        f'<persona id="{k}">\n{v}\n</persona>' for k, v in updated.items()
+    )
+    context["astrbot_personas"] = {
+        "value": "Several personas are used in this chat; each user message names "
+        "the one to use for that reply.\n\n" + catalog_text,
+        "kind": "application",
+    }
+    active = (
+        f'<active_persona id="{key}"/>'
+        if key
+        else "<active_persona>none: reply as the plain assistant</active_persona>"
+    )
+    return updated, context, {"type": "text", "text": active, "text_elements": []}
+
+
 class CodexAgentRunner(BaseAgentRunner[TContext]):
     """In-process Codex agent runner."""
 
@@ -284,6 +331,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         **kwargs: T.Any,
     ) -> None:
         self.req = request
+        self._additional_context: dict[str, JsonObject] = {}
+        self._active_persona: JsonObject | None = None
         self.run_context = run_context
         self.agent_hooks = agent_hooks
         self.cfg = provider_config
@@ -388,6 +437,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         )
         state = state if isinstance(state, dict) else {}
         info, started_new = await engine.open_thread(state, self._thread_params())
+        catalog = {} if started_new else state.get("personas") or {}
+        catalog, self._additional_context, self._active_persona = persona_context(
+            self.req, catalog if isinstance(catalog, dict) else {}
+        )
         tools_update = None
         if not started_new and state.get("tools_fp") != self.bridge.fingerprint:
             # Replace the tool set in place; history and cache prefix are kept.
@@ -403,6 +456,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 "thread_id": info["thread_id"],
                 "rollout_path": info.get("rollout_path") or state.get("rollout_path"),
                 "tools_fp": self.bridge.fingerprint,
+                "personas": catalog,
             },
         )
         return info["thread_id"], tools_update
@@ -427,10 +481,13 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         )
 
     def _turn_request(self, tools_update: list | None) -> JsonObject:
+        turn_input = build_turn_input(self.req)
+        if self._active_persona is not None:
+            turn_input.insert(0, self._active_persona)
         request: JsonObject = {
-            "input": build_turn_input(self.req),
+            "input": turn_input,
             "mode": "start_or_steer",
-            "additional_context": build_additional_context(self.req),
+            "additional_context": self._additional_context,
         }
         if tools_update is not None:
             request["dynamic_tools"] = tools_update
