@@ -737,6 +737,17 @@ async def _ensure_persona_and_skills(
             skills = [skills_by_name[name] for name in sorted(skills_by_name)]
         if skills:
             skills = sorted(skills, key=lambda skill: (skill.name, skill.path))
+            if cfg.get("_codex_skills"):
+                # Codex runner: skills are read through the astrbot_read_skill
+                # tool, independent of any shell or sandbox runtime.
+                from astrbot.core.agent.runners.codex.skills import (
+                    build_codex_skills_prompt,
+                )
+
+                event.set_extra("_codex_skills", skills)
+                req.set_context_anchor("skills", build_codex_skills_prompt(skills))
+                skills = []
+        if skills:
             skills_prompt = build_skills_prompt(skills)
             if runtime == "none":
                 skills_prompt += (

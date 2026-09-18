@@ -24,7 +24,14 @@ from ...response import AgentResponseData
 from ...run_context import ContextWrapper, TContext
 from ..base import AgentResponse, AgentState, BaseAgentRunner
 from .constants import CODEX_THREAD_STATE_KEY, DEFAULT_SYSTEM_PROMPT
-from .native import TERMINAL_EVENTS, CodexEngine, JsonObject, find_code_mode_host
+from .native import (
+    ACTIVE_TURNS,
+    TERMINAL_EVENTS,
+    ActiveTurn,
+    CodexEngine,
+    JsonObject,
+    find_code_mode_host,
+)
 from .tool_bridge import CodexToolBridge
 
 if sys.version_info >= (3, 12):
@@ -33,6 +40,15 @@ else:
     from typing_extensions import override
 
 _FINAL_PHASES = (None, "final_answer")
+# A steered follow-up that reached Codex only as its turn ended is answered by
+# a continuation turn carrying this note (B13).
+CONTINUE_NOTE = (
+    '<request_context name="follow_up">\n'
+    "The user sent the message(s) above while you were finishing your previous "
+    "reply. Reply to them now.\n"
+    "</request_context>"
+)
+MAX_CONTINUATIONS = 2
 CODE_MODES = ("code_mode", "code_mode_only")
 
 
@@ -68,6 +84,7 @@ def engine_options(cfg: dict) -> JsonObject:
         "web_search": "live" if cfg.get("web_search") else "disabled",
         "model_tool_mode": tool_mode,
         "features.code_mode.structured_dynamic_tool_results": True,
+        "features.code_mode.compact_exec_description": True,
         "features.code_mode.exec_as_function_tool": bool(
             cfg.get("exec_as_function_tool")
         ),
@@ -189,6 +206,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         self._thread_id: str | None = None
         self._turn_running = False
         self._aborted = False
+        self._active: ActiveTurn | None = None
 
     # ------------------------------------------------------------------ public
 
@@ -230,6 +248,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
     def request_stop(self) -> None:
         self._aborted = True
+        if self._active is not None:
+            self._active.aborted = True
         if self._turn_running and self._engine and self._thread_id:
             asyncio.ensure_future(self._engine.interrupt(self._thread_id))
 
@@ -239,6 +259,19 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
     async def close(self) -> None:
         if self._turn_running and self._engine and self._thread_id:
             await self._engine.interrupt(self._thread_id)
+
+    def _message_id(self) -> str | None:
+        event = getattr(getattr(self.run_context, "context", None), "event", None)
+        message_obj = getattr(event, "message_obj", None)
+        mid = getattr(message_obj, "message_id", None)
+        return str(mid) if mid else None
+
+    def _sender_id(self) -> str:
+        event = getattr(getattr(self.run_context, "context", None), "event", None)
+        try:
+            return str(event.get_sender_id()) if event is not None else ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     # ---------------------------------------------------------------- threads
 
@@ -316,6 +349,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             error_msg: str | None = None
             end = "task_complete"
             started = time.monotonic()
+            active: ActiveTurn | None = None
+            event_seq = last_user_seq = last_agent_seq = 0
+            continuations = 0
             try:
                 sub = await engine.submit_turn(
                     thread_id, self._turn_request(tools_update)
@@ -325,6 +361,15 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         f"Codex did not accept the turn: {sub.get('reason')}"
                     )
                 self._turn_running = True
+                active = ActiveTurn(
+                    engine,
+                    thread_id,
+                    str(sub.get("turn_id") or ""),
+                    self._sender_id(),
+                    message_id=self._message_id(),
+                )
+                self._active = active
+                ACTIVE_TURNS[self.umo] = active
                 while True:
                     remaining = timeout - (time.monotonic() - started)
                     if remaining <= 0:
@@ -336,6 +381,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                     except asyncio.TimeoutError:
                         continue
                     kind = msg.get("type")
+                    event_seq += 1
+                    if kind == "user_message":
+                        last_user_seq = event_seq
                     if kind == "item_started":
                         item = msg.get("item") or {}
                         if item.get("type") == "AgentMessage":
@@ -352,6 +400,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                 ),
                             )
                     elif kind == "agent_message":
+                        last_agent_seq = event_seq
                         text = msg.get("message") or ""
                         if msg.get("phase") in _FINAL_PHASES:
                             final_texts.append(text)
@@ -372,11 +421,41 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         error_msg = msg.get("message") or str(msg)
                     elif kind in TERMINAL_EVENTS:
                         end = kind
+                        # A follow-up steered in as the turn ended was recorded
+                        # but never answered (B13): answer it in one more turn.
+                        unanswered = (
+                            active.steered > 0 and last_user_seq > last_agent_seq
+                        )
+                        if (
+                            kind != "turn_aborted"
+                            and unanswered
+                            and not self._aborted
+                            and continuations < MAX_CONTINUATIONS
+                        ):
+                            continuations += 1
+                            again = await engine.submit_turn(
+                                thread_id,
+                                {
+                                    "input": [
+                                        {
+                                            "type": "text",
+                                            "text": CONTINUE_NOTE,
+                                            "text_elements": [],
+                                        }
+                                    ],
+                                    "mode": "start_if_idle",
+                                },
+                            )
+                            if again.get("status") == "started":
+                                active.turn_id = str(again.get("turn_id") or "")
+                                continue
                         break
                     elif kind == "_pump_closed":
                         raise RuntimeError(msg.get("message") or "Codex thread closed")
             finally:
                 self._turn_running = False
+                if active is not None and ACTIVE_TURNS.get(self.umo) is active:
+                    ACTIVE_TURNS.pop(self.umo, None)
                 pump.close_turn()
 
         text = "\n\n".join(t for t in final_texts if t.strip())
@@ -411,9 +490,11 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             return
         try:
             ctx = self.run_context.context.context  # type: ignore[attr-defined]
+            steered = self._active.steered_texts if self._active else []
+            user_text = chr(10).join(t for t in [self.req.prompt or "", *steered] if t)
             await ctx.conversation_manager.add_message_pair(
                 conv.cid,
-                {"role": "user", "content": self.req.prompt or ""},
+                {"role": "user", "content": user_text},
                 {"role": "assistant", "content": text},
             )
         except Exception as e:  # noqa: BLE001

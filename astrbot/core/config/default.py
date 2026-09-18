@@ -299,6 +299,8 @@ DEFAULT_CONFIG = {
     "kb_agentic_mode": False,
     "disable_builtin_commands": False,
     "disable_metrics": False,
+    # Per-user permission rules; see astrbot/core/permission_rules.py.
+    "permission_rules": [],
 }
 
 

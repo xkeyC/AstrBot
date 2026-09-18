@@ -131,3 +131,52 @@ def test_engine_options_default_to_lean_code_mode(tmp_path):
     )
     assert overridden["config"]["model_tool_mode"] == "direct"
     assert overridden["config"]["web_search"] == "live"
+
+
+def test_read_skill_file_stays_inside_skill(tmp_path):
+    from astrbot.core.agent.runners.codex.skills import (
+        build_codex_skills_prompt,
+        read_skill_file,
+    )
+    from astrbot.core.skills.skill_manager import SkillInfo
+
+    skill_dir = tmp_path / "demo"
+    (skill_dir / "scripts").mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\ndescription: d\n---\nBODY", encoding="utf-8"
+    )
+    (skill_dir / "scripts" / "run.py").write_text("print(1)", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
+    skills = [
+        SkillInfo(
+            name="demo", description="d", path=str(skill_dir / "SKILL.md"), active=True
+        )
+    ]
+
+    assert "BODY" in read_skill_file(skills, "demo")
+    assert read_skill_file(skills, "demo", "scripts/run.py") == "print(1)"
+    assert "run.py" in read_skill_file(skills, "demo", "scripts")
+    assert read_skill_file(skills, "demo", "../secret.txt").startswith("error")
+    assert read_skill_file(skills, "missing").startswith("error: unknown skill")
+    assert "astrbot__astrbot_read_skill" in build_codex_skills_prompt(skills)
+
+
+def test_read_skill_rejects_absolute_and_unc(tmp_path):
+    from astrbot.core.agent.runners.codex.skills import read_skill_file
+    from astrbot.core.skills.skill_manager import SkillInfo
+
+    (tmp_path / "s").mkdir()
+    (tmp_path / "s" / "SKILL.md").write_text("x", encoding="utf-8")
+    skills = [
+        SkillInfo(
+            name="s", description="", path=str(tmp_path / "s" / "SKILL.md"), active=True
+        )
+    ]
+    for bad in (
+        r"\\attacker\share\x",
+        r"C:\Windows\win.ini",
+        "/etc/passwd",
+        "../x",
+        "C:x",
+    ):
+        assert read_skill_file(skills, "s", bad).startswith("error"), bad

@@ -20,6 +20,8 @@ from astrbot.core import logger
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
+from astrbot.core.permission_rules import PermissionPolicy, tool_mcp_server
 
 from .constants import CODEX_TOOL_NAMESPACE
 
@@ -123,6 +125,18 @@ class CodexToolBridge:
                     "Codex tool %s: ignoring unexpected args %s", name, ignored
                 )
             args = {k: v for k, v in args.items() if k in expected}
+
+        event = getattr(getattr(run_context, "context", None), "event", None)
+        get_extra = getattr(event, "get_extra", None)
+        policy = get_extra(POLICY_EXTRA_KEY) if callable(get_extra) else None
+        if isinstance(policy, PermissionPolicy) and not policy.allows_tool(
+            tool.name, tool_mcp_server(tool)
+        ):
+            logger.info("Codex tool %s denied by rule %r", tool.name, policy.rule_name)
+            return _text_result(
+                f"error: permission denied — this user may not use {tool.name}.",
+                success=False,
+            )
 
         logger.info("Codex -> AstrBot tool %s(%s)", tool.name, args)
         try:

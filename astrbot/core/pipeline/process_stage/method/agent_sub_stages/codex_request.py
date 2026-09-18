@@ -18,6 +18,8 @@ from astrbot.core.astr_main_agent import (
     MainAgentBuildConfig,
     _apply_kb,
     _apply_llm_safety_mode,
+    _apply_local_env_tools,
+    _apply_sandbox_tools,
     _decorate_llm_request,
     _filter_tools_by_persona_scope,
     _get_session_conv,
@@ -25,6 +27,8 @@ from astrbot.core.astr_main_agent import (
     _proactive_cron_job_tools,
 )
 from astrbot.core.message.components import File, Image, Record, Reply
+from astrbot.core.permission_rules import CONFIG_KEY as PERMISSION_RULES_KEY
+from astrbot.core.permission_rules import policy_for_event
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import ProviderRequest
@@ -38,9 +42,13 @@ from astrbot.core.tools.message_tools import (
 def _build_config(
     astrbot_config: dict, runner_config: dict, plugin_context: Context
 ) -> MainAgentBuildConfig:
-    settings = dict(astrbot_config.get("provider_settings", {}))
+    original = astrbot_config.get("provider_settings", {})
+    settings = dict(original)
     # Codex reads images natively; do not caption them with another provider.
     settings["default_image_caption_provider_id"] = ""
+    # Skills are read from this host through astrbot_read_skill (not a shell).
+    settings["_codex_skills"] = True
+    settings["computer_use_runtime"] = "local"
     proactive_cfg = settings.get("proactive_capability", {}) or {}
     return MainAgentBuildConfig(
         tool_call_timeout=int(runner_config.get("tool_call_timeout") or 120),
@@ -50,6 +58,10 @@ def _build_config(
         add_cron_tools=proactive_cfg.get("add_cron_tools", True),
         timezone=plugin_context.get_config().get("timezone"),
         max_quoted_fallback_images=settings.get("max_quoted_fallback_images", 20),
+        # Execution environment as configured by the user (sandbox / local / none);
+        # the skills path above always reads from this host.
+        computer_use_runtime=original.get("computer_use_runtime", "none"),
+        sandbox_cfg=original.get("sandbox", {}) or {},
     )
 
 
@@ -85,6 +97,11 @@ async def prepare_codex_request(
     runner_config: dict,
 ) -> None:
     config = _build_config(astrbot_config, runner_config, plugin_context)
+    policy = policy_for_event(event, astrbot_config.get(PERMISSION_RULES_KEY) or [])
+    if policy.persona_id and not event.get_selected_persona():
+        event.set_selected_persona(policy.persona_id)
+    if policy.model and not req.model:
+        req.model = policy.model
     await _collect_media(event, req)
 
     req.conversation = await _get_session_conv(event, plugin_context)
@@ -94,6 +111,17 @@ async def prepare_codex_request(
 
     if config.llm_safety_mode:
         _apply_llm_safety_mode(config, req)
+    # AstrBot's execution tools (shipyard-neo sandbox or local host). They are
+    # deferred dynamic tools under code mode, so they cost no prompt tokens.
+    if config.computer_use_runtime == "sandbox":
+        _apply_sandbox_tools(config, req, req.session_id or event.unified_msg_origin)
+    elif config.computer_use_runtime == "local":
+        _apply_local_env_tools(req, plugin_context)
+    if config.computer_use_runtime in ("sandbox", "local") and req.func_tool:
+        from astrbot.core.tools.computer_tools.apply_patch import ApplyPatchTool
+
+        # Codex models are trained on this patch format.
+        req.func_tool.add_tool(ApplyPatchTool())
     if config.add_cron_tools:
         _proactive_cron_job_tools(req, plugin_context)
 
@@ -110,7 +138,19 @@ async def prepare_codex_request(
     ):
         req.func_tool.add_tool(tmgr.get_builtin_tool(GetGroupMessageHistoryTool))
 
+    if event.get_extra("_codex_skills"):
+        from astrbot.core.agent.runners.codex.skills import ReadSkillTool
+
+        req.func_tool.add_tool(ReadSkillTool())
+
     _filter_tools_by_persona_scope(event, req)
+    if not policy.is_default:
+        # Per-message and append-only: the tool set and cached prefix stay the same.
+        req.add_persistent_context(
+            "sender_permissions",
+            f"Permissions of this sender: {policy.summary()}. Do not attempt restricted "
+            "actions for them; if asked, say politely that they are not allowed.",
+        )
     req.context_anchors_complete = True
     if not req.prompt and (req.image_urls or req.extra_user_content_parts):
         req.prompt = "<attachment>"

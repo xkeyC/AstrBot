@@ -61,6 +61,61 @@ def find_code_mode_host(explicit: str = "") -> str | None:
 
 
 @dataclass
+class ActiveTurn:
+    """A turn running for a session (UMO), used to steer same-sender follow-ups."""
+
+    engine: CodexEngine
+    thread_id: str
+    turn_id: str
+    sender_id: str
+    message_id: str | None = None
+    steered: int = 0
+    aborted: bool = False
+    steered_texts: list[str] = field(default_factory=list)
+
+
+# umo -> running turn
+ACTIVE_TURNS: dict[str, ActiveTurn] = {}
+
+
+async def try_steer(
+    umo: str, sender_id: str, turn_input: list[JsonObject], *, prompt: str = ""
+) -> str | None:
+    """Inject a follow-up from the same sender into the running turn.
+
+    Returns the running turn's source message id (or "") when Codex accepted
+    the input; the caller then produces no reply of its own. Other senders,
+    stopped turns, or a turn that already finished return None and are handled
+    as a new turn (queued).
+    """
+    active = ACTIVE_TURNS.get(umo)
+    if (
+        active is None
+        or active.aborted
+        or not sender_id
+        or active.sender_id != sender_id
+    ):
+        return None
+    try:
+        result = await active.engine.submit_turn(
+            active.thread_id,
+            {"input": turn_input, "mode": "steer", "expected_turn_id": active.turn_id},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("codex steer failed for %s: %s", umo, e)
+        return None
+    if result.get("status") != "steered":
+        return None
+    active.steered += 1
+    if prompt:
+        active.steered_texts.append(prompt)
+    logger.info(
+        "Follow-up from %s steered into running Codex turn (umo=%s)", sender_id, umo
+    )
+    return active.message_id or ""
+
+
+@dataclass
 class _TurnRoute:
     events: asyncio.Queue[JsonObject]
     tool_handler: ToolCallHandler | None

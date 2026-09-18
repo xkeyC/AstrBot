@@ -5,8 +5,12 @@ from typing import TYPE_CHECKING
 
 import astrbot.core.provider.provider as provider_core
 from astrbot.core import logger
-from astrbot.core.agent.runners.codex.codex_agent_runner import CodexAgentRunner
+from astrbot.core.agent.runners.codex.codex_agent_runner import (
+    CodexAgentRunner,
+    build_turn_input,
+)
 from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
+from astrbot.core.agent.runners.codex.native import try_steer
 from astrbot.core.agent.runners.coze.coze_agent_runner import CozeAgentRunner
 from astrbot.core.agent.runners.dashscope.dashscope_agent_runner import (
     DashscopeAgentRunner,
@@ -356,6 +360,20 @@ class ThirdPartyAgentSubStage(Stage):
         # call event hook
         if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
             return
+
+        if self.runner_type == CODEX_RUNNER_TYPE:
+            # Same sender while a Codex turn runs: steer into that turn (after
+            # the request hooks, so moderation plugins still apply); the running
+            # turn answers. Other senders queue behind it.
+            target = await try_steer(
+                event.unified_msg_origin,
+                str(event.get_sender_id() or ""),
+                build_turn_input(req),
+                prompt=req.prompt or "",
+            )
+            if target is not None:
+                event.set_extra("_follow_up_captured", {"target_run_id": target})
+                return
 
         if self.runner_type == "dify":
             runner = DifyAgentRunner[AstrAgentContext]()
