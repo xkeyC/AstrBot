@@ -200,3 +200,29 @@ def test_model_providers_map_to_codex_overrides(tmp_path):
     assert cfg["model_providers.my_relay.experimental_bearer_token"] == "sk-1"
     assert cfg["model_providers.my_relay.wire_api"] == "responses"
     assert not any(k.startswith("model_providers.no-url") for k in cfg)
+
+
+def test_native_exec_approvals_follow_permission_rules(tmp_path):
+    from astrbot.core.agent.runners.codex.codex_agent_runner import (
+        native_exec_decision,
+    )
+    from astrbot.core.permission_rules import EVENT_EXTRA_KEY, PermissionPolicy
+
+    opts = engine_options(
+        {"codex_home": str(tmp_path), "tool_mode": "direct", "native_exec_tools": True}
+    )
+    assert opts["approve_every_command"] is True
+    assert "approval_policy" not in opts["config"]
+    plain = engine_options({"codex_home": str(tmp_path), "tool_mode": "direct"})
+    assert "approve_every_command" not in plain
+    assert plain["config"]["approval_policy"] == "never"
+
+    def event(policy):
+        return SimpleNamespace(
+            get_extra=lambda key: policy if key == EVENT_EXTRA_KEY else None
+        )
+
+    assert native_exec_decision(event(None)) == (True, "")
+    assert native_exec_decision(event(PermissionPolicy(native_exec=True)))[0] is True
+    denied = native_exec_decision(event(PermissionPolicy(native_exec=False)))
+    assert denied[0] is False and "not permitted" in denied[1]

@@ -18,6 +18,8 @@ from pathlib import Path
 
 from astrbot.core import logger, sp
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
+from astrbot.core.permission_rules import PermissionPolicy
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
 
 from ...hooks import BaseAgentRunHooks
@@ -112,6 +114,11 @@ def engine_options(cfg: dict) -> JsonObject:
             )
     if native_exec and (exe := cfg.get("codex_self_exe")):
         options["codex_self_exe"] = exe
+    if native_exec and (cfg.get("approval_policy") or "never") == "never":
+        # Every native command asks for approval; AstrBot answers it from the
+        # sender's permission rule (native_exec_decision).
+        options["approve_every_command"] = True
+        config.pop("approval_policy", None)
     return options
 
 
@@ -132,6 +139,16 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
         if key := str(p.get("api_key") or "").strip():
             out[f"{prefix}.experimental_bearer_token"] = key
     return out
+
+
+def native_exec_decision(event: T.Any) -> tuple[bool, str]:
+    """Approve native execution unless the sender's rule sets native_exec: false."""
+    get_extra = getattr(event, "get_extra", None)
+    policy = get_extra(POLICY_EXTRA_KEY) if callable(get_extra) else None
+    if isinstance(policy, PermissionPolicy) and policy.native_exec is False:
+        logger.info("Codex native execution denied by rule %r", policy.rule_name)
+        return False, "Native command execution is not permitted for this user."
+    return True, ""
 
 
 def system_prompt(cfg: dict) -> str:
@@ -339,6 +356,12 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
     async def _handle_tool_call(self, msg: JsonObject) -> JsonObject:
         return await self.bridge.call(msg, self.run_context, self.agent_hooks)
 
+    async def _handle_approval(self, kind: str, msg: JsonObject) -> tuple[bool, str]:
+        """Native exec / patch approvals follow the sender's permission rule (B15)."""
+        return native_exec_decision(
+            getattr(getattr(self.run_context, "context", None), "event", None)
+        )
+
     def _turn_request(self, tools_update: list | None) -> JsonObject:
         request: JsonObject = {
             "input": build_turn_input(self.req),
@@ -361,7 +384,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
         async with engine.lock_for(thread_id):
             pump = engine.pump(thread_id)
-            queue = pump.open_turn(self._handle_tool_call)
+            queue = pump.open_turn(self._handle_tool_call, self._handle_approval)
             phases: dict[str, str | None] = {}
             final_texts: list[str] = []
             commentary: list[str] = []

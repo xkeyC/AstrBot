@@ -21,6 +21,13 @@ from astrbot.core import logger
 
 JsonObject = dict[str, Any]
 ToolCallHandler = Callable[[JsonObject], Awaitable[JsonObject]]
+# (kind "exec" | "patch", request) -> (approved, reason)
+ApprovalHandler = Callable[[str, JsonObject], Awaitable[tuple[bool, str]]]
+
+APPROVAL_EVENTS = {
+    "exec_approval_request": "exec",
+    "apply_patch_approval_request": "patch",
+}
 
 TERMINAL_EVENTS = ("task_complete", "turn_complete", "turn_aborted")
 
@@ -119,6 +126,7 @@ async def try_steer(
 class _TurnRoute:
     events: asyncio.Queue[JsonObject]
     tool_handler: ToolCallHandler | None
+    approval_handler: ApprovalHandler | None = None
 
 
 @dataclass
@@ -136,10 +144,12 @@ class ThreadPump:
         )
 
     def open_turn(
-        self, tool_handler: ToolCallHandler | None
+        self,
+        tool_handler: ToolCallHandler | None,
+        approval_handler: ApprovalHandler | None = None,
     ) -> asyncio.Queue[JsonObject]:
         queue: asyncio.Queue[JsonObject] = asyncio.Queue()
-        self.route = _TurnRoute(queue, tool_handler)
+        self.route = _TurnRoute(queue, tool_handler, approval_handler)
         return queue
 
     def close_turn(self) -> None:
@@ -163,6 +173,10 @@ class ThreadPump:
                     self.tool_tasks.add(task)
                     task.add_done_callback(self.tool_tasks.discard)
                     continue
+                if (kind := APPROVAL_EVENTS.get(msg.get("type") or "")) is not None:
+                    task = asyncio.create_task(self._answer_approval(kind, msg))
+                    self.tool_tasks.add(task)
+                    task.add_done_callback(self.tool_tasks.discard)
                 if self.route is not None:
                     self.route.events.put_nowait(msg)
                 if msg.get("type") == "shutdown_complete":
@@ -178,6 +192,31 @@ class ThreadPump:
         finally:
             self.closed = True
             self.engine.pumps.pop(self.thread_id, None)
+
+    async def _answer_approval(self, kind: str, msg: JsonObject) -> None:
+        """Decide a native exec / patch approval; unattended requests are denied."""
+        route = self.route
+        approved, reason = False, "No AstrBot session is attached to this request."
+        try:
+            if route is not None and route.approval_handler is not None:
+                approved, reason = await route.approval_handler(kind, msg)
+        except Exception as e:  # noqa: BLE001
+            logger.error("codex approval handler failed: %s", e, exc_info=True)
+            approved, reason = False, f"approval failed: {e!s}"
+        call_id = str(msg.get("call_id") or msg.get("callId") or "")
+        request = {
+            "kind": kind,
+            "id": str(msg.get("approval_id") or msg.get("approvalId") or call_id),
+            "turn_id": msg.get("turn_id") or msg.get("turnId") or None,
+            "approved": approved,
+            "reason": reason or None,
+        }
+        try:
+            await self.engine.rt.review_decision(
+                self.thread_id, json.dumps(request, ensure_ascii=False)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("codex approval response for %s failed: %s", call_id, e)
 
     async def _answer_tool(self, msg: JsonObject) -> None:
         call_id = msg.get("callId") or msg.get("call_id") or ""
