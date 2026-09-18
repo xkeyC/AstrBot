@@ -27,6 +27,11 @@ async def _build_stage(
         The initialized stage.
     """
     config = copy.deepcopy(DEFAULT_CONFIG)
+    # The internal stage still consumes the legacy local runner settings.
+    config["agent_runner"] = {
+        "runner_type": "local",
+        "config": copy.deepcopy(AGENT_RUNNER_CONFIG_DEFAULTS["local"]),
+    }
     runner_config = config["agent_runner"]["config"]
     runner_config["compression"].update(compression or {})
     runner_config["misc"].update(misc or {})

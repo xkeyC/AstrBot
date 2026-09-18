@@ -132,7 +132,9 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
                 "note": note,
                 "origin": "tool",
                 # The request that created the task, quoted when it runs (K12).
-                "origin_message": (context.context.event.message_str or "")[:1000],
+                "origin_message": str(
+                    getattr(context.context.event, "message_str", "") or ""
+                )[:1000],
             }
 
             tz_name = str(

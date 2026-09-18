@@ -11,15 +11,6 @@ from astrbot.core.agent.runners.codex.codex_agent_runner import (
 )
 from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
 from astrbot.core.agent.runners.codex.native import try_steer
-from astrbot.core.agent.runners.coze.coze_agent_runner import CozeAgentRunner
-from astrbot.core.agent.runners.dashscope.dashscope_agent_runner import (
-    DashscopeAgentRunner,
-)
-from astrbot.core.agent.runners.deerflow.constants import DEERFLOW_PROVIDER_TYPE
-from astrbot.core.agent.runners.deerflow.deerflow_agent_runner import (
-    DeerFlowAgentRunner,
-)
-from astrbot.core.agent.runners.dify.dify_agent_runner import DifyAgentRunner
 from astrbot.core.astr_agent_hooks import MAIN_AGENT_HOOKS
 from astrbot.core.message.components import Image, Record
 from astrbot.core.message.message_event_result import (
@@ -203,6 +194,12 @@ class ThirdPartyAgentSubStage(Stage):
         self.conf = ctx.astrbot_config
         agent_runner = self.conf["agent_runner"]
         self.runner_type = agent_runner["runner_type"]
+        if self.runner_type != CODEX_RUNNER_TYPE:
+            raise ValueError(
+                f"Unsupported third party agent runner type: {self.runner_type!r}. "
+                f"Only {CODEX_RUNNER_TYPE!r} is supported; Dify, Coze, DashScope "
+                "and DeerFlow runners have been removed."
+            )
         self.runner_config = agent_runner["config"]
         settings = ctx.astrbot_config["provider_settings"]
         self.streaming_response: bool = settings["streaming_response"]
@@ -345,14 +342,13 @@ class ThirdPartyAgentSubStage(Stage):
         if not req.prompt and not req.image_urls and not req.audio_urls:
             return
 
-        if self.runner_type == CODEX_RUNNER_TYPE:
-            await prepare_codex_request(
-                event,
-                req,
-                self.ctx.plugin_manager.context,
-                self.conf,
-                self.runner_config,
-            )
+        await prepare_codex_request(
+            event,
+            req,
+            self.ctx.plugin_manager.context,
+            self.conf,
+            self.runner_config,
+        )
 
         custom_error_message = await self._resolve_persona_custom_error_message(event)
         set_persona_custom_error_message_on_event(event, custom_error_message)
@@ -361,37 +357,21 @@ class ThirdPartyAgentSubStage(Stage):
         if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
             return
 
-        if self.runner_type == CODEX_RUNNER_TYPE:
-            # Same sender while a Codex turn runs: steer into that turn (after
-            # the request hooks, so moderation plugins still apply); the running
-            # turn answers. Other senders queue behind it.
-            target = await try_steer(
-                event.unified_msg_origin,
-                str(event.get_sender_id() or ""),
-                build_turn_input(req),
-                prompt=req.prompt or "",
-            )
-            if target is not None:
-                event.set_extra("_follow_up_captured", {"target_run_id": target})
-                return
+        # Same sender while a Codex turn runs: steer into that turn (after the
+        # request hooks, so moderation plugins still apply); the running turn
+        # answers. Other senders queue behind it.
+        target = await try_steer(
+            event.unified_msg_origin,
+            str(event.get_sender_id() or ""),
+            build_turn_input(req),
+            prompt=req.prompt or "",
+        )
+        if target is not None:
+            event.set_extra("_follow_up_captured", {"target_run_id": target})
+            return
 
-        if self.runner_type == "dify":
-            runner = DifyAgentRunner[AstrAgentContext]()
-        elif self.runner_type == "coze":
-            runner = CozeAgentRunner[AstrAgentContext]()
-        elif self.runner_type == "dashscope":
-            runner = DashscopeAgentRunner[AstrAgentContext]()
-        elif self.runner_type == DEERFLOW_PROVIDER_TYPE:
-            runner = DeerFlowAgentRunner[AstrAgentContext]()
-        elif self.runner_type == CODEX_RUNNER_TYPE:
-            runner = CodexAgentRunner[AstrAgentContext]()
-            active_event_registry.register_agent_stop_callback(
-                event, runner.request_stop
-            )
-        else:
-            raise ValueError(
-                f"Unsupported third party agent runner type: {self.runner_type}",
-            )
+        runner = CodexAgentRunner[AstrAgentContext]()
+        active_event_registry.register_agent_stop_callback(event, runner.request_stop)
 
         astr_agent_ctx = AstrAgentContext(
             context=self.ctx.plugin_manager.context,
@@ -477,8 +457,7 @@ class ThirdPartyAgentSubStage(Stage):
                 stream_watchdog_task.cancel()
             if not streaming_used:
                 await close_runner_once()
-            if self.runner_type == CODEX_RUNNER_TYPE:
-                active_event_registry.unregister_agent_stop_callback(event)
+            active_event_registry.unregister_agent_stop_callback(event)
 
         asyncio.create_task(
             Metric.upload(

@@ -3,78 +3,19 @@ from sqlmodel import col
 
 from astrbot.api import sp, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
-from astrbot.core import logger
 from astrbot.core.agent.runners.codex.constants import (
     CODEX_RUNNER_TYPE,
     CODEX_THREAD_STATE_KEY,
 )
-from astrbot.core.agent.runners.deerflow.constants import (
-    DEERFLOW_PROVIDER_TYPE,
-    DEERFLOW_THREAD_ID_KEY,
-)
-from astrbot.core.agent.runners.deerflow.deerflow_api_client import DeerFlowAPIClient
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.utils.active_event_registry import active_event_registry
 
 from .utils.rst_scene import RstScene
 
 THIRD_PARTY_AGENT_RUNNER_KEY = {
-    "dify": "dify_conversation_id",
-    "coze": "coze_conversation_id",
-    "dashscope": "dashscope_conversation_id",
-    DEERFLOW_PROVIDER_TYPE: DEERFLOW_THREAD_ID_KEY,
     CODEX_RUNNER_TYPE: CODEX_THREAD_STATE_KEY,
 }
 THIRD_PARTY_AGENT_RUNNER_STR = ", ".join(THIRD_PARTY_AGENT_RUNNER_KEY.keys())
-
-
-async def _cleanup_deerflow_thread_if_present(
-    context: star.Context,
-    umo: str,
-) -> None:
-    try:
-        thread_id = await sp.get_async(
-            scope="umo",
-            scope_id=umo,
-            key=DEERFLOW_THREAD_ID_KEY,
-            default="",
-        )
-        if not thread_id:
-            return
-
-        cfg = context.get_config(umo=umo)
-        agent_runner = cfg.get("agent_runner", {})
-        if agent_runner.get("runner_type") != DEERFLOW_PROVIDER_TYPE:
-            return
-        runner_config = agent_runner.get("config", {})
-        if not isinstance(runner_config, dict):
-            return
-
-        client = DeerFlowAPIClient(
-            api_base=runner_config.get(
-                "deerflow_api_base",
-                "http://127.0.0.1:2026",
-            ),
-            api_key=runner_config.get("deerflow_api_key", ""),
-            auth_header=runner_config.get("deerflow_auth_header", ""),
-            proxy=runner_config.get("proxy", ""),
-        )
-        try:
-            await client.delete_thread(thread_id)
-        finally:
-            try:
-                await client.close()
-            except Exception as e:
-                logger.warning(
-                    "Failed to close DeerFlow API client after thread cleanup: %s",
-                    e,
-                )
-    except Exception as e:
-        logger.warning(
-            "Failed to clean up DeerFlow thread for session %s: %s",
-            umo,
-            e,
-        )
 
 
 async def _clear_third_party_agent_runner_state(
@@ -85,9 +26,6 @@ async def _clear_third_party_agent_runner_state(
     session_key = THIRD_PARTY_AGENT_RUNNER_KEY.get(agent_runner_type)
     if not session_key:
         return
-
-    if agent_runner_type == DEERFLOW_PROVIDER_TYPE:
-        await _cleanup_deerflow_thread_if_present(context, umo)
 
     await sp.remove_async(
         scope="umo",

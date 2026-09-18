@@ -6,7 +6,11 @@ from astrbot import __version__
 from astrbot.core.computer.booters.cua_defaults import CUA_DEFAULT_CONFIG
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .agent_runner import get_agent_runner_config_default
+from .agent_runner import (
+    DEFAULT_AGENT_RUNNER_TYPE,
+    SELECTABLE_AGENT_RUNNER_TYPES,
+    get_agent_runner_config_default,
+)
 
 VERSION = __version__
 
@@ -177,8 +181,8 @@ DEFAULT_CONFIG = {
         },
     },
     "agent_runner": {
-        "runner_type": "local",
-        "config": get_agent_runner_config_default("local"),
+        "runner_type": DEFAULT_AGENT_RUNNER_TYPE,
+        "config": get_agent_runner_config_default(DEFAULT_AGENT_RUNNER_TYPE),
     },
     # SubAgent orchestrator mode:
     # - main_enable = False: disabled; main LLM mounts tools normally (persona selection).
@@ -2848,30 +2852,6 @@ CONFIG_METADATA_2 = {
                         "description": "支持英语文本规范化",
                         "hint": "可提升数字阅读场景的性能，但会略微增加延迟",
                     },
-                    "rag_options": {
-                        "description": "RAG 选项",
-                        "type": "object",
-                        "hint": "检索知识库设置, 非必填。仅 Agent 应用类型支持(智能体应用, 包括 RAG 应用)。阿里云百炼应用开启此功能后将无法多轮对话。",
-                        "items": {
-                            "pipeline_ids": {
-                                "description": "知识库 ID 列表",
-                                "type": "list",
-                                "items": {"type": "string"},
-                                "hint": "对指定知识库内所有文档进行检索, 前往 https://bailian.console.aliyun.com/ 数据应用->知识索引创建和获取 ID。",
-                            },
-                            "file_ids": {
-                                "description": "非结构化文档 ID, 传入该参数将对指定非结构化文档进行检索。",
-                                "type": "list",
-                                "items": {"type": "string"},
-                                "hint": "对指定非结构化文档进行检索。前往 https://bailian.console.aliyun.com/ 数据管理创建和获取 ID。",
-                            },
-                            "output_reference": {
-                                "description": "是否输出知识库/文档的引用",
-                                "type": "bool",
-                                "hint": "在每次回答尾部加上引用源。默认为 False。",
-                            },
-                        },
-                    },
                     "sensevoice_hint": {
                         "description": "部署SenseVoice",
                         "type": "string",
@@ -2886,24 +2866,6 @@ CONFIG_METADATA_2 = {
                         "description": "模型名称",
                         "type": "string",
                         "hint": "modelscope 上的模型名称。默认：iic/SenseVoiceSmall。",
-                    },
-                    "variables": {
-                        "description": "工作流固定输入变量",
-                        "type": "object",
-                        "items": {},
-                        "hint": "可选。工作流固定输入变量，将会作为工作流的输入。也可以在对话时使用 /set 指令动态设置变量。如果变量名冲突，优先使用动态设置的变量。",
-                        "invisible": True,
-                    },
-                    "dashscope_app_type": {
-                        "description": "应用类型",
-                        "type": "string",
-                        "hint": "百炼应用的应用类型。",
-                        "options": [
-                            "agent",
-                            "agent-arrange",
-                            "dialog-workflow",
-                            "task-workflow",
-                        ],
                     },
                     "timeout": {
                         "description": "超时时间",
@@ -3003,106 +2965,6 @@ CONFIG_METADATA_2 = {
                         "description": "模型上下文窗口大小",
                         "type": "int",
                         "hint": "模型最大上下文 Token 大小。如果为 0，则会自动从模型元数据填充（如有）",
-                    },
-                    "dify_api_key": {
-                        "description": "API Key",
-                        "type": "string",
-                        "hint": "Dify API Key。此项必填。",
-                        "secret": True,
-                    },
-                    "dify_api_base": {
-                        "description": "API Base URL",
-                        "type": "string",
-                        "hint": "Dify API Base URL。默认为 https://api.dify.ai/v1",
-                    },
-                    "dify_api_type": {
-                        "description": "Dify 应用类型",
-                        "type": "string",
-                        "hint": "Dify API 类型。根据 Dify 官网，目前支持 chat, chatflow, agent, workflow 三种应用类型。",
-                        "options": ["chat", "chatflow", "agent", "workflow"],
-                    },
-                    "dify_workflow_output_key": {
-                        "description": "Dify Workflow 输出变量名",
-                        "type": "string",
-                        "hint": "Dify Workflow 输出变量名。当应用类型为 workflow 时才使用。默认为 astrbot_wf_output。",
-                    },
-                    "dify_query_input_key": {
-                        "description": "Prompt 输入变量名",
-                        "type": "string",
-                        "hint": "发送的消息文本内容对应的输入变量名。默认为 astrbot_text_query。",
-                        "obvious": True,
-                    },
-                    "coze_api_key": {
-                        "description": "Coze API Key",
-                        "type": "string",
-                        "hint": "Coze API 密钥，用于访问 Coze 服务。",
-                        "secret": True,
-                    },
-                    "bot_id": {
-                        "description": "Bot ID",
-                        "type": "string",
-                        "hint": "Coze 机器人的 ID，在 Coze 平台上创建机器人后获得。",
-                    },
-                    "coze_api_base": {
-                        "description": "API Base URL",
-                        "type": "string",
-                        "hint": "Coze API 的基础 URL 地址，默认为 https://api.coze.cn",
-                    },
-                    "deerflow_api_base": {
-                        "description": "API Base URL",
-                        "type": "string",
-                        "hint": "DeerFlow API 网关地址，默认为 http://127.0.0.1:2026",
-                    },
-                    "deerflow_api_key": {
-                        "description": "DeerFlow API Key",
-                        "type": "string",
-                        "hint": "可选。若 DeerFlow 网关配置了 Bearer 鉴权，则在此填写。",
-                        "secret": True,
-                    },
-                    "deerflow_auth_header": {
-                        "description": "Authorization Header",
-                        "type": "string",
-                        "hint": "可选。自定义 Authorization 请求头，优先级高于 DeerFlow API Key。",
-                        "secret": True,
-                    },
-                    "deerflow_assistant_id": {
-                        "description": "Assistant ID",
-                        "type": "string",
-                        "hint": "DeerFlow 2.0 LangGraph assistant_id，默认为 lead_agent。",
-                    },
-                    "deerflow_model_name": {
-                        "description": "模型名称覆盖",
-                        "type": "string",
-                        "hint": "可选。覆盖 DeerFlow 默认模型（对应运行时 configurable 的 model_name）。",
-                    },
-                    "deerflow_thinking_enabled": {
-                        "description": "启用思考模式",
-                        "type": "bool",
-                    },
-                    "deerflow_plan_mode": {
-                        "description": "启用计划模式",
-                        "type": "bool",
-                        "hint": "对应 DeerFlow 2.0 运行时 configurable 的 is_plan_mode。",
-                    },
-                    "deerflow_subagent_enabled": {
-                        "description": "启用子智能体",
-                        "type": "bool",
-                        "hint": "对应 DeerFlow 2.0 运行时 configurable 的 subagent_enabled。",
-                    },
-                    "deerflow_max_concurrent_subagents": {
-                        "description": "子智能体最大并发数",
-                        "type": "int",
-                        "hint": "对应 DeerFlow 2.0 运行时 configurable 的 max_concurrent_subagents。仅在启用子智能体时生效，默认 3。",
-                    },
-                    "deerflow_recursion_limit": {
-                        "description": "递归深度上限",
-                        "type": "int",
-                        "hint": "对应 LangGraph recursion_limit。",
-                    },
-                    "auto_save_history": {
-                        "description": "由 Coze 管理对话记录",
-                        "type": "bool",
-                        "hint": "启用后，将由 Coze 进行对话历史记录管理, 此时 AstrBot 本地保存的上下文不会生效(仅供浏览), 对 AstrBot 的上下文进行的操作也不会生效。如果为禁用, 则使用 AstrBot 管理上下文。",
                     },
                 },
             },
@@ -3385,226 +3247,16 @@ CONFIG_METADATA_3 = {
                     "agent_runner.runner_type": {
                         "description": "执行器",
                         "type": "string",
-                        "options": [
-                            "local",
-                            "dify",
-                            "coze",
-                            "dashscope",
-                            "deerflow",
-                            "codex",
-                        ],
-                        "labels": [
-                            "内置 Agent",
-                            "Dify",
-                            "Coze",
-                            "阿里云百炼应用",
-                            "DeerFlow",
-                            "Codex",
-                        ],
+                        "options": list(SELECTABLE_AGENT_RUNNER_TYPES),
+                        "labels": ["Codex"],
                         "_special": "agent_runner_type",
                         "runner_defaults": {
                             runner_type: get_agent_runner_config_default(runner_type)
-                            for runner_type in (
-                                "local",
-                                "dify",
-                                "coze",
-                                "dashscope",
-                                "deerflow",
-                                "codex",
-                            )
+                            for runner_type in SELECTABLE_AGENT_RUNNER_TYPES
                         },
                         "condition": {
                             "provider_settings.enable": True,
                         },
-                    },
-                },
-            },
-            "dify_runner": {
-                "description": "Dify 配置",
-                "type": "object",
-                "condition": {
-                    "provider_settings.enable": True,
-                    "agent_runner.runner_type": "dify",
-                },
-                "items": {
-                    "agent_runner.config.dify_api_type": {
-                        "description": "应用类型",
-                        "type": "string",
-                        "options": ["chat", "chatflow", "agent", "workflow"],
-                    },
-                    "agent_runner.config.dify_api_key": {
-                        "description": "API Key",
-                        "type": "string",
-                        "secret": True,
-                    },
-                    "agent_runner.config.dify_api_base": {
-                        "description": "API Base URL",
-                        "type": "string",
-                    },
-                    "agent_runner.config.dify_workflow_output_key": {
-                        "description": "Workflow 输出变量名",
-                        "type": "string",
-                    },
-                    "agent_runner.config.dify_query_input_key": {
-                        "description": "Prompt 输入变量名",
-                        "type": "string",
-                    },
-                    "agent_runner.config.variables": {
-                        "description": "变量",
-                        "type": "dict",
-                    },
-                    "agent_runner.config.timeout": {
-                        "description": "超时时间（秒）",
-                        "type": "int",
-                    },
-                    "agent_runner.config.proxy": {
-                        "description": "代理地址",
-                        "type": "string",
-                    },
-                },
-            },
-            "coze_runner": {
-                "description": "Coze 配置",
-                "type": "object",
-                "condition": {
-                    "provider_settings.enable": True,
-                    "agent_runner.runner_type": "coze",
-                },
-                "items": {
-                    "agent_runner.config.coze_api_key": {
-                        "description": "API Key",
-                        "type": "string",
-                        "secret": True,
-                    },
-                    "agent_runner.config.bot_id": {
-                        "description": "Bot ID",
-                        "type": "string",
-                    },
-                    "agent_runner.config.coze_api_base": {
-                        "description": "API Base URL",
-                        "type": "string",
-                    },
-                    "agent_runner.config.auto_save_history": {
-                        "description": "由 Coze 管理对话记录",
-                        "type": "bool",
-                    },
-                    "agent_runner.config.timeout": {
-                        "description": "超时时间（秒）",
-                        "type": "int",
-                    },
-                    "agent_runner.config.proxy": {
-                        "description": "代理地址",
-                        "type": "string",
-                    },
-                },
-            },
-            "dashscope_runner": {
-                "description": "阿里云百炼应用配置",
-                "type": "object",
-                "condition": {
-                    "provider_settings.enable": True,
-                    "agent_runner.runner_type": "dashscope",
-                },
-                "items": {
-                    "agent_runner.config.dashscope_app_type": {
-                        "description": "应用类型",
-                        "type": "string",
-                        "options": ["agent", "workflow"],
-                    },
-                    "agent_runner.config.dashscope_api_key": {
-                        "description": "API Key",
-                        "type": "string",
-                        "secret": True,
-                    },
-                    "agent_runner.config.dashscope_app_id": {
-                        "description": "应用 ID",
-                        "type": "string",
-                    },
-                    "agent_runner.config.rag_options.pipeline_ids": {
-                        "description": "知识库 Pipeline ID",
-                        "type": "list",
-                        "items": {"type": "string"},
-                    },
-                    "agent_runner.config.rag_options.file_ids": {
-                        "description": "文件 ID",
-                        "type": "list",
-                        "items": {"type": "string"},
-                    },
-                    "agent_runner.config.rag_options.output_reference": {
-                        "description": "输出引用",
-                        "type": "bool",
-                    },
-                    "agent_runner.config.variables": {
-                        "description": "变量",
-                        "type": "dict",
-                    },
-                    "agent_runner.config.timeout": {
-                        "description": "超时时间（秒）",
-                        "type": "int",
-                    },
-                    "agent_runner.config.proxy": {
-                        "description": "代理地址",
-                        "type": "string",
-                    },
-                },
-            },
-            "deerflow_runner": {
-                "description": "DeerFlow 配置",
-                "type": "object",
-                "condition": {
-                    "provider_settings.enable": True,
-                    "agent_runner.runner_type": "deerflow",
-                },
-                "items": {
-                    "agent_runner.config.deerflow_api_base": {
-                        "description": "API Base URL",
-                        "type": "string",
-                    },
-                    "agent_runner.config.deerflow_api_key": {
-                        "description": "API Key",
-                        "type": "string",
-                        "secret": True,
-                    },
-                    "agent_runner.config.deerflow_auth_header": {
-                        "description": "Authorization Header",
-                        "type": "string",
-                        "secret": True,
-                    },
-                    "agent_runner.config.deerflow_assistant_id": {
-                        "description": "Assistant ID",
-                        "type": "string",
-                    },
-                    "agent_runner.config.deerflow_model_name": {
-                        "description": "模型名称覆盖",
-                        "type": "string",
-                    },
-                    "agent_runner.config.deerflow_thinking_enabled": {
-                        "description": "启用思考模式",
-                        "type": "bool",
-                    },
-                    "agent_runner.config.deerflow_plan_mode": {
-                        "description": "启用计划模式",
-                        "type": "bool",
-                    },
-                    "agent_runner.config.deerflow_subagent_enabled": {
-                        "description": "启用子智能体",
-                        "type": "bool",
-                    },
-                    "agent_runner.config.deerflow_max_concurrent_subagents": {
-                        "description": "子智能体最大并发数",
-                        "type": "int",
-                    },
-                    "agent_runner.config.deerflow_recursion_limit": {
-                        "description": "递归深度上限",
-                        "type": "int",
-                    },
-                    "agent_runner.config.timeout": {
-                        "description": "超时时间（秒）",
-                        "type": "int",
-                    },
-                    "agent_runner.config.proxy": {
-                        "description": "代理地址",
-                        "type": "string",
                     },
                 },
             },

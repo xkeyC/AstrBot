@@ -4,27 +4,50 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages import third_party
+from astrbot.core.provider.entities import LLMResponse
+
+
+def _stage_ctx(config: dict) -> SimpleNamespace:
+    return SimpleNamespace(
+        astrbot_config=config,
+        plugin_manager=SimpleNamespace(
+            context=SimpleNamespace(
+                conversation_manager=MagicMock(),
+                persona_manager=MagicMock(),
+            )
+        ),
+    )
+
+
+def _provider_settings() -> dict:
+    return {
+        "streaming_response": False,
+        "unsupported_streaming_strategy": "turn_off",
+        "third_party_stream_consumption_close_timeout_sec": 30,
+    }
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("runner_type", "runner_class_name", "config_key"),
-    [
-        ("dify", "DifyAgentRunner", "dify_api_key"),
-        ("coze", "CozeAgentRunner", "coze_api_key"),
-        ("dashscope", "DashscopeAgentRunner", "dashscope_api_key"),
-        ("deerflow", "DeerFlowAgentRunner", "deerflow_api_key"),
-    ],
+    "runner_type", ["local", "dify", "coze", "dashscope", "deerflow", "unknown"]
 )
-async def test_third_party_runner_receives_inline_profile_config(
+async def test_third_party_stage_rejects_non_codex_runner(runner_type: str):
+    stage = third_party.ThirdPartyAgentSubStage()
+    config = {
+        "agent_runner": {"runner_type": runner_type, "config": {}},
+        "provider_settings": _provider_settings(),
+    }
+
+    with pytest.raises(ValueError, match="Unsupported third party agent runner"):
+        await stage.initialize(_stage_ctx(config))
+
+
+@pytest.mark.asyncio
+async def test_codex_runner_receives_inline_profile_config(
     monkeypatch: pytest.MonkeyPatch,
-    runner_type: str,
-    runner_class_name: str,
-    config_key: str,
 ):
-    inline_config = {config_key: "inline-secret"}
+    inline_config = {"model": "inline-model", "tool_call_timeout": 60}
     runner = MagicMock()
     runner.reset = AsyncMock()
     runner.get_final_llm_resp.return_value = LLMResponse(
@@ -51,7 +74,12 @@ async def test_third_party_runner_receives_inline_profile_config(
             runner_factory_calls.append(True)
             return runner
 
-    monkeypatch.setattr(third_party, runner_class_name, RunnerFactory)
+    monkeypatch.setattr(third_party, "CodexAgentRunner", RunnerFactory)
+    monkeypatch.setattr(third_party, "prepare_codex_request", AsyncMock())
+    monkeypatch.setattr(third_party, "try_steer", AsyncMock(return_value=None))
+    monkeypatch.setattr(third_party, "build_turn_input", MagicMock(return_value=[]))
+    registry = MagicMock()
+    monkeypatch.setattr(third_party, "active_event_registry", registry)
     monkeypatch.setattr(
         third_party, "AstrAgentContext", MagicMock(return_value=object())
     )
@@ -62,25 +90,11 @@ async def test_third_party_runner_receives_inline_profile_config(
     monkeypatch.setattr(third_party.Metric, "upload", AsyncMock(return_value=None))
 
     config = {
-        "agent_runner": {"runner_type": runner_type, "config": inline_config},
-        "provider_settings": {
-            "streaming_response": False,
-            "unsupported_streaming_strategy": "turn_off",
-            "third_party_stream_consumption_close_timeout_sec": 30,
-        },
+        "agent_runner": {"runner_type": "codex", "config": inline_config},
+        "provider_settings": _provider_settings(),
     }
     stage = third_party.ThirdPartyAgentSubStage()
-    await stage.initialize(
-        SimpleNamespace(
-            astrbot_config=config,
-            plugin_manager=SimpleNamespace(
-                context=SimpleNamespace(
-                    conversation_manager=MagicMock(),
-                    persona_manager=MagicMock(),
-                )
-            ),
-        )
-    )
+    await stage.initialize(_stage_ctx(config))
     stage._resolve_persona_custom_error_message = AsyncMock(return_value=None)
     event = MagicMock()
     event.message_str = "hello"
@@ -94,3 +108,5 @@ async def test_third_party_runner_receives_inline_profile_config(
     assert results == [None]
     assert runner.reset.await_args.kwargs["provider_config"] is inline_config
     assert runner_factory_calls == [True]
+    registry.register_agent_stop_callback.assert_called_once()
+    registry.unregister_agent_stop_callback.assert_called_once_with(event)

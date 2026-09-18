@@ -222,7 +222,7 @@ const props = defineProps({
 const { tm } = useModuleI18n('features/config');
 
 const runnerDialog = ref(false);
-const pendingRunnerType = ref('local');
+const pendingRunnerType = ref('codex');
 const runnerChangeAcknowledged = ref(false);
 const activeLocalTab = ref('model');
 
@@ -238,20 +238,13 @@ const aiEnabled = computed({
   }
 });
 
-const runnerType = computed(() => props.configData?.agent_runner?.runner_type || 'local');
+const runnerType = computed(() => props.configData?.agent_runner?.runner_type || 'codex');
 const runnerTypeMetadata = computed(() => (
   props.metadata?.agent_runner?.items?.['agent_runner.runner_type'] || {}
 ));
 
 const runnerOptions = computed(() => {
-  const availableTypes = runnerTypeMetadata.value.options || [
-    'local',
-    'dify',
-    'coze',
-    'dashscope',
-    'deerflow',
-    'codex'
-  ];
+  const availableTypes = runnerTypeMetadata.value.options || ['codex'];
   return availableTypes.map((value) => ({
     value,
     title: tm(`aiSettings.runners.${value}.title`),
@@ -263,7 +256,7 @@ const runnerOptions = computed(() => {
 const currentRunner = computed(() => (
   runnerOptions.value.find((runner) => runner.value === runnerType.value)
   || runnerOptions.value[0]
-  || { value: 'local', title: 'AI', description: '', summary: '' }
+  || { value: 'codex', title: 'AI', description: '', summary: '' }
 ));
 
 const runnerSettingsTitle = computed(() => (

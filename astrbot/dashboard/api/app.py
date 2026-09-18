@@ -16,6 +16,7 @@ from astrbot.dashboard.services.auth_service import AuthService
 from astrbot.dashboard.services.backup_service import BackupService
 from astrbot.dashboard.services.chat_service import ChatService
 from astrbot.dashboard.services.chatui_project_service import ChatUIProjectService
+from astrbot.dashboard.services.codex_service import CodexService
 from astrbot.dashboard.services.command_service import CommandService
 from astrbot.dashboard.services.config_service import (
     BotConfigService,
@@ -56,6 +57,7 @@ from .backups import legacy_router as legacy_backups_router
 from .bots import legacy_router as legacy_bots_router
 from .chat import legacy_router as legacy_chat_router
 from .chat_projects import legacy_router as legacy_chat_projects_router
+from .codex import legacy_router as legacy_codex_router
 from .config_profiles import legacy_router as legacy_config_profiles_router
 from .conversations import legacy_router as legacy_conversations_router
 from .cron import legacy_router as legacy_cron_router
@@ -110,6 +112,7 @@ def create_dashboard_asgi_app(
         backups=BackupService(db, core_lifecycle),
         chat=ChatService(db, core_lifecycle),
         chat_projects=ChatUIProjectService(db),
+        codex=CodexService(core_lifecycle),
         commands=CommandService(core_lifecycle.astrbot_config, core_lifecycle),
         conversations=ConversationService(db, core_lifecycle),
         cron=CronService(core_lifecycle),
@@ -188,6 +191,7 @@ def create_dashboard_asgi_app(
     app.include_router(legacy_providers_router)
     app.include_router(legacy_chat_router)
     app.include_router(legacy_chat_projects_router)
+    app.include_router(legacy_codex_router)
     app.include_router(legacy_conversations_router)
     app.include_router(legacy_cron_router)
     app.include_router(legacy_extensions_router)

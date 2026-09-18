@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any
 
-AGENT_RUNNER_TYPES = ("local", "dify", "coze", "dashscope", "deerflow", "codex")
-THIRD_PARTY_AGENT_RUNNER_TYPES = AGENT_RUNNER_TYPES[1:]
+logger = logging.getLogger("astrbot")
+
+DEFAULT_AGENT_RUNNER_TYPE = "codex"
+# "local" is kept only so internal code paths (tool_loop_agent, persona helpers)
+# and their tests keep working; it is no longer selectable and
+# ``normalize_agent_runner`` migrates it to Codex.
+AGENT_RUNNER_TYPES = ("codex", "local")
+SELECTABLE_AGENT_RUNNER_TYPES = ("codex",)
+THIRD_PARTY_AGENT_RUNNER_TYPES = ("codex",)
+# Runner types removed from this build; configs using them migrate to Codex.
+LEGACY_AGENT_RUNNER_TYPES = ("dify", "coze", "dashscope", "deerflow")
+
+_warned_migrated_runner_types: set[str] = set()
 
 AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
     "local": {
@@ -33,51 +45,6 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
             "tool_call_timeout": 120,
             "sanitize_context_by_modalities": False,
         },
-    },
-    "dify": {
-        "dify_api_type": "chat",
-        "dify_api_key": "",
-        "dify_api_base": "https://api.dify.ai/v1",
-        "dify_workflow_output_key": "astrbot_wf_output",
-        "dify_query_input_key": "astrbot_text_query",
-        "variables": {},
-        "timeout": 60,
-        "proxy": "",
-    },
-    "coze": {
-        "coze_api_key": "",
-        "bot_id": "",
-        "coze_api_base": "https://api.coze.cn",
-        "auto_save_history": True,
-        "timeout": 60,
-        "proxy": "",
-    },
-    "dashscope": {
-        "dashscope_app_type": "agent",
-        "dashscope_api_key": "",
-        "dashscope_app_id": "",
-        "rag_options": {
-            "pipeline_ids": [],
-            "file_ids": [],
-            "output_reference": False,
-        },
-        "variables": {},
-        "timeout": 60,
-        "proxy": "",
-    },
-    "deerflow": {
-        "deerflow_api_base": "http://127.0.0.1:2026",
-        "deerflow_api_key": "",
-        "deerflow_auth_header": "",
-        "deerflow_assistant_id": "lead_agent",
-        "deerflow_model_name": "",
-        "deerflow_thinking_enabled": False,
-        "deerflow_plan_mode": False,
-        "deerflow_subagent_enabled": False,
-        "deerflow_max_concurrent_subagents": 3,
-        "deerflow_recursion_limit": 1000,
-        "timeout": 300,
-        "proxy": "",
     },
     "codex": {
         "codex_home": "",
@@ -158,33 +125,43 @@ def _normalize_value(value: Any, default: Any) -> Any:
     return copy.deepcopy(value) if value is not None else copy.deepcopy(default)
 
 
+def _warn_runner_migration(runner_type: object) -> None:
+    key = repr(runner_type)
+    if key in _warned_migrated_runner_types:
+        return
+    _warned_migrated_runner_types.add(key)
+    logger.warning(
+        "Agent Runner type %r is no longer supported; migrating to %r with "
+        "default configuration.",
+        runner_type,
+        DEFAULT_AGENT_RUNNER_TYPE,
+    )
+
+
 def normalize_agent_runner(agent_runner: object) -> dict[str, Any]:
     """Validate and normalize a complete Agent Runner configuration.
+
+    Codex is the only supported Agent Runner. Any other value (legacy runner
+    types such as ``local``, ``dify``, ``coze``, ``dashscope`` or ``deerflow``,
+    unknown or missing types, or a non-object root) is migrated to Codex with
+    its default configuration, logging a warning once per type.
 
     Args:
         agent_runner: Untrusted root Agent Runner configuration.
 
     Returns:
-        A normalized configuration containing only fields for the selected runner.
-
-    Raises:
-        ValueError: If the root value or runner type is invalid.
+        A normalized configuration containing only fields for the Codex runner.
     """
     if not isinstance(agent_runner, dict):
-        raise ValueError("agent_runner must be an object")
+        agent_runner = {}
     runner_type = agent_runner.get("runner_type")
-    if runner_type not in AGENT_RUNNER_TYPES:
-        raise ValueError(f"Unsupported Agent Runner type: {runner_type}")
+    if runner_type not in SELECTABLE_AGENT_RUNNER_TYPES:
+        _warn_runner_migration(runner_type)
+        return {
+            "runner_type": DEFAULT_AGENT_RUNNER_TYPE,
+            "config": get_agent_runner_config_default(DEFAULT_AGENT_RUNNER_TYPE),
+        }
     config = agent_runner.get("config", {})
     default = AGENT_RUNNER_CONFIG_DEFAULTS[runner_type]
     normalized = _normalize_value(config, default)
-    if runner_type == "local":
-        ratio = normalized["compression"]["keep_recent_ratio"]
-        normalized["compression"]["keep_recent_ratio"] = min(0.3, max(0.0, ratio))
-        if normalized["model"]["request_max_retries"] < 1:
-            normalized["model"]["request_max_retries"] = 1
-        if normalized["misc"]["max_steps"] < 1:
-            normalized["misc"]["max_steps"] = 1
-        if normalized["compression"]["trim_turns"] < 1:
-            normalized["compression"]["trim_turns"] = 1
     return {"runner_type": runner_type, "config": normalized}
