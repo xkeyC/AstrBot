@@ -3383,13 +3383,21 @@ CONFIG_METADATA_3 = {
                     "agent_runner.runner_type": {
                         "description": "执行器",
                         "type": "string",
-                        "options": ["local", "dify", "coze", "dashscope", "deerflow"],
+                        "options": [
+                            "local",
+                            "dify",
+                            "coze",
+                            "dashscope",
+                            "deerflow",
+                            "codex",
+                        ],
                         "labels": [
                             "内置 Agent",
                             "Dify",
                             "Coze",
                             "阿里云百炼应用",
                             "DeerFlow",
+                            "Codex",
                         ],
                         "_special": "agent_runner_type",
                         "runner_defaults": {
@@ -3400,6 +3408,7 @@ CONFIG_METADATA_3 = {
                                 "coze",
                                 "dashscope",
                                 "deerflow",
+                                "codex",
                             )
                         },
                         "condition": {
@@ -3594,6 +3603,110 @@ CONFIG_METADATA_3 = {
                     "agent_runner.config.proxy": {
                         "description": "代理地址",
                         "type": "string",
+                    },
+                },
+            },
+            "codex_runner": {
+                "description": "Codex 配置",
+                "hint": "通过 codex app-server 运行 Agent 循环，插件工具以 Codex 动态工具的形式暴露。",
+                "type": "object",
+                "condition": {
+                    "provider_settings.enable": True,
+                    "agent_runner.runner_type": "codex",
+                },
+                "items": {
+                    "agent_runner.config.codex_bin": {
+                        "description": "codex 可执行文件路径",
+                        "type": "string",
+                        "hint": "留空则从 PATH 查找。",
+                    },
+                    "agent_runner.config.codex_home": {
+                        "description": "CODEX_HOME",
+                        "type": "string",
+                        "hint": "留空使用默认 ~/.codex（含登录状态与 config.toml）。",
+                    },
+                    "agent_runner.config.codex_cli_overrides": {
+                        "description": "全局 --config 覆盖",
+                        "type": "list",
+                        "items": {"type": "string"},
+                        "hint": "启动 app-server 时传入的 key=value 列表。",
+                    },
+                    "agent_runner.config.model": {
+                        "description": "模型",
+                        "type": "string",
+                        "hint": "留空使用 Codex 默认模型。",
+                    },
+                    "agent_runner.config.model_provider": {
+                        "description": "模型提供商 ID",
+                        "type": "string",
+                        "hint": "Codex config.toml 中 model_providers 的键，留空使用默认。",
+                    },
+                    "agent_runner.config.reasoning_effort": {
+                        "description": "推理强度",
+                        "type": "string",
+                        "options": ["", "minimal", "low", "medium", "high", "xhigh"],
+                    },
+                    "agent_runner.config.sandbox": {
+                        "description": "沙箱模式",
+                        "type": "string",
+                        "options": [
+                            "read-only",
+                            "workspace-write",
+                            "danger-full-access",
+                        ],
+                        "hint": "控制 Codex 内置 shell / 文件修改能力的范围。群聊场景建议只读。",
+                    },
+                    "agent_runner.config.approval_policy": {
+                        "description": "审批策略",
+                        "type": "string",
+                        "options": ["never", "on-request", "untrusted"],
+                    },
+                    "agent_runner.config.auto_approve": {
+                        "description": "自动批准审批请求",
+                        "type": "bool",
+                        "hint": "审批策略不为 never 时生效；关闭则全部拒绝。",
+                    },
+                    "agent_runner.config.cwd": {
+                        "description": "工作目录",
+                        "type": "string",
+                        "hint": "留空则每个会话使用 data/codex_workspaces/<会话>。",
+                    },
+                    "agent_runner.config.developer_instructions": {
+                        "description": "附加开发者指令",
+                        "type": "text",
+                    },
+                    "agent_runner.config.base_instructions": {
+                        "description": "替换基础指令",
+                        "type": "text",
+                        "hint": "留空保留 Codex 自带的基础指令。",
+                    },
+                    "agent_runner.config.thread_config": {
+                        "description": "线程配置覆盖",
+                        "type": "dict",
+                        "items": {},
+                        "hint": "以 Codex config.toml 的点分键覆盖线程配置。",
+                    },
+                    "agent_runner.config.show_commentary": {
+                        "description": "输出过程说明",
+                        "type": "bool",
+                        "hint": "把 Codex commentary 阶段的消息也发送给用户。",
+                    },
+                    "agent_runner.config.safety_mode": {
+                        "description": "注入健康模式提示词",
+                        "type": "bool",
+                    },
+                    "agent_runner.config.sync_history": {
+                        "description": "同步对话记录",
+                        "type": "bool",
+                        "hint": "把问答镜像到 AstrBot 对话历史，仅供展示；上下文由 Codex 线程维护。",
+                    },
+                    "agent_runner.config.tool_call_timeout": {
+                        "description": "工具调用超时（秒）",
+                        "type": "int",
+                    },
+                    "agent_runner.config.turn_timeout": {
+                        "description": "单轮超时（秒）",
+                        "type": "int",
                     },
                 },
             },

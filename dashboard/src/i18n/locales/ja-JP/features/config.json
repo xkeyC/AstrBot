@@ -129,6 +129,11 @@
         "title": "DeerFlow",
         "summary": "現在、AI 会話は DeerFlow によって処理されています。",
         "description": "DeerFlow サービスに接続し、実行設定を行います。"
+      },
+      "codex": {
+        "title": "Codex",
+        "summary": "AI conversations are currently handled by Codex (app-server), with AstrBot plugin tools bridged in.",
+        "description": "Let Codex orchestrate and execute the agent while AstrBot keeps plugins and message handling."
       }
     }
   },

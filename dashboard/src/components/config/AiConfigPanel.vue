@@ -249,7 +249,8 @@ const runnerOptions = computed(() => {
     'dify',
     'coze',
     'dashscope',
-    'deerflow'
+    'deerflow',
+    'codex'
   ];
   return availableTypes.map((value) => ({
     value,

@@ -80,6 +80,30 @@
         "proxy": { "description": "Proxy URL" }
       } }
     },
+    "codex_runner": {
+      "description": "Codex Configuration",
+      "hint": "Run the agent loop in codex app-server; plugin tools are exposed to Codex as dynamic tools.",
+      "agent_runner": { "config": {
+        "codex_bin": {"description": "codex Executable Path", "hint": "Leave empty to look it up in PATH."},
+        "codex_home": {"description": "CODEX_HOME", "hint": "Leave empty to use the default ~/.codex (login state and config.toml)."},
+        "codex_cli_overrides": {"description": "Global --config Overrides", "hint": "key=value entries passed when starting app-server."},
+        "model": {"description": "Model", "hint": "Leave empty to use Codex's default model."},
+        "model_provider": {"description": "Model Provider ID", "hint": "A model_providers key from Codex config.toml; empty uses the default."},
+        "reasoning_effort": {"description": "Reasoning Effort"},
+        "sandbox": {"description": "Sandbox Mode", "hint": "Scope of Codex's built-in shell and file edits. Read-only is recommended for group chats."},
+        "approval_policy": {"description": "Approval Policy"},
+        "auto_approve": {"description": "Auto-approve Requests", "hint": "Applies when the approval policy is not never; when off, every request is declined."},
+        "cwd": {"description": "Working Directory", "hint": "Leave empty to use data/codex_workspaces/<session> per session."},
+        "developer_instructions": {"description": "Extra Developer Instructions"},
+        "base_instructions": {"description": "Replace Base Instructions", "hint": "Leave empty to keep Codex's built-in base instructions."},
+        "thread_config": {"description": "Thread Config Overrides", "hint": "Dotted Codex config.toml keys applied to each thread."},
+        "show_commentary": {"description": "Send Progress Commentary", "hint": "Also send Codex commentary-phase messages to the user."},
+        "safety_mode": {"description": "Inject Safety Prompt"},
+        "sync_history": {"description": "Mirror Conversation History", "hint": "Copy exchanges into AstrBot history for display; Codex keeps its own context."},
+        "tool_call_timeout": {"description": "Tool Call Timeout (seconds)"},
+        "turn_timeout": {"description": "Turn Timeout (seconds)"}
+      } }
+    },
     "ai": {
       "description": "Model",
       "hint": "Configure the built-in Agent's chat models and shared image caption and speech models.",

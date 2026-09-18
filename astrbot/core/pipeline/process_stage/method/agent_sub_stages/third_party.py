@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 import astrbot.core.provider.provider as provider_core
 from astrbot.core import logger
+from astrbot.core.agent.runners.codex.codex_agent_runner import CodexAgentRunner
+from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
 from astrbot.core.agent.runners.coze.coze_agent_runner import CozeAgentRunner
 from astrbot.core.agent.runners.dashscope.dashscope_agent_runner import (
     DashscopeAgentRunner,
@@ -36,11 +38,13 @@ from astrbot.core.provider.entities import (
     ProviderRequest,
 )
 from astrbot.core.star.star_handler import EventType
+from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.config_number import coerce_int_config
 from astrbot.core.utils.metrics import Metric
 
 from .....astr_agent_context import AgentContextWrapper, AstrAgentContext
 from ....context import PipelineContext, call_event_hook
+from .codex_request import prepare_codex_request
 
 THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY = "_third_party_runner_error"
 STREAM_CONSUMPTION_CLOSE_TIMEOUT_SEC = 30
@@ -337,6 +341,15 @@ class ThirdPartyAgentSubStage(Stage):
         if not req.prompt and not req.image_urls and not req.audio_urls:
             return
 
+        if self.runner_type == CODEX_RUNNER_TYPE:
+            await prepare_codex_request(
+                event,
+                req,
+                self.ctx.plugin_manager.context,
+                self.conf,
+                self.runner_config,
+            )
+
         custom_error_message = await self._resolve_persona_custom_error_message(event)
         set_persona_custom_error_message_on_event(event, custom_error_message)
 
@@ -352,6 +365,11 @@ class ThirdPartyAgentSubStage(Stage):
             runner = DashscopeAgentRunner[AstrAgentContext]()
         elif self.runner_type == DEERFLOW_PROVIDER_TYPE:
             runner = DeerFlowAgentRunner[AstrAgentContext]()
+        elif self.runner_type == CODEX_RUNNER_TYPE:
+            runner = CodexAgentRunner[AstrAgentContext]()
+            active_event_registry.register_agent_stop_callback(
+                event, runner.request_stop
+            )
         else:
             raise ValueError(
                 f"Unsupported third party agent runner type: {self.runner_type}",
@@ -397,7 +415,13 @@ class ThirdPartyAgentSubStage(Stage):
                 request=req,
                 run_context=AgentContextWrapper(
                     context=astr_agent_ctx,
-                    tool_call_timeout=120,
+                    tool_call_timeout=coerce_int_config(
+                        self.runner_config.get("tool_call_timeout", 120),
+                        default=120,
+                        min_value=1,
+                        field_name="tool_call_timeout",
+                        source="Agent Runner config",
+                    ),
                 ),
                 agent_hooks=MAIN_AGENT_HOOKS,
                 provider_config=self.runner_config,
@@ -435,6 +459,8 @@ class ThirdPartyAgentSubStage(Stage):
                 stream_watchdog_task.cancel()
             if not streaming_used:
                 await close_runner_once()
+            if self.runner_type == CODEX_RUNNER_TYPE:
+                active_event_registry.unregister_agent_stop_callback(event)
 
         asyncio.create_task(
             Metric.upload(

@@ -1,0 +1,124 @@
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from astrbot.core.agent.hooks import BaseAgentRunHooks
+from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.agent.runners.codex.app_server_client import (
+    default_server_request_response,
+)
+from astrbot.core.agent.runners.codex.codex_agent_runner import (
+    build_additional_context,
+    build_turn_input,
+)
+from astrbot.core.agent.runners.codex.tool_bridge import CodexToolBridge
+from astrbot.core.agent.tool import FunctionTool, ToolSet
+from astrbot.core.provider.entities import ProviderRequest
+
+
+async def _echo(event, text: str = ""):
+    return f"echo:{text}"
+
+
+def _tool(name: str, params: dict | None = None) -> FunctionTool:
+    return FunctionTool(
+        name=name,
+        description=f"{name} tool",
+        parameters=params
+        if params is not None
+        else {"type": "object", "properties": {"text": {"type": "string"}}},
+        handler=_echo,
+    )
+
+
+def test_bridge_sanitizes_and_dedupes_names():
+    bridge = CodexToolBridge(
+        ToolSet([_tool("a.b"), _tool("a_b"), _tool("mcp__x"), _tool("ok", {})])
+    )
+    names = [spec["name"] for spec in bridge.specs]
+    assert names == ["a_b", "a_b_2", "ext_mcp__x", "ok"]
+    ok_spec = next(s for s in bridge.specs if s["name"] == "ok")
+    assert ok_spec["inputSchema"] == {"type": "object", "properties": {}}
+    [namespace] = bridge.dynamic_tools()
+    assert namespace["type"] == "namespace"
+    assert namespace["name"] == "astrbot"
+
+
+def test_bridge_fingerprint_tracks_tool_set():
+    a = CodexToolBridge(ToolSet([_tool("x")]))
+    b = CodexToolBridge(ToolSet([_tool("x")]))
+    c = CodexToolBridge(ToolSet([_tool("x"), _tool("y")]))
+    assert a.fingerprint == b.fingerprint != c.fingerprint
+    assert CodexToolBridge(None).dynamic_tools() == []
+
+
+def test_bridge_call_runs_tool_and_hooks():
+    bridge = CodexToolBridge(ToolSet([_tool("echo")]))
+    event = SimpleNamespace(get_result=lambda: None)
+    ctx = ContextWrapper(context=SimpleNamespace(event=event), tool_call_timeout=5)
+    seen = []
+
+    class Hooks(BaseAgentRunHooks):
+        async def on_tool_start(self, run_context, tool, tool_args):
+            seen.append(("start", tool.name, tool_args))
+
+        async def on_tool_end(self, run_context, tool, tool_args, tool_result):
+            seen.append(("end", tool.name))
+
+    result = asyncio.run(
+        bridge.call(
+            {
+                "namespace": "astrbot",
+                "tool": "echo",
+                "arguments": {"text": "hi", "junk": 1},
+            },
+            ctx,
+            Hooks(),
+        )
+    )
+    assert result == {
+        "contentItems": [{"type": "inputText", "text": "echo:hi"}],
+        "success": True,
+    }
+    assert seen == [("start", "echo", {"text": "hi"}), ("end", "echo")]
+
+    missing = asyncio.run(
+        bridge.call({"namespace": "astrbot", "tool": "nope"}, ctx, Hooks())
+    )
+    assert missing["success"] is False
+
+
+def test_turn_input_orders_context_prompt_and_media():
+    req = ProviderRequest(prompt="hello")
+    req.add_temporary_context("kb", "retrieved facts")
+    req.add_persistent_context("message_meta", "Sender: alice")
+    req.image_urls = ["https://example.com/a.png", "C:/tmp/b.png"]
+    items = build_turn_input(req)
+    texts = [i.get("text", "") for i in items if i["type"] == "text"]
+    assert "retrieved facts" in texts[0]
+    assert "Sender: alice" in texts[1]
+    assert texts[2] == "hello"
+    assert items[-2] == {"type": "image", "url": "https://example.com/a.png"}
+    assert items[-1] == {"type": "localImage", "path": "C:/tmp/b.png"}
+
+
+def test_additional_context_maps_anchors_and_system_prompt():
+    req = ProviderRequest(prompt="x", system_prompt=" be nice ")
+    req.set_context_anchor("persona", "cat girl")
+    assert build_additional_context(req) == {
+        "astrbot_system_prompt": {"value": "be nice", "kind": "application"},
+        "astrbot_persona": {"value": "cat girl", "kind": "application"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "key"),
+    [
+        ("item/tool/call", "success"),
+        ("item/commandExecution/requestApproval", "decision"),
+        ("item/fileChange/requestApproval", "decision"),
+    ],
+)
+def test_default_server_request_response_is_valid(method, key):
+    assert key in default_server_request_response(method)

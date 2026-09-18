@@ -4,6 +4,10 @@ from sqlmodel import col
 from astrbot.api import sp, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core import logger
+from astrbot.core.agent.runners.codex.constants import (
+    CODEX_RUNNER_TYPE,
+    CODEX_THREAD_STATE_KEY,
+)
 from astrbot.core.agent.runners.deerflow.constants import (
     DEERFLOW_PROVIDER_TYPE,
     DEERFLOW_THREAD_ID_KEY,
@@ -19,6 +23,7 @@ THIRD_PARTY_AGENT_RUNNER_KEY = {
     "coze": "coze_conversation_id",
     "dashscope": "dashscope_conversation_id",
     DEERFLOW_PROVIDER_TYPE: DEERFLOW_THREAD_ID_KEY,
+    CODEX_RUNNER_TYPE: CODEX_THREAD_STATE_KEY,
 }
 THIRD_PARTY_AGENT_RUNNER_STR = ", ".join(THIRD_PARTY_AGENT_RUNNER_KEY.keys())
 

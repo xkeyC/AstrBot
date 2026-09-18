@@ -109,6 +109,11 @@
         "title": "DeerFlow",
         "summary": "当前由 DeerFlow 处理 AI 对话。",
         "description": "连接 DeerFlow 服务并配置它的运行参数。"
+      },
+      "codex": {
+        "title": "Codex",
+        "summary": "AI 对话当前由 Codex（app-server）处理，AstrBot 插件工具已桥接。",
+        "description": "由 Codex 负责 Agent 编排与执行，AstrBot 保留插件与消息处理能力。"
       }
     }
   },

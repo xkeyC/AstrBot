@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-AGENT_RUNNER_TYPES = ("local", "dify", "coze", "dashscope", "deerflow")
+AGENT_RUNNER_TYPES = ("local", "dify", "coze", "dashscope", "deerflow", "codex")
 THIRD_PARTY_AGENT_RUNNER_TYPES = AGENT_RUNNER_TYPES[1:]
 
 AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -78,6 +78,26 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "deerflow_recursion_limit": 1000,
         "timeout": 300,
         "proxy": "",
+    },
+    "codex": {
+        "codex_bin": "",
+        "codex_home": "",
+        "codex_cli_overrides": [],
+        "model": "",
+        "model_provider": "",
+        "reasoning_effort": "",
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "auto_approve": False,
+        "cwd": "",
+        "developer_instructions": "",
+        "base_instructions": "",
+        "thread_config": {},
+        "show_commentary": False,
+        "safety_mode": False,
+        "sync_history": True,
+        "tool_call_timeout": 120,
+        "turn_timeout": 600,
     },
 }
 

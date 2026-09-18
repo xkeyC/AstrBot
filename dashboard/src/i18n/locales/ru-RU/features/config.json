@@ -109,6 +109,11 @@
                 "title": "DeerFlow",
                 "summary": "Диалоги ИИ обрабатываются DeerFlow.",
                 "description": "Подключите DeerFlow и настройте параметры выполнения."
+            },
+            "codex": {
+              "title": "Codex",
+              "summary": "AI conversations are currently handled by Codex (app-server), with AstrBot plugin tools bridged in.",
+              "description": "Let Codex orchestrate and execute the agent while AstrBot keeps plugins and message handling."
             }
         }
     },
