@@ -131,6 +131,8 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
                 "sender_id": context.context.event.get_sender_id(),
                 "note": note,
                 "origin": "tool",
+                # The request that created the task, quoted when it runs (K12).
+                "origin_message": (context.context.event.message_str or "")[:1000],
             }
 
             tz_name = str(

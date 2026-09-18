@@ -34,3 +34,22 @@ def test_tool_results_from_both_sources():
     )
     out = _tool_results(result, [{"role": "tool", "tool_call_id": "b", "content": "2"}])
     assert out == {"a": "1", "b": "2"}
+
+
+def test_cron_and_background_prompts_quote_origin():
+    from astrbot.core.agent.runners.codex.wake import (
+        build_background_prompt,
+        build_cron_prompt,
+    )
+
+    cron = build_cron_prompt(
+        {"name": "daily", "run_started_at": "t"},
+        {"note": "send the weather", "origin_message": "every day at 8 send weather"},
+    )
+    assert "> every day at 8 send weather" in cron
+    assert "Do not create, change or cancel scheduled tasks" in cron
+    assert cron.strip().endswith("</scheduled_task>")
+    bg = build_background_prompt(
+        {"tool_name": "render", "task_id": "1", "result": "done"}, "render my video"
+    )
+    assert "> render my video" in bg and "Result:\ndone" in bg

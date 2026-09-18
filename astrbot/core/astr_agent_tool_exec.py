@@ -544,6 +544,17 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             task_result.update(extra_result_fields)
         extras = {"background_task_result": task_result}
 
+        runner_type = (
+            (ctx.get_config(umo=event.unified_msg_origin) or {}).get("agent_runner", {})
+            or {}
+        ).get("runner_type")
+        if runner_type == "codex":
+            # K12: deliver into the chat's own Codex thread.
+            from astrbot.core.agent.runners.codex.wake import run_codex_background_wake
+
+            await run_codex_background_wake(ctx, event, task_result)
+            return
+
         session = MessageSession.from_str(event.unified_msg_origin)
         cron_event = CronMessageEvent(
             context=ctx,

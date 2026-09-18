@@ -402,6 +402,18 @@ class CronJobManager:
         delivery_session_str: str = "",
     ) -> None:
         """Woke the main agent to handle the cron job message."""
+        cfg_for_runner = self.ctx.get_config(umo=delivery_session_str or None)
+        if (cfg_for_runner.get("agent_runner", {}) or {}).get("runner_type") == "codex":
+            from astrbot.core.agent.runners.codex.wake import run_codex_cron_job
+
+            await run_codex_cron_job(
+                self.ctx,
+                message=message,
+                session_str=session_str,
+                extras=extras,
+                delivery_session_str=delivery_session_str,
+            )
+            return
         from astrbot.core.astr_main_agent import (
             MainAgentBuildConfig,
             _get_session_conv,
