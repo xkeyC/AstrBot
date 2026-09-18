@@ -56,6 +56,8 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "web_search": False,
         "model": "",
         "model_provider": "",
+        # Custom Responses-API endpoints: [{id, name, base_url, api_key, wire_api}]
+        "model_providers": [],
         "reasoning_effort": "",
         "sandbox": "read-only",
         "approval_policy": "never",

@@ -180,3 +180,23 @@ def test_read_skill_rejects_absolute_and_unc(tmp_path):
         "C:x",
     ):
         assert read_skill_file(skills, "s", bad).startswith("error"), bad
+
+
+def test_model_providers_map_to_codex_overrides(tmp_path):
+    opts = engine_options(
+        {
+            "codex_home": str(tmp_path),
+            "tool_mode": "direct",
+            "model_provider": "my.relay",
+            "model_providers": [
+                {"id": "my.relay", "base_url": "https://r/v1", "api_key": "sk-1"},
+                {"id": "no-url"},
+                "junk",
+            ],
+        }
+    )
+    cfg = opts["config"]
+    assert cfg["model_providers.my_relay.base_url"] == "https://r/v1"
+    assert cfg["model_providers.my_relay.experimental_bearer_token"] == "sk-1"
+    assert cfg["model_providers.my_relay.wire_api"] == "responses"
+    assert not any(k.startswith("model_providers.no-url") for k in cfg)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import time
 import typing as T
@@ -97,6 +98,7 @@ def engine_options(cfg: dict) -> JsonObject:
         config["model_provider"] = provider
     if effort := cfg.get("reasoning_effort"):
         config["model_reasoning_effort"] = effort
+    config.update(model_provider_overrides(cfg.get("model_providers")))
     config.update(dict(cfg.get("thread_config") or {}))
     options: JsonObject = {"codex_home": codex_home, "config": config}
     if tool_mode in CODE_MODES:
@@ -111,6 +113,25 @@ def engine_options(cfg: dict) -> JsonObject:
     if native_exec and (exe := cfg.get("codex_self_exe")):
         options["codex_self_exe"] = exe
     return options
+
+
+def model_provider_overrides(providers: T.Any) -> JsonObject:
+    """Map WebUI-managed providers to Codex `model_providers.<id>` overrides."""
+    out: JsonObject = {}
+    for p in providers if isinstance(providers, list) else []:
+        if not isinstance(p, dict):
+            continue
+        pid = re.sub(r"[^A-Za-z0-9_-]", "_", str(p.get("id") or "").strip())
+        base_url = str(p.get("base_url") or "").strip()
+        if not pid or not base_url:
+            continue
+        prefix = f"model_providers.{pid}"
+        out[f"{prefix}.name"] = str(p.get("name") or pid)
+        out[f"{prefix}.base_url"] = base_url
+        out[f"{prefix}.wire_api"] = str(p.get("wire_api") or "responses")
+        if key := str(p.get("api_key") or "").strip():
+            out[f"{prefix}.experimental_bearer_token"] = key
+    return out
 
 
 def system_prompt(cfg: dict) -> str:
