@@ -260,12 +260,14 @@ def test_memory_thread_config_limits_global_to_permitted_private_chats(tmp_path)
         memory_thread_config(cfg, "u", event(None))["memories.may_write_global"]
         is False
     )
+    exe = tmp_path / "codex.exe"
+    exe.write_bytes(b"")
     opts = engine_options(
         {
             "codex_home": str(tmp_path),
             "tool_mode": "direct",
             "memory_enabled": True,
-            "codex_self_exe": "C:/codex.exe",
+            "codex_self_exe": str(exe),
         }
     )
-    assert opts["codex_self_exe"] == "C:/codex.exe"
+    assert opts["codex_self_exe"] == str(exe)

@@ -47,10 +47,29 @@ def _import_binding():
     return codex_astrbot
 
 
-def find_code_mode_host(explicit: str = "") -> str | None:
-    """Locate codex-code-mode-host: explicit path, next to `codex` on PATH, or none."""
+def bundled_executable(name: str) -> str | None:
+    """Helper executable shipped inside the codex_astrbot wheel, if any."""
+    try:
+        from codex_astrbot import bundled_executable as find  # type: ignore
+    except ImportError:
+        return None
+    return find(name)
+
+
+def find_codex_exe(explicit: str = "") -> str | None:
+    """`codex` executable for sandboxed exec / memory consolidation."""
     if explicit:
         return explicit if Path(explicit).is_file() else None
+    return bundled_executable("codex")
+
+
+def find_code_mode_host(explicit: str = "") -> str | None:
+    """Locate codex-code-mode-host: explicit path, the one bundled with the
+    binding (matches its protocol), next to `codex` on PATH, or none."""
+    if explicit:
+        return explicit if Path(explicit).is_file() else None
+    if bundled := bundled_executable("codex-code-mode-host"):
+        return bundled
     exe = shutil.which("codex")
     if not exe:
         return None

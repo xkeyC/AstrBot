@@ -39,6 +39,7 @@ from .native import (
     CodexEngine,
     JsonObject,
     find_code_mode_host,
+    find_codex_exe,
 )
 from .tool_bridge import CodexToolBridge
 
@@ -118,7 +119,7 @@ def engine_options(cfg: dict) -> JsonObject:
                 "code_mode_only turns will fail."
             )
     if (native_exec or cfg.get("memory_enabled")) and (
-        exe := cfg.get("codex_self_exe")
+        exe := find_codex_exe(str(cfg.get("codex_self_exe") or ""))
     ):
         # Also needed by memory consolidation, which runs as a Codex sub-agent
         # editing the memory folder; chat threads still start without it.
