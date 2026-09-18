@@ -37,6 +37,7 @@ import zhCNPersona from './locales/zh-CN/features/persona.json';
 import zhCNCommand from './locales/zh-CN/features/command.json';
 import zhCNSubagent from './locales/zh-CN/features/subagent.json';
 import zhCNCodex from './locales/zh-CN/features/codex.json';
+import zhCNPermissions from './locales/zh-CN/features/permissions.json';
 import zhCNWelcome from './locales/zh-CN/features/welcome.json';
 
 import zhCNErrors from './locales/zh-CN/messages/errors.json';
@@ -79,6 +80,7 @@ import enUSPersona from './locales/en-US/features/persona.json';
 import enUSCommand from './locales/en-US/features/command.json';
 import enUSSubagent from './locales/en-US/features/subagent.json';
 import enUSCodex from './locales/en-US/features/codex.json';
+import enUSPermissions from './locales/en-US/features/permissions.json';
 import enUSWelcome from './locales/en-US/features/welcome.json';
 
 import enUSErrors from './locales/en-US/messages/errors.json';
@@ -121,6 +123,7 @@ import ruRUPersona from './locales/ru-RU/features/persona.json';
 import ruRUCommand from './locales/ru-RU/features/command.json';
 import ruRUSubagent from './locales/ru-RU/features/subagent.json';
 import ruRUCodex from './locales/ru-RU/features/codex.json';
+import ruRUPermissions from './locales/ru-RU/features/permissions.json';
 import ruRUWelcome from './locales/ru-RU/features/welcome.json';
 
 import ruRUErrors from './locales/ru-RU/messages/errors.json';
@@ -163,6 +166,7 @@ import jaJPPersona from './locales/ja-JP/features/persona.json';
 import jaJPCommand from './locales/ja-JP/features/command.json';
 import jaJPSubagent from './locales/ja-JP/features/subagent.json';
 import jaJPCodex from './locales/ja-JP/features/codex.json';
+import jaJPPermissions from './locales/ja-JP/features/permissions.json';
 import jaJPWelcome from './locales/ja-JP/features/welcome.json';
 
 import jaJPErrors from './locales/ja-JP/messages/errors.json';
@@ -213,6 +217,7 @@ export const translations = {
       command: zhCNCommand,
       subagent: zhCNSubagent,
       codex: zhCNCodex,
+      permissions: zhCNPermissions,
       welcome: zhCNWelcome
     },
     messages: {
@@ -263,6 +268,7 @@ export const translations = {
       command: enUSCommand,
       subagent: enUSSubagent,
       codex: enUSCodex,
+      permissions: enUSPermissions,
       welcome: enUSWelcome
     },
     messages: {
@@ -313,6 +319,7 @@ export const translations = {
       command: ruRUCommand,
       subagent: ruRUSubagent,
       codex: ruRUCodex,
+      permissions: ruRUPermissions,
       welcome: ruRUWelcome
     },
     messages: {
@@ -363,6 +370,7 @@ export const translations = {
       command: jaJPCommand,
       subagent: jaJPSubagent,
       codex: jaJPCodex,
+      permissions: jaJPPermissions,
       welcome: jaJPWelcome
     },
     messages: {

@@ -14,6 +14,7 @@
   },
   "subagent": "サブエージェント編成",
   "codex": "Codex",
+  "permissions": "権限ルール",
   "toolUse": "MCP",
   "extension": "プラグイン",
   "extensionTabs": {

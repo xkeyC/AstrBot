@@ -47,6 +47,11 @@ const sidebarItem: menu[] = [
     to: '/codex',
   },
   {
+    title: 'core.navigation.permissions',
+    icon: 'mdi-shield-account-outline',
+    to: '/permissions',
+  },
+  {
     title: 'core.navigation.config',
     icon: 'mdi-cog',
     to: '/config',

@@ -1,0 +1,101 @@
+{
+  "page": {
+    "title": "Permission Rules",
+    "subtitle": "Per-user rules that restrict tools and MCP servers or override persona, model, native execution and global memory (default config profile)."
+  },
+  "actions": {
+    "refresh": "Refresh",
+    "save": "Save",
+    "close": "Close"
+  },
+  "rules": {
+    "title": "Rules",
+    "subtitle": "Rules are evaluated top to bottom; the first enabled rule whose conditions match the sender wins. Senders matched by no rule get the default (unrestricted) policy.",
+    "add": "Add rule",
+    "empty": "No rules yet. Everyone uses the default policy.",
+    "name": "Name",
+    "namePlaceholder": "e.g. Restricted group members",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "duplicate": "Duplicate",
+    "delete": "Delete",
+    "expand": "Expand",
+    "collapse": "Collapse",
+    "unnamed": "Rule {index}",
+    "copyName": "{name} (copy)"
+  },
+  "match": {
+    "syntaxTitle": "Match condition syntax (a rule matches when any of its conditions matches):",
+    "syntaxGroupSender": "that sender in that group",
+    "syntaxSender": "that sender anywhere (private or group chats)",
+    "syntaxGroup": "everyone in that group",
+    "syntaxRole": "by AstrBot role",
+    "syntaxAll": "everyone",
+    "none": "No conditions",
+    "label": "Match conditions",
+    "hint": "Press Enter, space or comma after each condition: 123456/7890, p_7890, g_123456, role:admin, role:member, *",
+    "errorRole": "\"{condition}\": role must be admin or member",
+    "errorEmptyId": "\"{condition}\": the ID part is empty",
+    "errorSyntax": "\"{condition}\" is not a valid condition and will never match",
+    "errorNone": "This rule has no conditions and will never match"
+  },
+  "fields": {
+    "toolsTitle": "Tools",
+    "overridesTitle": "Overrides",
+    "toolsAllow": "Allowed tools",
+    "toolsAllowHint": "Tool name globs (e.g. web_*). If set, only matching tools may be called.",
+    "toolsDeny": "Denied tools",
+    "toolsDenyHint": "Tool name globs that may never be called. Deny always wins.",
+    "mcpAllow": "Allowed MCP servers",
+    "mcpAllowHint": "MCP server name globs. If set, only tools from matching servers may be called.",
+    "mcpDeny": "Denied MCP servers",
+    "mcpDenyHint": "MCP server name globs whose tools may never be called. Deny always wins.",
+    "persona": "Persona",
+    "personaHint": "Overrides the persona for matching senders.",
+    "personaMissing": "{id} (not found)",
+    "noOverride": "(no override)",
+    "model": "Model",
+    "modelHint": "Overrides the Codex model for matching senders. Leave empty to use the default.",
+    "modelCacheWarning": "Switching the model mid-thread discards the prompt cache, so the next turn costs more.",
+    "nativeExec": "Native command execution",
+    "nativeExecHint": "Only matters when native Codex exec tools are enabled.",
+    "globalMemory": "Write global memory",
+    "globalMemoryHint": "Whether this sender's private chats may write to the global memory store (only when Codex memories are enabled)."
+  },
+  "triState": {
+    "inherit": "Inherit",
+    "allow": "Allow",
+    "deny": "Deny"
+  },
+  "tester": {
+    "title": "Test a sender",
+    "subtitle": "Check which rule applies to a sender using the rules as currently edited (unsaved changes included).",
+    "senderId": "Sender ID",
+    "groupId": "Group ID",
+    "groupIdPlaceholder": "Empty for a private chat",
+    "role": "Role",
+    "roleMember": "Member",
+    "roleAdmin": "Admin",
+    "matched": "Rule #{index} \"{name}\" applies",
+    "matchedBy": "matched by {condition}",
+    "noMatch": "No rule matches; the default (unrestricted) policy applies.",
+    "status": {
+      "matched": "applies",
+      "shadowed": "shadowed",
+      "noMatch": "no match",
+      "disabled": "disabled"
+    }
+  },
+  "messages": {
+    "unsavedChangesNotice": "You have unsaved changes.",
+    "unsavedChangesReloadConfirm": "Discard unsaved changes and reload?",
+    "unsavedChangesLeaveConfirm": "You have unsaved changes. Leave this page anyway?",
+    "loadConfigFailed": "Failed to load config",
+    "saveSuccess": "Saved",
+    "saveFailed": "Failed to save",
+    "deleteConfirm": "Delete rule \"{name}\"?",
+    "invalidConditionsConfirm": "Some enabled rules have conditions that will never match. Save anyway?"
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "page": {
+    "title": "権限ルール",
+    "subtitle": "ユーザーごとにツールや MCP サーバーを制限し、ペルソナ・モデル・ネイティブコマンド実行・グローバルメモリを上書きします（デフォルト設定プロファイル）。"
+  },
+  "actions": {
+    "refresh": "更新",
+    "save": "保存",
+    "close": "閉じる"
+  },
+  "rules": {
+    "title": "ルール",
+    "subtitle": "ルールは上から順に評価され、条件が送信者に一致した最初の有効なルールが適用されます。どのルールにも一致しない送信者にはデフォルト（無制限）のポリシーが適用されます。",
+    "add": "ルールを追加",
+    "empty": "ルールはありません。全員がデフォルトのポリシーを使用します。",
+    "name": "名前",
+    "namePlaceholder": "例：制限付きグループメンバー",
+    "enabled": "有効",
+    "disabled": "無効",
+    "moveUp": "上へ移動",
+    "moveDown": "下へ移動",
+    "duplicate": "複製",
+    "delete": "削除",
+    "expand": "展開",
+    "collapse": "折りたたむ",
+    "unnamed": "ルール {index}",
+    "copyName": "{name}（コピー）"
+  },
+  "match": {
+    "syntaxTitle": "一致条件の構文（いずれかの条件が一致するとルールが一致します）：",
+    "syntaxGroupSender": "そのグループ内のその送信者",
+    "syntaxSender": "場所を問わずその送信者（個人チャット・グループ）",
+    "syntaxGroup": "そのグループの全員",
+    "syntaxRole": "AstrBot のロール別",
+    "syntaxAll": "全員",
+    "none": "条件なし",
+    "label": "一致条件",
+    "hint": "条件ごとに Enter・スペース・カンマで確定：123456/7890、p_7890、g_123456、role:admin、role:member、*",
+    "errorRole": "「{condition}」：ロールは admin または member である必要があります",
+    "errorEmptyId": "「{condition}」：ID 部分が空です",
+    "errorSyntax": "「{condition}」は無効な条件で、一致することはありません",
+    "errorNone": "このルールには条件がないため、一致することはありません"
+  },
+  "fields": {
+    "toolsTitle": "ツール",
+    "overridesTitle": "上書き",
+    "toolsAllow": "許可するツール",
+    "toolsAllowHint": "ツール名のグロブ（例：web_*）。設定すると一致するツールのみ呼び出せます。",
+    "toolsDeny": "拒否するツール",
+    "toolsDenyHint": "呼び出しを禁止するツール名のグロブ。拒否が優先されます。",
+    "mcpAllow": "許可する MCP サーバー",
+    "mcpAllowHint": "MCP サーバー名のグロブ。設定すると一致するサーバーのツールのみ呼び出せます。",
+    "mcpDeny": "拒否する MCP サーバー",
+    "mcpDenyHint": "ツールの呼び出しを禁止する MCP サーバー名のグロブ。拒否が優先されます。",
+    "persona": "ペルソナ",
+    "personaHint": "一致した送信者のペルソナを上書きします。",
+    "personaMissing": "{id}（見つかりません）",
+    "noOverride": "（上書きしない）",
+    "model": "モデル",
+    "modelHint": "一致した送信者の Codex モデルを上書きします。空欄ならデフォルトを使用します。",
+    "modelCacheWarning": "スレッドの途中でモデルを切り替えるとプロンプトキャッシュが破棄され、次のターンのコストが上がります。",
+    "nativeExec": "ネイティブコマンド実行",
+    "nativeExecHint": "Codex のネイティブ実行ツールが有効な場合のみ影響します。",
+    "globalMemory": "グローバルメモリへの書き込み",
+    "globalMemoryHint": "この送信者の個人チャットがグローバルメモリに書き込めるかどうか（Codex メモリが有効な場合のみ）。"
+  },
+  "triState": {
+    "inherit": "継承",
+    "allow": "許可",
+    "deny": "拒否"
+  },
+  "tester": {
+    "title": "送信者をテスト",
+    "subtitle": "編集中のルール（未保存の変更を含む）で、送信者にどのルールが適用されるかを確認します。",
+    "senderId": "送信者 ID",
+    "groupId": "グループ ID",
+    "groupIdPlaceholder": "個人チャットの場合は空欄",
+    "role": "ロール",
+    "roleMember": "メンバー",
+    "roleAdmin": "管理者",
+    "matched": "ルール #{index}「{name}」が適用されます",
+    "matchedBy": "{condition} で一致",
+    "noMatch": "一致するルールはありません。デフォルト（無制限）のポリシーが適用されます。",
+    "status": {
+      "matched": "適用",
+      "shadowed": "先行ルールが優先",
+      "noMatch": "不一致",
+      "disabled": "無効"
+    }
+  },
+  "messages": {
+    "unsavedChangesNotice": "未保存の変更があります。",
+    "unsavedChangesReloadConfirm": "未保存の変更を破棄して再読み込みしますか？",
+    "unsavedChangesLeaveConfirm": "未保存の変更があります。このページを離れますか？",
+    "loadConfigFailed": "設定の読み込みに失敗しました",
+    "saveSuccess": "保存しました",
+    "saveFailed": "保存に失敗しました",
+    "deleteConfirm": "ルール「{name}」を削除しますか？",
+    "invalidConditionsConfirm": "一部の有効なルールに、一致することのない条件があります。それでも保存しますか？"
+  }
+}

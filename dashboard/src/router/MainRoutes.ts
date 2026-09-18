@@ -226,6 +226,11 @@ const MainRoutes = {
       component: () => import('@/views/CodexPage.vue')
     },
     {
+      name: 'PermissionRules',
+      path: '/permissions',
+      component: () => import('@/views/PermissionRulesPage.vue')
+    },
+    {
       name: 'SubAgent',
       path: '/subagent',
       component: () => import('@/views/SubAgentPage.vue')

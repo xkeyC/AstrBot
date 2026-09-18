@@ -14,6 +14,7 @@
   },
   "subagent": "SubAgents",
   "codex": "Codex",
+  "permissions": "Permissions",
   "toolUse": "MCP Tools",
   "config": "Config",
   "chat": "Chat",

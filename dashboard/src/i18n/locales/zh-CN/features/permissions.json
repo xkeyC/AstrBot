@@ -1,0 +1,101 @@
+{
+  "page": {
+    "title": "权限规则",
+    "subtitle": "按用户限制工具与 MCP 服务器，或覆盖人格、模型、本地命令执行与全局记忆（默认配置文件）。"
+  },
+  "actions": {
+    "refresh": "刷新",
+    "save": "保存",
+    "close": "关闭"
+  },
+  "rules": {
+    "title": "规则",
+    "subtitle": "规则自上而下匹配，第一条已启用且条件命中发送者的规则生效。未命中任何规则的发送者使用默认（不受限）策略。",
+    "add": "添加规则",
+    "empty": "暂无规则，所有人使用默认策略。",
+    "name": "名称",
+    "namePlaceholder": "例如：受限群成员",
+    "enabled": "已启用",
+    "disabled": "已停用",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "duplicate": "复制",
+    "delete": "删除",
+    "expand": "展开",
+    "collapse": "收起",
+    "unnamed": "规则 {index}",
+    "copyName": "{name}（副本）"
+  },
+  "match": {
+    "syntaxTitle": "匹配条件语法（任意一个条件命中即规则命中）：",
+    "syntaxGroupSender": "该群中的该发送者",
+    "syntaxSender": "任意位置的该发送者（私聊或群聊）",
+    "syntaxGroup": "该群中的所有人",
+    "syntaxRole": "按 AstrBot 角色",
+    "syntaxAll": "所有人",
+    "none": "无条件",
+    "label": "匹配条件",
+    "hint": "每个条件后按回车、空格或逗号：123456/7890、p_7890、g_123456、role:admin、role:member、*",
+    "errorRole": "“{condition}”：角色只能是 admin 或 member",
+    "errorEmptyId": "“{condition}”：ID 部分为空",
+    "errorSyntax": "“{condition}” 不是有效条件，永远不会命中",
+    "errorNone": "此规则没有条件，永远不会命中"
+  },
+  "fields": {
+    "toolsTitle": "工具",
+    "overridesTitle": "覆盖项",
+    "toolsAllow": "允许的工具",
+    "toolsAllowHint": "工具名通配符（如 web_*）。设置后仅允许调用匹配的工具。",
+    "toolsDeny": "禁止的工具",
+    "toolsDenyHint": "禁止调用的工具名通配符。禁止优先。",
+    "mcpAllow": "允许的 MCP 服务器",
+    "mcpAllowHint": "MCP 服务器名通配符。设置后仅允许调用匹配服务器的工具。",
+    "mcpDeny": "禁止的 MCP 服务器",
+    "mcpDenyHint": "禁止调用其工具的 MCP 服务器名通配符。禁止优先。",
+    "persona": "人格",
+    "personaHint": "为匹配的发送者覆盖人格。",
+    "personaMissing": "{id}（不存在）",
+    "noOverride": "（不覆盖）",
+    "model": "模型",
+    "modelHint": "为匹配的发送者覆盖 Codex 模型。留空则使用默认模型。",
+    "modelCacheWarning": "在同一会话中途切换模型会使提示词缓存失效，下一轮成本更高。",
+    "nativeExec": "本地命令执行",
+    "nativeExecHint": "仅在启用 Codex 原生执行工具时生效。",
+    "globalMemory": "写入全局记忆",
+    "globalMemoryHint": "该发送者的私聊是否可写入全局记忆库（仅在启用 Codex 记忆时生效）。"
+  },
+  "triState": {
+    "inherit": "继承",
+    "allow": "允许",
+    "deny": "禁止"
+  },
+  "tester": {
+    "title": "测试发送者",
+    "subtitle": "使用当前编辑中的规则（含未保存修改）检查某个发送者会命中哪条规则。",
+    "senderId": "发送者 ID",
+    "groupId": "群 ID",
+    "groupIdPlaceholder": "私聊请留空",
+    "role": "角色",
+    "roleMember": "成员",
+    "roleAdmin": "管理员",
+    "matched": "生效规则：#{index}“{name}”",
+    "matchedBy": "由 {condition} 命中",
+    "noMatch": "没有规则命中，使用默认（不受限）策略。",
+    "status": {
+      "matched": "生效",
+      "shadowed": "被前序规则覆盖",
+      "noMatch": "未命中",
+      "disabled": "已停用"
+    }
+  },
+  "messages": {
+    "unsavedChangesNotice": "有未保存的修改。",
+    "unsavedChangesReloadConfirm": "放弃未保存的修改并重新加载？",
+    "unsavedChangesLeaveConfirm": "有未保存的修改，仍要离开此页面吗？",
+    "loadConfigFailed": "加载配置失败",
+    "saveSuccess": "已保存",
+    "saveFailed": "保存失败",
+    "deleteConfirm": "删除规则“{name}”？",
+    "invalidConditionsConfirm": "部分已启用规则包含永远不会命中的条件，仍要保存吗？"
+  }
+}
