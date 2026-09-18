@@ -3608,28 +3608,47 @@ CONFIG_METADATA_3 = {
             },
             "codex_runner": {
                 "description": "Codex 配置",
-                "hint": "通过 codex app-server 运行 Agent 循环，插件工具以 Codex 动态工具的形式暴露。",
+                "hint": "在进程内驱动 Codex 运行 Agent 循环，插件工具以 Codex 动态工具的形式暴露。",
                 "type": "object",
                 "condition": {
                     "provider_settings.enable": True,
                     "agent_runner.runner_type": "codex",
                 },
                 "items": {
-                    "agent_runner.config.codex_bin": {
+                    "agent_runner.config.tool_mode": {
+                        "description": "工具模式",
+                        "type": "string",
+                        "options": ["code_mode_only", "code_mode", "direct"],
+                        "hint": "code_mode_only：模型通过 JS exec 编排所有工具，工具延迟加载，工具数量不影响提示词与缓存（推荐）。",
+                    },
+                    "agent_runner.config.code_mode_host": {
+                        "description": "code mode 宿主程序路径",
+                        "type": "string",
+                        "hint": "codex-code-mode-host 可执行文件；留空则在 PATH 中的 codex 安装目录查找。",
+                    },
+                    "agent_runner.config.exec_as_function_tool": {
+                        "description": "exec 使用函数工具形式",
+                        "type": "bool",
+                        "hint": "供应商不支持语法约束工具（非 OpenAI 系）时开启。",
+                    },
+                    "agent_runner.config.native_exec_tools": {
+                        "description": "启用 Codex 原生执行工具",
+                        "type": "bool",
+                        "hint": "开启后 Codex 可使用本机 shell / apply_patch（受沙箱约束），群聊场景不建议开启。",
+                    },
+                    "agent_runner.config.codex_self_exe": {
                         "description": "codex 可执行文件路径",
                         "type": "string",
-                        "hint": "留空则从 PATH 查找。",
+                        "hint": "仅原生执行工具需要（沙箱辅助进程）。",
+                    },
+                    "agent_runner.config.web_search": {
+                        "description": "启用 Codex 联网搜索",
+                        "type": "bool",
                     },
                     "agent_runner.config.codex_home": {
                         "description": "CODEX_HOME",
                         "type": "string",
-                        "hint": "留空使用默认 ~/.codex（含登录状态与 config.toml）。",
-                    },
-                    "agent_runner.config.codex_cli_overrides": {
-                        "description": "全局 --config 覆盖",
-                        "type": "list",
-                        "items": {"type": "string"},
-                        "hint": "启动 app-server 时传入的 key=value 列表。",
+                        "hint": "留空使用 data/codex_home（登录状态、config.toml、会话记录）。",
                     },
                     "agent_runner.config.model": {
                         "description": "模型",
@@ -3676,9 +3695,9 @@ CONFIG_METADATA_3 = {
                         "type": "text",
                     },
                     "agent_runner.config.base_instructions": {
-                        "description": "替换基础指令",
+                        "description": "系统提示词",
                         "type": "text",
-                        "hint": "留空保留 Codex 自带的基础指令。",
+                        "hint": "替换 Codex 的基础指令；留空使用 AstrBot 内置的精简聊天提示词。",
                     },
                     "agent_runner.config.thread_config": {
                         "description": "线程配置覆盖",

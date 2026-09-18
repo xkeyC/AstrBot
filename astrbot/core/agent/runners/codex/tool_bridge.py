@@ -59,7 +59,8 @@ def _input_schema(tool: FunctionTool) -> JsonObject:
 class CodexToolBridge:
     """Name mapping between an AstrBot ToolSet and one Codex thread."""
 
-    def __init__(self, tool_set: ToolSet | None) -> None:
+    def __init__(self, tool_set: ToolSet | None, *, defer: bool = False) -> None:
+        self.defer = defer
         self.tools: dict[str, FunctionTool] = {}
         self.specs: list[JsonObject] = []
         taken: set[str] = set()
@@ -68,14 +69,17 @@ class CodexToolBridge:
                 continue
             name = _codex_name(tool.name, taken)
             self.tools[name] = tool
-            self.specs.append(
-                {
-                    "type": "function",
-                    "name": name,
-                    "description": (tool.description or tool.name)[:4000],
-                    "inputSchema": _input_schema(tool),
-                }
-            )
+            spec = {
+                "type": "function",
+                "name": name,
+                "description": (tool.description or tool.name)[:4000],
+                "inputSchema": _input_schema(tool),
+            }
+            if defer:
+                # Deferred tools never enter the prompt prefix; code mode
+                # discovers them through ALL_TOOLS.
+                spec["deferLoading"] = True
+            self.specs.append(spec)
         self.fingerprint = hashlib.sha256(
             json.dumps(self.specs, sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()[:16]

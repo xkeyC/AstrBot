@@ -1,16 +1,12 @@
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.run_context import ContextWrapper
-from astrbot.core.agent.runners.codex.app_server_client import (
-    default_server_request_response,
-)
 from astrbot.core.agent.runners.codex.codex_agent_runner import (
     build_additional_context,
     build_turn_input,
+    engine_options,
 )
 from astrbot.core.agent.runners.codex.tool_bridge import CodexToolBridge
 from astrbot.core.agent.tool import FunctionTool, ToolSet
@@ -99,8 +95,8 @@ def test_turn_input_orders_context_prompt_and_media():
     assert "retrieved facts" in texts[0]
     assert "Sender: alice" in texts[1]
     assert texts[2] == "hello"
-    assert items[-2] == {"type": "image", "url": "https://example.com/a.png"}
-    assert items[-1] == {"type": "localImage", "path": "C:/tmp/b.png"}
+    assert items[-2] == {"type": "image", "image_url": "https://example.com/a.png"}
+    assert items[-1] == {"type": "local_image", "path": "C:/tmp/b.png"}
 
 
 def test_additional_context_maps_anchors_and_system_prompt():
@@ -112,13 +108,26 @@ def test_additional_context_maps_anchors_and_system_prompt():
     }
 
 
-@pytest.mark.parametrize(
-    ("method", "key"),
-    [
-        ("item/tool/call", "success"),
-        ("item/commandExecution/requestApproval", "decision"),
-        ("item/fileChange/requestApproval", "decision"),
-    ],
-)
-def test_default_server_request_response_is_valid(method, key):
-    assert key in default_server_request_response(method)
+def test_bridge_defers_tools_in_code_mode():
+    bridge = CodexToolBridge(ToolSet([_tool("x")]), defer=True)
+    assert bridge.specs[0]["deferLoading"] is True
+    assert "deferLoading" not in CodexToolBridge(ToolSet([_tool("x")])).specs[0]
+
+
+def test_engine_options_default_to_lean_code_mode(tmp_path):
+    opts = engine_options({"codex_home": str(tmp_path), "code_mode_host": ""})
+    cfg = opts["config"]
+    assert cfg["model_tool_mode"] == "code_mode_only"
+    assert cfg["features.shell_tool"] is False
+    assert cfg["web_search"] == "disabled"
+    assert cfg["include_permissions_instructions"] is False
+    assert cfg["features.code_mode.structured_dynamic_tool_results"] is True
+    overridden = engine_options(
+        {
+            "codex_home": str(tmp_path),
+            "tool_mode": "direct",
+            "thread_config": {"web_search": "live"},
+        }
+    )
+    assert overridden["config"]["model_tool_mode"] == "direct"
+    assert overridden["config"]["web_search"] == "live"
