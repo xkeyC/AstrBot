@@ -3511,7 +3511,6 @@ CONFIG_METADATA_3 = {
                     },
                 },
                 "condition": {
-                    "agent_runner.runner_type": "local",
                     "provider_settings.enable": True,
                 },
             },
@@ -3544,7 +3543,6 @@ CONFIG_METADATA_3 = {
                     },
                 },
                 "condition": {
-                    "agent_runner.runner_type": "local",
                     "provider_settings.enable": True,
                 },
             },
@@ -3657,7 +3655,6 @@ CONFIG_METADATA_3 = {
                     },
                 },
                 "condition": {
-                    "agent_runner.runner_type": "local",
                     "provider_settings.enable": True,
                 },
             },
@@ -3823,7 +3820,6 @@ CONFIG_METADATA_3 = {
                     },
                 },
                 "condition": {
-                    "agent_runner.runner_type": "local",
                     "provider_settings.enable": True,
                 },
             },
@@ -3869,7 +3865,6 @@ CONFIG_METADATA_3 = {
                     },
                 },
                 "condition": {
-                    "agent_runner.runner_type": "local",
                     "provider_settings.enable": True,
                 },
             },
