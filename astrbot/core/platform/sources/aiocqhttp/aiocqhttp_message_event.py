@@ -245,12 +245,25 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
 
     @staticmethod
     def _encode_file_base64(path: str) -> str:
-        """把本机文件读成 base64。超过上限时直接报错，让调用方保留原始失败。"""
+        """把本机文件读成 base64。
+
+        超过上限时报错。这条错误会顺着工具返回值回到 agent，所以写成可执行
+        的指引：让它去平台自己的异步上传工具（QQ 侧即 ``qq_`` 前缀那批），
+        而不是在这里反复重试同一条消息。
+        """
         size = os.path.getsize(path)
         if size > FILE_BASE64_LIMIT_BYTES:
+            limit_mb = FILE_BASE64_LIMIT_BYTES // 1024 // 1024
             raise ValueError(
-                f"文件 {os.path.basename(path)} 有 {size / 1024 / 1024:.1f} MB，"
-                f"超过 base64 内联上限 {FILE_BASE64_LIMIT_BYTES // 1024 // 1024} MB"
+                f"{os.path.basename(path)} is {size / 1024 / 1024:.1f} MB, over the "
+                f"{limit_mb} MB limit for inlining a file into a message, and the "
+                "protocol side cannot read local paths. Do not retry this send. "
+                "Instead look for the platform's own asynchronous file-upload tool "
+                "-- search the tool registry under the platform prefix (`qq_` for "
+                "QQ) for a file or group-file upload capability -- and use that. "
+                "If there is none, tell the user the file is too large to send and "
+                "that an administrator can set callback_api_base to serve files "
+                "over HTTP."
             )
         with open(path, "rb") as f:
             return base64.b64encode(f.read()).decode()

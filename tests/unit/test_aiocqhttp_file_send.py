@@ -139,11 +139,17 @@ async def test_connection_remembers_base64_mode(monkeypatch, local_file):
 
 
 @pytest.mark.asyncio
-async def test_oversized_file_keeps_original_failure(monkeypatch, local_file):
-    """超过内联上限时不硬塞 base64，保留可读的报错。"""
+async def test_oversized_file_points_agent_at_platform_tool(monkeypatch, local_file):
+    """超过内联上限时不硬塞 base64，改成告诉 agent 去用平台的上传工具。"""
     monkeypatch.setattr(mod, "FILE_BASE64_LIMIT_BYTES", 1)
     dispatch = AsyncMock(side_effect=RuntimeError("ENOENT: no such file or directory"))
     monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
 
-    with pytest.raises(ValueError, match="base64"):
+    with pytest.raises(ValueError) as excinfo:
         await _send(_FakeBot(), local_file, dispatch)
+
+    message = str(excinfo.value)
+    # 指引必须可执行：说清楚别重试、去哪个命名空间找、找什么能力。
+    assert "Do not retry" in message
+    assert "`qq_`" in message
+    assert "upload" in message
