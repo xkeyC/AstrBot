@@ -165,24 +165,24 @@ def memory_thread_config(cfg: dict, umo: str, event: T.Any) -> JsonObject:
     Each chat gets its own local store (scope = UMO). Only a private chat whose
     sender's rule grants ``global_memory`` may promote memories to the global
     store; group chats stay local because many people's details mix there.
-    The flag is fixed when the thread starts (Codex keeps it sticky-false).
+    Whoever may write globally may also delete memories, so a wrong one can be
+    taken back. Both flags are fixed when the thread starts (Codex keeps
+    may_write_global sticky-false), so a rule change applies from the next
+    thread, which ``/reset`` starts.
     """
     get_extra = getattr(event, "get_extra", None)
     policy = get_extra(POLICY_EXTRA_KEY) if callable(get_extra) else None
     is_private = False
     with contextlib.suppress(Exception):
         is_private = not event.get_group_id()
-    may_write_global = bool(
-        is_private
-        and isinstance(policy, PermissionPolicy)
-        and policy.global_memory is True
-    )
+    trusted = isinstance(policy, PermissionPolicy) and policy.global_memory is True
     return {
         "features.memories": True,
         "memories.dedicated_tools": True,
         "memories.extra_session_sources": ["astrbot"],
         "memories.scope_key": umo,
-        "memories.may_write_global": may_write_global,
+        "memories.may_write_global": bool(is_private and trusted),
+        "memories.may_delete": trusted,
         "memories.auto_consolidate": bool(cfg.get("memory_auto_consolidate", True)),
     }
 

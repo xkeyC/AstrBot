@@ -248,18 +248,18 @@ def test_memory_thread_config_limits_global_to_permitted_private_chats(tmp_path)
     conf = memory_thread_config(cfg, "qq:FriendMessage:1", event(allowed))
     assert conf["memories.scope_key"] == "qq:FriendMessage:1"
     assert conf["memories.may_write_global"] is True
+    # Whoever may write globally may also take a memory back.
+    assert conf["memories.may_delete"] is True
     assert conf["memories.auto_consolidate"] is False
     assert conf["memories.extra_session_sources"] == ["astrbot"]
-    assert (
-        memory_thread_config(cfg, "u", event(allowed, group="9"))[
-            "memories.may_write_global"
-        ]
-        is False
-    )
-    assert (
-        memory_thread_config(cfg, "u", event(None))["memories.may_write_global"]
-        is False
-    )
+    in_group = memory_thread_config(cfg, "u", event(allowed, group="9"))
+    # A group never writes to the shared store, but a trusted sender can still
+    # curate what this chat remembers.
+    assert in_group["memories.may_write_global"] is False
+    assert in_group["memories.may_delete"] is True
+    without_rule = memory_thread_config(cfg, "u", event(None))
+    assert without_rule["memories.may_write_global"] is False
+    assert without_rule["memories.may_delete"] is False
     exe = tmp_path / "codex.exe"
     exe.write_bytes(b"")
     opts = engine_options(
