@@ -42,6 +42,73 @@ AstrBot 是一个开源的一站式 Agent 聊天机器人平台，可接入主�
 
 ![screenshot_1 5x_postspark_2026-02-27_22-37-45](https://github.com/user-attachments/assets/f17cdb90-52d7-4773-be2e-ff64b566af6b)
 
+## Codex 原生 Agent 运行时
+
+本分支把 AstrBot 的 Agent 循环换成了同进程运行的
+[OpenAI Codex](https://github.com/openai/codex)，通过 pyo3 绑定
+（[xkeyC/codex_for_astrbot](https://github.com/xkeyC/codex_for_astrbot)）嵌入。AstrBot
+保留它擅长的部分——平台适配、消息管线、插件、人格、WebUI——由 Codex 负责 Agent 的编排与
+执行。这里 `codex` 是唯一的 Agent 运行器，原有的 `local` 配置会自动迁移过来。
+
+绑定是硬依赖且**从源码构建**，所以安装本分支需要 Rust 工具链。加上
+`CODEX_ASTRBOT_WITH_CODEX=1` 会同时构建 `codex` 可执行文件——只有原生命令执行需要它，
+其余功能都不需要。
+
+### Code mode
+
+每一轮都跑在 Codex 的 code mode（`model_tool_mode = code_mode_only`）下：提示词里只声明
+`exec` 和 `wait`，模型通过写 JavaScript 在独立的 V8 宿主进程里调用 AstrBot 的工具。插件、
+MCP 和内置工具都注册为延迟加载的动态工具，它们的 schema **完全不进入提示词前缀**。
+
+由此带来两个值得知道的结果：
+
+| 场景 | AstrBot 本地运行器 | Codex（code mode） |
+| --- | --- | --- |
+| 5 个工具，估算 token | 81.1k | 45.6k（**-44%**） |
+| 45 个工具，估算 token | 234.4k | 45.6k（**-81%**） |
+
+Codex 的提示词开销与工具数量无关；一串相互依赖的调用会合并进一次 `exec` 往返，而不是每次
+调用一轮。这也意味着**按发送者过滤工具是免费的**：对某人隐藏一个工具，不会改变缓存前缀。
+
+### 按发送者的权限规则
+
+配置里的 `permission_rules` 取代了 DynamicPersona 插件。每条规则匹配发送者
+（`<群号>/<QQ号>`、`p_<QQ号>`、`g_<群号>`、`role:admin`、`*`），可以指定人格与模型、
+允许或禁止工具和 MCP 服务器、授予原生命令执行或全局记忆写入权限。被禁止的工具在调用时会被
+拦截；在 code mode 下还会直接从模型可见的工具集里移除。
+
+### 执行环境
+
+Codex 自带的 shell 默认关闭，执行能力由 AstrBot 提供：
+
+- `exec_command` / `write_stdin`——Codex 模型受过训练的那一对工具，底层是真正的 tmux PTY
+  会话，所以需要确认、弹密码或开 REPL 的命令表现得和人在终端里一样。被留在后台的会话会在
+  后台轮询到结束，结果自动发回聊天。
+- `apply_patch`——Codex 原生的补丁格式。
+- `shipyard_mode`——所有 Agent 文件操作都在
+  [Shipyard Neo](https://github.com/AstrBotDevs/astrbot-shipyard-neo) 沙箱里完成，包括
+  skills；Codex 不碰宿主文件系统，只做编排。
+
+开启原生执行后，每条命令都会发起一次审批，由 AstrBot 依据发送者的权限规则作答。
+
+### 记忆
+
+Codex 的原生记忆按会话隔离。每个聊天有自己的私有库；只有当提取模型判定内容不涉及个人信息
+**且**发送者的规则授予了 `global_memory` 时，记忆才会进入共享的全局库——群聊永远不会。
+周期性整理作为 Codex 子 Agent 在记忆目录上运行；有全局写入权限的人同时也可以删除，写错了
+能收回。
+
+### 并发
+
+一个聊天对应一个 Codex thread，一次只跑一轮。**正在跑的那一轮的发起人**追加的消息会被插进
+该轮并合并到同一条回复里；其他人的消息在 AstrBot 侧排队，上限由 `max_queued_turns` 控制。
+
+### 遥测
+
+只要登录了账号，Codex 会把 skill 调用、MCP 调用和 thread 元数据上报到 `chatgpt.com`。
+本分支默认写死 `analytics.enabled = false` 与 `otel.metrics_exporter = "none"`——聊天
+机器人承载的是别人的对话。需要的话可以通过 `thread_config` 打开。
+
 ## 主要功能
 
 1. 💯 免费 & 开源。
@@ -55,6 +122,19 @@ AstrBot 是一个开源的一站式 Agent 聊天机器人平台，可接入主�
 9. 🌐 国际化（i18n）支持。
 
 ## 快速开始
+
+### 安装本分支
+
+下面的部署方式安装的是上游 AstrBot。要安装本分支，需要指向对应分支，并确保环境里有 Rust
+工具链——Codex 绑定是从源码构建的：
+
+```bash
+pip install "astrbot @ git+https://github.com/xkeyC/AstrBot@codex_agent_runtime"
+```
+
+首次安装会编译整个 Rust 工作区，并为 code-mode 宿主下载预编译的 V8，耗时较长；之后安装
+同一个 commit 会复用 pip 的 wheel 缓存。需要原生命令执行的话，加上
+`CODEX_ASTRBOT_WITH_CODEX=1` 一并构建 `codex` 可执行文件。
 
 ### 在雨云上一键部署
 

@@ -40,6 +40,82 @@
 
 AstrBot is an open-source all-in-one Agent chatbot platform that integrates with mainstream instant messaging apps. It provides reliable and scalable conversational AI infrastructure for individuals, developers, and teams. Whether you're building a personal AI companion, intelligent customer service, automation assistant, or enterprise knowledge base, AstrBot enables you to quickly build production-ready AI applications within your IM platform workflows.
 
+## Codex-Native Agent Runner
+
+This fork replaces AstrBot's agent loop with [OpenAI Codex](https://github.com/openai/codex),
+embedded in the same process through a pyo3 binding
+([xkeyC/codex_for_astrbot](https://github.com/xkeyC/codex_for_astrbot)). AstrBot keeps
+everything it is good at -- platform adapters, the message pipeline, plugins, personas,
+the WebUI -- and Codex does the agent orchestration and execution. `codex` is the only
+agent runner here; existing `local` runner configurations are migrated to it.
+
+The binding is a hard dependency and **builds from source**, so installing this fork needs
+a Rust toolchain. Set `CODEX_ASTRBOT_WITH_CODEX=1` to also build the `codex` executable,
+which native command execution needs (nothing else does).
+
+### Code mode
+
+Turns run in Codex's code mode (`model_tool_mode = code_mode_only`): the prompt declares
+only `exec` and `wait`, and the model reaches AstrBot's tools by writing JavaScript that
+calls them in a separate V8 host process. Plugin, MCP and builtin tools are registered as
+deferred dynamic tools, so their schemas never enter the prompt prefix at all.
+
+That has two consequences worth knowing:
+
+| Scenario | AstrBot local runner | Codex (code mode) |
+| --- | --- | --- |
+| 5 tools, estimated tokens | 81.1k | 45.6k (**-44%**) |
+| 45 tools, estimated tokens | 234.4k | 45.6k (**-81%**) |
+
+Codex's prompt cost does not grow with the number of tools, and a chain of dependent calls
+collapses into one `exec` round trip instead of one per call. It also means per-sender tool
+filtering is free: hiding a tool from someone changes nothing in the cached prefix.
+
+### Per-sender permission rules
+
+`permission_rules` in the config replaces the DynamicPersona plugin. Each rule matches
+senders (`<group>/<sender>`, `p_<sender>`, `g_<group>`, `role:admin`, `*`) and can set the
+persona and model, allow or deny tools and MCP servers, and grant native command execution
+or global-memory writes. Denied tools are enforced when called and, under code mode, are
+also left out of the set the model can see.
+
+### Execution
+
+Codex's own shell is off by default: AstrBot supplies the execution tools instead.
+
+- `exec_command` / `write_stdin` -- the pair Codex models are trained on, backed by real
+  tmux PTY sessions so a command that asks for confirmation or opens a REPL behaves the way
+  it would for a person. A session left running is polled to completion in the background and
+  its result is posted back to the chat.
+- `apply_patch` -- Codex's native patch format.
+- `shipyard_mode` -- every agent file operation happens inside the
+  [Shipyard Neo](https://github.com/AstrBotDevs/astrbot-shipyard-neo) sandbox, including
+  skills; Codex never touches the host filesystem and is only an orchestrator.
+
+With native execution enabled, every command raises an approval that AstrBot answers from
+the sender's permission rule.
+
+### Memories
+
+Codex's native memories are scoped per chat. Each chat gets a private store; a memory is
+promoted to the shared global store only when the extraction model judges it impersonal
+**and** the sender's rule grants `global_memory`, which group chats never do. Periodic
+consolidation runs as a Codex sub-agent over the memory folder; whoever may write globally
+may also delete, so a wrong memory can be taken back.
+
+### Concurrency
+
+One chat is one Codex thread and runs one turn at a time. A follow-up from the sender whose
+turn is running is steered into it and answered in the same reply; messages from anyone else
+queue behind it, up to `max_queued_turns`.
+
+### Telemetry
+
+Codex reports skill invocations, MCP calls and thread metadata to `chatgpt.com` whenever an
+account is signed in. This fork pins `analytics.enabled = false` and
+`otel.metrics_exporter = "none"`, because a chat bot runs other people's conversations.
+`thread_config` can turn it back on.
+
 ## Fork Behavior Differences
 
 This fork intentionally differs from upstream AstrBot in a few areas:
@@ -52,6 +128,7 @@ This fork intentionally differs from upstream AstrBot in a few areas:
 6. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
 7. Shipyard Neo auto-start mode propagates AstrBot's global proxy settings into the managed Bay container and recreates that container when the managed proxy environment changes, so new sandbox Python/Shell sessions inherit the updated proxy.
 8. Persona tool allowlists cover all exposed tools, including builtin tools, MCP tools, scheduled task tools, web search tools, local/sandbox computer tools, and subagent handoff tools. Tool calls that are not allowed by the active persona are rejected even if the LLM constructs them manually.
+9. The agent runner is OpenAI Codex, running in-process. See [Codex-Native Agent Runner](#codex-native-agent-runner) above for what that changes.
 
 These changes are maintained for this fork and may not match upstream behavior.
 
@@ -70,6 +147,21 @@ These changes are maintained for this fork and may not match upstream behavior.
 9. 🌐 Internationalization (i18n) Support.
 
 ## Quick Start
+
+### Installing this fork
+
+The deployment methods below install upstream AstrBot. To install this fork, point the
+installer at the branch and make sure a Rust toolchain is present, because the Codex
+binding builds from source:
+
+```bash
+pip install "astrbot @ git+https://github.com/xkeyC/AstrBot@codex_agent_runtime"
+```
+
+The first install compiles the Rust workspace and downloads a prebuilt V8 for the code-mode
+host, so expect it to take a while; later installs of the same commit reuse pip's wheel
+cache. Add `CODEX_ASTRBOT_WITH_CODEX=1` to also build the `codex` executable if you want
+native command execution.
 
 ### One-Click Cloud Deployment (RainYun)
 
