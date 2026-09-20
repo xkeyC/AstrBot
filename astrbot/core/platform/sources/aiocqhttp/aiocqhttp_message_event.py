@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import os
 import pathlib
 import re
@@ -23,12 +22,8 @@ from astrbot.api.message_components import (
 from astrbot.api.platform import Group, MessageMember
 from astrbot.core.utils.media_utils import file_uri_to_path, is_file_uri
 
-# 文件段改用 base64 重发时的大小上限。base64 会膨胀约 1/3，且要整条塞进
-# OneBot 的 WebSocket 帧里，过大的文件应当走 callback_api_base 文件服务。
-FILE_BASE64_LIMIT_BYTES = 64 * 1024 * 1024
-
-# 协议端报告"文件不存在"的几种说法。只有命中这些才会重发，避免把发送超时
-# 之类的错误也重试一遍导致重复发送。
+# 协议端报告"文件不存在"的几种说法。命中这些说明它读不到本机路径，
+# 而不是发送本身失败。
 _MISSING_FILE_HINTS = (
     "enoent",
     "no such file",
@@ -57,11 +52,6 @@ def _local_file_path(value: object) -> str | None:
         return None
 
 
-# 已经确认读不到本机路径的协议端连接（按 CQHttp 实例区分）。记住之后就直接
-# 走 base64，不必每个文件都先失败一次。
-_PATH_SEND_UNSUPPORTED: set[int] = set()
-
-
 def _is_missing_file_error(exc: BaseException) -> bool:
     """判断协议端的报错是不是"它那边看不到这个文件"。"""
     text = f"{exc}".lower()
@@ -81,18 +71,8 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         self.bot = bot
 
     @staticmethod
-    async def _from_segment_to_dict(
-        segment: BaseMessageComponent,
-        *,
-        file_as_base64: bool = False,
-    ) -> dict:
-        """修复部分字段
-
-        Args:
-            segment: 要转换的消息段。
-            file_as_base64: 文件段是否内联为 base64，用于协议端读不到本机
-                路径时的重发。
-        """
+    async def _from_segment_to_dict(segment: BaseMessageComponent) -> dict:
+        """修复部分字段"""
         if isinstance(segment, Image | Record):
             # For Image and Record segments, we convert them to base64
             bs64 = await segment.convert_to_base64()
@@ -107,13 +87,6 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
             d = await segment.to_dict()
             file_val = d.get("data", {}).get("file", "")
             if file_val:
-                local_path = _local_file_path(file_val)
-                if local_path and file_as_base64:
-                    payload = await asyncio.to_thread(
-                        AiocqhttpMessageEvent._encode_file_base64, local_path
-                    )
-                    d["data"]["file"] = f"base64://{payload}"
-                    return d
                 try:
                     # 使用 pathlib 处理路径，能更好地处理 Windows/Linux 差异
                     path_obj = pathlib.Path(file_val)
@@ -243,31 +216,6 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
                 await cls._dispatch_send(bot, event, is_group, session_id, messages)
                 await asyncio.sleep(0.5)
 
-    @staticmethod
-    def _encode_file_base64(path: str) -> str:
-        """把本机文件读成 base64。
-
-        超过上限时报错。这条错误会顺着工具返回值回到 agent，所以写成可执行
-        的指引：让它去平台自己的异步上传工具（QQ 侧即 ``qq_`` 前缀那批），
-        而不是在这里反复重试同一条消息。
-        """
-        size = os.path.getsize(path)
-        if size > FILE_BASE64_LIMIT_BYTES:
-            limit_mb = FILE_BASE64_LIMIT_BYTES // 1024 // 1024
-            raise ValueError(
-                f"{os.path.basename(path)} is {size / 1024 / 1024:.1f} MB, over the "
-                f"{limit_mb} MB limit for inlining a file into a message, and the "
-                "protocol side cannot read local paths. Do not retry this send. "
-                "Instead look for the platform's own asynchronous file-upload tool "
-                "-- search the tool registry under the platform prefix (`qq_` for "
-                "QQ) for a file or group-file upload capability -- and use that. "
-                "If there is none, tell the user the file is too large to send and "
-                "that an administrator can set callback_api_base to serve files "
-                "over HTTP."
-            )
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-
     @classmethod
     async def _send_file_segment(
         cls,
@@ -277,31 +225,37 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         session_id: str | None,
         seg: File,
     ) -> None:
-        """发送文件段，必要时把文件内联成 base64 重发一次。
+        """发送文件段，并在协议端读不到本机路径时给出可执行的替代方案。
 
         协议端（NapCat、Lagrange 等）常与 AstrBot 跑在不同的容器或主机上，
-        此时本机路径在它那边并不存在，发送会以 ENOENT 失败。先按路径发
-        （同机部署最省带宽），只有在协议端明确说文件不存在时才改用
-        base64 重发，以免把发送超时之类的错误也重试成重复消息。
+        此时本机路径在它那边并不存在，发送会以 ENOENT 失败。这里不做任何
+        重发：失败信息会顺着工具返回值回到 agent，所以直接告诉它改用平台
+        自己的上传工具。发送超时之类的错误原样抛出，因为消息可能已经送达，
+        重试只会变成重复消息。
         """
-        known_split = id(bot) in _PATH_SEND_UNSUPPORTED
-        if not known_split:
-            d = await cls._from_segment_to_dict(seg)
-            try:
-                await cls._dispatch_send(bot, event, is_group, session_id, [d])
-                return
-            except Exception as e:
-                local_path = _local_file_path(d.get("data", {}).get("file", ""))
-                if not local_path or not _is_missing_file_error(e):
-                    raise
-                _PATH_SEND_UNSUPPORTED.add(id(bot))
-                logger.warning(
-                    f"协议端读不到本机文件 {local_path}（{e}），改用 base64 重发；"
-                    "该连接后续的文件将直接内联。若文件较大，"
-                    "建议配置 callback_api_base 走文件服务。"
-                )
-        d = await cls._from_segment_to_dict(seg, file_as_base64=True)
-        await cls._dispatch_send(bot, event, is_group, session_id, [d])
+        d = await cls._from_segment_to_dict(seg)
+        try:
+            await cls._dispatch_send(bot, event, is_group, session_id, [d])
+        except Exception as e:
+            local_path = _local_file_path(d.get("data", {}).get("file", ""))
+            if not local_path or not _is_missing_file_error(e):
+                raise
+            name = os.path.basename(local_path)
+            logger.warning(
+                f"协议端读不到本机文件 {local_path}，"
+                "说明它与 AstrBot 不在同一个文件系统上；"
+                "请改用平台自带的上传工具，或配置 callback_api_base 走文件服务。"
+            )
+            raise RuntimeError(
+                f"{name} could not be sent: the protocol side cannot read local "
+                "paths, so it and AstrBot are not sharing a filesystem. Do not "
+                "retry this send. Look for the platform's own file-upload tool "
+                "-- search the tool registry under the platform prefix (`qq_` "
+                "for QQ) for a file or group-file upload capability -- and use "
+                "that instead. If there is none, tell the user the file could "
+                "not be sent and that an administrator can set callback_api_base "
+                "so files are served over HTTP."
+            ) from e
 
     async def send(self, message: MessageChain) -> None:
         """发送消息"""

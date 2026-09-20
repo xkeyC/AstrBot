@@ -7,33 +7,29 @@ ActionFailed retcode=1200 ENOENT 失败：
     message="ENOENT: no such file or directory,
              open '/home/astrbot/data/temp/sandbox_xxxx_report.html'"
 
-修复：仅在协议端明确报告文件不存在时，把文件内联成 base64 重发一次；
-发送超时之类的错误不重试，以免重复发送。
+处理：不重发（消息可能已送达，重发会变成重复消息），而是把失败翻译成
+一条可执行的指引，顺着工具返回值回到 agent——改用平台自带的上传工具。
 """
 
-import base64
 from unittest.mock import AsyncMock
 
 import pytest
 
 import astrbot.core.message.components as Comp
-import astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event as mod
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
-FILE_BODY = b"<html>sandbox report</html>"
-
 
 class _FakeBot:
-    """只用来当 _dispatch_send 的 bot 参数，以及做 id() 区分。"""
+    """只用来当 _dispatch_send 的 bot 参数。"""
 
 
 @pytest.fixture
 def local_file(tmp_path):
     path = tmp_path / "sandbox_f292_report.html"
-    path.write_bytes(FILE_BODY)
+    path.write_bytes(b"<html>sandbox report</html>")
     return str(path)
 
 
@@ -41,12 +37,9 @@ def local_file(tmp_path):
 def _no_file_service(monkeypatch):
     """不配置 callback_api_base，走本机路径分支。"""
     monkeypatch.setitem(Comp.astrbot_config, "callback_api_base", "")
-    mod._PATH_SEND_UNSUPPORTED.clear()
-    yield
-    mod._PATH_SEND_UNSUPPORTED.clear()
 
 
-async def _send(bot, local_file, dispatch):
+async def _send(bot, local_file):
     chain = MessageChain([Comp.File(name="report.html", file=local_file)])
     await AiocqhttpMessageEvent.send_message(
         bot=bot,
@@ -55,101 +48,73 @@ async def _send(bot, local_file, dispatch):
         is_group=True,
         session_id="12345",
     )
-    return dispatch
-
-
-def _sent_file_value(dispatch, call_index=0):
-    messages = dispatch.call_args_list[call_index].args[4]
-    return messages[0]["data"]["file"]
 
 
 @pytest.mark.asyncio
-async def test_path_send_succeeds_without_base64(monkeypatch, local_file):
-    """协议端能读到本机文件时，按路径发送，不做 base64 内联。"""
+async def test_path_send_is_used_as_is(monkeypatch, local_file):
+    """协议端能读到本机文件时，按路径发送。"""
     dispatch = AsyncMock()
     monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
 
-    await _send(_FakeBot(), local_file, dispatch)
+    await _send(_FakeBot(), local_file)
 
     assert dispatch.await_count == 1
-    value = _sent_file_value(dispatch)
+    value = dispatch.call_args_list[0].args[4][0]["data"]["file"]
     assert value.startswith("file://")
     assert "base64://" not in value
 
 
 @pytest.mark.asyncio
-async def test_enoent_falls_back_to_base64(monkeypatch, local_file):
-    """协议端报 ENOENT 时，把文件内联成 base64 重发一次。"""
-    dispatch = AsyncMock(
-        side_effect=[
-            RuntimeError(
-                "ActionFailed retcode=1200 "
-                f"message=\"ENOENT: no such file or directory, open '{local_file}'\""
-            ),
-            None,
-        ]
-    )
-    monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
-
-    await _send(_FakeBot(), local_file, dispatch)
-
-    assert dispatch.await_count == 2
-    value = _sent_file_value(dispatch, 1)
-    assert value.startswith("base64://")
-    assert base64.b64decode(value.removeprefix("base64://")) == FILE_BODY
-
-
-@pytest.mark.asyncio
-async def test_timeout_is_not_retried(monkeypatch, local_file):
-    """发送超时不重试：消息可能已经送达，重发会变成重复消息。"""
+async def test_enoent_points_agent_at_platform_tool(monkeypatch, local_file):
+    """协议端报 ENOENT 时不重发，改成告诉 agent 去用平台的上传工具。"""
     dispatch = AsyncMock(
         side_effect=RuntimeError(
-            "ActionFailed retcode=1200 message='Timeout: NTEvent "
-            "serviceAndMethod:NodeIKernelMsgService/sendMsg'"
+            "ActionFailed retcode=1200 "
+            f"message=\"ENOENT: no such file or directory, open '{local_file}'\""
         )
     )
     monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
 
-    with pytest.raises(RuntimeError):
-        await _send(_FakeBot(), local_file, dispatch)
+    with pytest.raises(RuntimeError) as excinfo:
+        await _send(_FakeBot(), local_file)
 
+    # 只发一次，不重试
     assert dispatch.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_connection_remembers_base64_mode(monkeypatch, local_file):
-    """同一个连接失败过一次后，后续文件直接内联，不再白发一次。"""
-    bot = _FakeBot()
-    dispatch = AsyncMock(
-        side_effect=[
-            RuntimeError("ENOENT: no such file or directory"),
-            None,
-        ]
-    )
-    monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
-    await _send(bot, local_file, dispatch)
-    assert dispatch.await_count == 2
-
-    dispatch.reset_mock()
-    dispatch.side_effect = None
-    await _send(bot, local_file, dispatch)
-
-    assert dispatch.await_count == 1
-    assert _sent_file_value(dispatch).startswith("base64://")
-
-
-@pytest.mark.asyncio
-async def test_oversized_file_points_agent_at_platform_tool(monkeypatch, local_file):
-    """超过内联上限时不硬塞 base64，改成告诉 agent 去用平台的上传工具。"""
-    monkeypatch.setattr(mod, "FILE_BASE64_LIMIT_BYTES", 1)
-    dispatch = AsyncMock(side_effect=RuntimeError("ENOENT: no such file or directory"))
-    monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
-
-    with pytest.raises(ValueError) as excinfo:
-        await _send(_FakeBot(), local_file, dispatch)
-
     message = str(excinfo.value)
     # 指引必须可执行：说清楚别重试、去哪个命名空间找、找什么能力。
     assert "Do not retry" in message
     assert "`qq_`" in message
     assert "upload" in message
+    assert "callback_api_base" in message
+    # 原始失败仍然挂在 __cause__ 上，排查时不丢信息。
+    assert "ENOENT" in str(excinfo.value.__cause__)
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_passed_through_untouched(monkeypatch, local_file):
+    """发送超时原样抛出：消息可能已经送达，不该被当成路径问题。"""
+    original = RuntimeError(
+        "ActionFailed retcode=1200 message='Timeout: NTEvent "
+        "serviceAndMethod:NodeIKernelMsgService/sendMsg'"
+    )
+    dispatch = AsyncMock(side_effect=original)
+    monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _send(_FakeBot(), local_file)
+
+    assert excinfo.value is original
+    assert dispatch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_enoent_for_a_file_we_do_not_have_is_passed_through(monkeypatch):
+    """本机也没有这个文件时，不该冒充成"文件系统不共享"。"""
+    original = RuntimeError("ENOENT: no such file or directory")
+    dispatch = AsyncMock(side_effect=original)
+    monkeypatch.setattr(AiocqhttpMessageEvent, "_dispatch_send", dispatch)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _send(_FakeBot(), "/nowhere/missing.html")
+
+    assert excinfo.value is original
