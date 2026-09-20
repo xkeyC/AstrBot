@@ -348,7 +348,14 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         self._state = AgentState.IDLE
         self.umo = request.session_id or ""
         tool_mode = self.cfg.get("tool_mode") or "code_mode_only"
-        self.bridge = CodexToolBridge(request.func_tool, defer=tool_mode in CODE_MODES)
+        event = getattr(getattr(run_context, "context", None), "event", None)
+        get_extra = getattr(event, "get_extra", None)
+        policy = get_extra(POLICY_EXTRA_KEY) if callable(get_extra) else None
+        self.bridge = CodexToolBridge(
+            request.func_tool,
+            defer=tool_mode in CODE_MODES,
+            policy=policy if isinstance(policy, PermissionPolicy) else None,
+        )
         self._engine: CodexEngine | None = None
         self._thread_id: str | None = None
         self._turn_running = False

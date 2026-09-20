@@ -61,13 +61,37 @@ def _input_schema(tool: FunctionTool) -> JsonObject:
 class CodexToolBridge:
     """Name mapping between an AstrBot ToolSet and one Codex thread."""
 
-    def __init__(self, tool_set: ToolSet | None, *, defer: bool = False) -> None:
+    def __init__(
+        self,
+        tool_set: ToolSet | None,
+        *,
+        defer: bool = False,
+        policy: PermissionPolicy | None = None,
+    ) -> None:
+        """Map an AstrBot ToolSet onto one Codex thread.
+
+        Args:
+            tool_set: Tools offered for this request.
+            defer: Whether the tools load on demand, which is what code mode
+                does. Deferred tools never enter the prompt prefix.
+            policy: Sender's permission rule. Denied tools are left out when
+                the tools are deferred, so the model cannot even see them;
+                without deferral, dropping them per sender would change the
+                prompt prefix and cost the cache, so they stay listed and are
+                refused when called.
+        """
         self.defer = defer
         self.tools: dict[str, FunctionTool] = {}
         self.specs: list[JsonObject] = []
         taken: set[str] = set()
         for tool in sorted((tool_set.tools if tool_set else []), key=lambda t: t.name):
             if not getattr(tool, "active", True):
+                continue
+            if (
+                defer
+                and policy is not None
+                and not policy.allows_tool(tool.name, tool_mcp_server(tool))
+            ):
                 continue
             name = _codex_name(tool.name, taken)
             self.tools[name] = tool

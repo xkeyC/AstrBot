@@ -337,3 +337,34 @@ def test_persona_catalog_only_when_personas_alternate():
     assert again == both and ctx_cat == ctx_dog and active_cat != active
     _, _, none_active = persona_context(req(""), both)
     assert "none" in none_active["text"]
+
+
+def test_code_mode_hides_denied_tools_but_direct_mode_lists_them():
+    from astrbot.core.permission_rules import PermissionPolicy
+
+    tools = ToolSet([_tool("weather"), _tool("calc")])
+    denied = PermissionPolicy(rule_name="r", tools_deny=("weather",))
+
+    hidden = CodexToolBridge(tools, defer=True, policy=denied)
+    assert [spec["name"] for spec in hidden.specs] == ["calc"]
+    assert "weather" not in hidden.tools
+
+    # Without deferral the tool set must stay identical for every sender, or
+    # the prompt prefix (and its cache) would differ per user.
+    listed = CodexToolBridge(tools, defer=False, policy=denied)
+    assert [spec["name"] for spec in listed.specs] == ["calc", "weather"]
+
+    # No policy: nothing is filtered in either mode.
+    assert len(CodexToolBridge(tools, defer=True).specs) == 2
+
+
+def test_hidden_tools_change_the_fingerprint_per_sender():
+    from astrbot.core.permission_rules import PermissionPolicy
+
+    tools = ToolSet([_tool("weather"), _tool("calc")])
+    allowed = CodexToolBridge(tools, defer=True, policy=PermissionPolicy())
+    denied = CodexToolBridge(
+        tools, defer=True, policy=PermissionPolicy(tools_deny=("weather",))
+    )
+    # A different tool set means the runner sends a tools update for that turn.
+    assert allowed.fingerprint != denied.fingerprint
