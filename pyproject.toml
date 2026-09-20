@@ -72,6 +72,19 @@ dependencies = [
   "pyotp>=2.9.0",
   "reportlab>=5.0.0",
   "xlrd>=2.0.2",
+  # Codex is the only agent runner in this fork, so its in-process binding is
+  # a hard dependency. It builds from source: a Rust toolchain is required,
+  # and the code-mode host downloads a prebuilt V8 during the build. Set
+  # CODEX_ASTRBOT_SKIP_HOST=1 to skip that host (code mode then needs a
+  # `code_mode_host` path in the config), or CODEX_ASTRBOT_WITH_CODEX=1 to
+  # also build the `codex` executable that native execution and memory
+  # consolidation need.
+  #
+  # Pinned to a commit on purpose: pip only reuses its wheel cache for a VCS
+  # requirement that names an immutable revision, so a branch here would
+  # rebuild the whole Rust workspace on every install. Bump this SHA when the
+  # binding changes.
+  "codex-astrbot @ git+https://github.com/xkeyC/codex_for_astrbot@cf58e8884a7206649b0f61e1c700ab952dc3d506#subdirectory=codex-rs/astrbot-py",
 ]
 
 [dependency-groups]
