@@ -50,19 +50,22 @@ def test_upload_tool_refuses_credentials(monkeypatch):
     assert "credentials" in result or "credential file" in result
 
 
-def test_send_tool_refuses_credential_paths(monkeypatch):
+def test_send_tool_only_allows_astrbot_owned_dirs(monkeypatch):
     from astrbot.core.tools import message_tools
+    from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
     event = SimpleNamespace(unified_msg_origin="qq:FriendMessage:1", role="admin")
     ctx = SimpleNamespace(context=SimpleNamespace(event=event, context=None))
-    # Local runtime + admin: anything else on this host is sendable.
+    # Local runtime and an admin sender: still no arbitrary host paths.
     monkeypatch.setattr(message_tools, "is_local_runtime", lambda _: True)
-    monkeypatch.setattr(message_tools, "_is_restricted_local_env", lambda _: False)
 
-    secret = Path(get_astrbot_data_path()) / "cmd_config.json"
-    assert message_tools._can_send_local_file(ctx, secret) is False
-    assert (
-        message_tools._can_send_local_file(ctx, Path.home() / ".ssh" / "id_rsa")
-        is False
-    )
-    assert message_tools._can_send_local_file(ctx, Path.home() / "poster.png") is True
+    allowed = Path(get_astrbot_temp_path()) / "render.png"
+    assert message_tools._can_send_local_file(ctx, allowed) is True
+
+    for refused in (
+        Path(get_astrbot_data_path()) / "cmd_config.json",
+        Path.home() / ".ssh" / "id_rsa",
+        Path.home() / "poster.png",
+        Path("/srv/app/main.py"),
+    ):
+        assert message_tools._can_send_local_file(ctx, refused) is False, refused

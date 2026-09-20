@@ -53,31 +53,33 @@ def _is_path_within(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(path == root or path.is_relative_to(root) for root in roots)
 
 
-def _is_restricted_local_env(context: ContextWrapper[AstrAgentContext]) -> bool:
-    if not is_local_runtime(context):
-        return False
-    cfg = context.context.context.get_config(
-        umo=context.context.event.unified_msg_origin
-    )
-    provider_settings = cfg.get("provider_settings", {})
-    require_admin = provider_settings.get("computer_use_require_admin", True)
-    return require_admin and context.context.event.role != "admin"
-
-
 def _can_send_local_file(
     context: ContextWrapper[AstrAgentContext],
     local_path: Path,
     current_workspace_root: Path | None = None,
 ) -> bool:
-    umo = context.context.event.unified_msg_origin
-    # Sending a file puts it in the chat, so credentials are never eligible,
-    # not even for an admin on the local runtime.
+    """Decide whether a host path may be put into a chat message.
+
+    Only directories AstrBot owns are eligible — the session workspace, the
+    data temp directory and the system temp directory — so the model cannot
+    name an arbitrary host path, whoever is talking to it. Sandbox paths are
+    not affected: the caller falls through to the sandbox lookup, which pulls
+    the file out through the booter.
+
+    Args:
+        context: Current tool call context.
+        local_path: Resolved host path the model asked to send.
+        current_workspace_root: Session workspace root, when already resolved.
+
+    Returns:
+        Whether the file may be sent.
+    """
     if reject_secret_path(local_path):
         return False
-    allowed_roots = _file_send_allowed_roots(umo, current_workspace_root)
-    if _is_path_within(local_path, allowed_roots):
-        return True
-    return is_local_runtime(context) and not _is_restricted_local_env(context)
+    allowed_roots = _file_send_allowed_roots(
+        context.context.event.unified_msg_origin, current_workspace_root
+    )
+    return _is_path_within(local_path, allowed_roots)
 
 
 @builtin_tool
