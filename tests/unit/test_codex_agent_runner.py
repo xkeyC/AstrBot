@@ -7,6 +7,7 @@ from astrbot.core.agent.runners.codex.codex_agent_runner import (
     build_additional_context,
     build_turn_input,
     engine_options,
+    generated_image_path,
 )
 from astrbot.core.agent.runners.codex.tool_bridge import CodexToolBridge
 from astrbot.core.agent.tool import FunctionTool, ToolSet
@@ -419,3 +420,51 @@ def test_no_codex_exe_warning_names_only_enabled_features(monkeypatch):
 def test_no_codex_exe_warning_is_silent_when_nothing_needs_it(monkeypatch):
     """两个功能都关着时不该报警——聊天本来就不需要这个二进制。"""
     assert "No codex executable found" not in _captured_warnings(monkeypatch, {})
+
+
+# ============================================================
+# 生成的图片自动发到 IM
+# ============================================================
+
+
+def _image_item(path, **overrides):
+    item = {"type": "ImageGeneration", "status": "completed", "saved_path": str(path)}
+    item.update(overrides)
+    return item
+
+
+def test_generated_image_path_accepts_hosted_item(tmp_path):
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"png")
+
+    assert generated_image_path(_image_item(png)) == str(png)
+
+
+def test_generated_image_path_accepts_extension_item(tmp_path):
+    """独立图片生成走扩展 item，tag 是 kind 而不是 type。"""
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"png")
+    item = {
+        "type": "Extension",
+        "kind": "image_gen.generation",
+        "status": "completed",
+        "saved_path": str(png),
+    }
+
+    assert generated_image_path(item) == str(png)
+
+
+def test_generated_image_path_ignores_unfinished_and_missing(tmp_path):
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"png")
+
+    # 还在生成中
+    assert generated_image_path(_image_item(png, status="in_progress")) is None
+    # 失败时没有 saved_path
+    assert (
+        generated_image_path({"type": "ImageGeneration", "status": "completed"}) is None
+    )
+    # 路径已不存在：宁可不发，也不要抛到发送链路上
+    assert generated_image_path(_image_item(tmp_path / "gone.png")) is None
+    # 完全无关的 item
+    assert generated_image_path({"type": "AgentMessage", "status": "completed"}) is None

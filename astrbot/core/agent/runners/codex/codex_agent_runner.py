@@ -19,6 +19,7 @@ import typing as T
 from pathlib import Path
 
 from astrbot.core import logger, sp
+from astrbot.core.message.components import Image
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
 from astrbot.core.permission_rules import PermissionPolicy
@@ -235,6 +236,27 @@ def native_exec_decision(
 def system_prompt(cfg: dict) -> str:
     custom = str(cfg.get("base_instructions") or "").strip()
     return custom or DEFAULT_SYSTEM_PROMPT
+
+
+# Codex saves a generated image under CODEX_HOME and tells the model the user
+# has already seen it, which is true in the TUI but not here. Both the hosted
+# Responses item ("ImageGeneration") and the standalone extension item
+# ("image_gen.generation") carry the same `saved_path`.
+_IMAGE_ITEM_TYPES = ("ImageGeneration",)
+_IMAGE_ITEM_KIND = "image_gen.generation"
+
+
+def generated_image_path(item: JsonObject) -> str | None:
+    """Path of a completed generated image, if this item is one."""
+    is_image = (
+        item.get("type") in _IMAGE_ITEM_TYPES or item.get("kind") == _IMAGE_ITEM_KIND
+    )
+    if not is_image or item.get("status") != "completed":
+        return None
+    path = item.get("saved_path")
+    if not isinstance(path, str) or not path:
+        return None
+    return path if os.path.isfile(path) else None
 
 
 def _part_to_input(part: T.Any) -> JsonObject | None:
@@ -544,6 +566,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             final_texts: list[str] = []
             commentary: list[str] = []
             reasoning: list[str] = []
+            generated_images: list[str] = []
             usage: JsonObject | None = None
             error_msg: str | None = None
             end = "task_complete"
@@ -587,6 +610,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         item = msg.get("item") or {}
                         if item.get("type") == "AgentMessage":
                             phases[item.get("id", "")] = item.get("phase")
+                    elif kind == "item_completed":
+                        path = generated_image_path(msg.get("item") or {})
+                        if path and path not in generated_images:
+                            generated_images.append(path)
                     elif kind == "agent_message_content_delta":
                         phase = phases.get(msg.get("item_id", ""))
                         if self.streaming and (
@@ -667,7 +694,11 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         if end == "turn_aborted" and not text:
             text = "（已中断）" if self._aborted else ""
 
-        chain = MessageChain().message(text)
+        chain = MessageChain().message(text) if text else MessageChain()
+        # Codex only writes the image to disk and then tells the model the user
+        # has already seen it; nothing here has. Send it with this turn's reply.
+        for path in generated_images:
+            chain.chain.append(Image.fromFileSystem(path))
         self.final_llm_resp = LLMResponse(
             role="assistant",
             result_chain=chain,
