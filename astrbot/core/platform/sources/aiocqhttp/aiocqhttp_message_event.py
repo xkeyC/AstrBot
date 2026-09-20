@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import os
+import pathlib
 import re
 from collections.abc import AsyncGenerator
 
@@ -18,6 +21,51 @@ from astrbot.api.message_components import (
     Video,
 )
 from astrbot.api.platform import Group, MessageMember
+from astrbot.core.utils.media_utils import file_uri_to_path, is_file_uri
+
+# 文件段改用 base64 重发时的大小上限。base64 会膨胀约 1/3，且要整条塞进
+# OneBot 的 WebSocket 帧里，过大的文件应当走 callback_api_base 文件服务。
+FILE_BASE64_LIMIT_BYTES = 64 * 1024 * 1024
+
+# 协议端报告"文件不存在"的几种说法。只有命中这些才会重发，避免把发送超时
+# 之类的错误也重试一遍导致重复发送。
+_MISSING_FILE_HINTS = (
+    "enoent",
+    "no such file",
+    "文件不存在",
+    "file not found",
+)
+
+
+def _local_file_path(value: object) -> str | None:
+    """把消息段里的 file 字段还原成本机真实存在的路径。
+
+    Args:
+        value: file 字段的值，可能是路径、file: URI 或 http(s) 链接。
+
+    Returns:
+        本机存在该文件时返回绝对路径，否则返回 None。
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    path = file_uri_to_path(value) if is_file_uri(value) else value
+    if "://" in path:
+        return None
+    try:
+        return os.path.abspath(path) if os.path.isfile(path) else None
+    except OSError:
+        return None
+
+
+# 已经确认读不到本机路径的协议端连接（按 CQHttp 实例区分）。记住之后就直接
+# 走 base64，不必每个文件都先失败一次。
+_PATH_SEND_UNSUPPORTED: set[int] = set()
+
+
+def _is_missing_file_error(exc: BaseException) -> bool:
+    """判断协议端的报错是不是"它那边看不到这个文件"。"""
+    text = f"{exc}".lower()
+    return any(hint in text for hint in _MISSING_FILE_HINTS)
 
 
 class AiocqhttpMessageEvent(AstrMessageEvent):
@@ -33,8 +81,18 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
         self.bot = bot
 
     @staticmethod
-    async def _from_segment_to_dict(segment: BaseMessageComponent) -> dict:
-        """修复部分字段"""
+    async def _from_segment_to_dict(
+        segment: BaseMessageComponent,
+        *,
+        file_as_base64: bool = False,
+    ) -> dict:
+        """修复部分字段
+
+        Args:
+            segment: 要转换的消息段。
+            file_as_base64: 文件段是否内联为 base64，用于协议端读不到本机
+                路径时的重发。
+        """
         if isinstance(segment, Image | Record):
             # For Image and Record segments, we convert them to base64
             bs64 = await segment.convert_to_base64()
@@ -49,8 +107,13 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
             d = await segment.to_dict()
             file_val = d.get("data", {}).get("file", "")
             if file_val:
-                import pathlib
-
+                local_path = _local_file_path(file_val)
+                if local_path and file_as_base64:
+                    payload = await asyncio.to_thread(
+                        AiocqhttpMessageEvent._encode_file_base64, local_path
+                    )
+                    d["data"]["file"] = f"base64://{payload}"
+                    return d
                 try:
                     # 使用 pathlib 处理路径，能更好地处理 Windows/Linux 差异
                     path_obj = pathlib.Path(file_val)
@@ -172,14 +235,60 @@ class AiocqhttpMessageEvent(AstrMessageEvent):
                         payload["self_id"] = event["self_id"]
                     await bot.call_action("send_private_forward_msg", **payload)
             elif isinstance(seg, File):
-                d = await cls._from_segment_to_dict(seg)
-                await cls._dispatch_send(bot, event, is_group, session_id, [d])
+                await cls._send_file_segment(bot, event, is_group, session_id, seg)
             else:
                 messages = await cls._parse_onebot_json(MessageChain([seg]))
                 if not messages:
                     continue
                 await cls._dispatch_send(bot, event, is_group, session_id, messages)
                 await asyncio.sleep(0.5)
+
+    @staticmethod
+    def _encode_file_base64(path: str) -> str:
+        """把本机文件读成 base64。超过上限时直接报错，让调用方保留原始失败。"""
+        size = os.path.getsize(path)
+        if size > FILE_BASE64_LIMIT_BYTES:
+            raise ValueError(
+                f"文件 {os.path.basename(path)} 有 {size / 1024 / 1024:.1f} MB，"
+                f"超过 base64 内联上限 {FILE_BASE64_LIMIT_BYTES // 1024 // 1024} MB"
+            )
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+
+    @classmethod
+    async def _send_file_segment(
+        cls,
+        bot: CQHttp,
+        event: Event | None,
+        is_group: bool,
+        session_id: str | None,
+        seg: File,
+    ) -> None:
+        """发送文件段，必要时把文件内联成 base64 重发一次。
+
+        协议端（NapCat、Lagrange 等）常与 AstrBot 跑在不同的容器或主机上，
+        此时本机路径在它那边并不存在，发送会以 ENOENT 失败。先按路径发
+        （同机部署最省带宽），只有在协议端明确说文件不存在时才改用
+        base64 重发，以免把发送超时之类的错误也重试成重复消息。
+        """
+        known_split = id(bot) in _PATH_SEND_UNSUPPORTED
+        if not known_split:
+            d = await cls._from_segment_to_dict(seg)
+            try:
+                await cls._dispatch_send(bot, event, is_group, session_id, [d])
+                return
+            except Exception as e:
+                local_path = _local_file_path(d.get("data", {}).get("file", ""))
+                if not local_path or not _is_missing_file_error(e):
+                    raise
+                _PATH_SEND_UNSUPPORTED.add(id(bot))
+                logger.warning(
+                    f"协议端读不到本机文件 {local_path}（{e}），改用 base64 重发；"
+                    "该连接后续的文件将直接内联。若文件较大，"
+                    "建议配置 callback_api_base 走文件服务。"
+                )
+        d = await cls._from_segment_to_dict(seg, file_as_base64=True)
+        await cls._dispatch_send(bot, event, is_group, session_id, [d])
 
     async def send(self, message: MessageChain) -> None:
         """发送消息"""
