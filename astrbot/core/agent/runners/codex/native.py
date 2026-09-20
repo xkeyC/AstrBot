@@ -12,7 +12,8 @@ import asyncio
 import contextlib
 import json
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -98,10 +99,62 @@ class ActiveTurn:
     steered: int = 0
     aborted: bool = False
     steered_texts: list[str] = field(default_factory=list)
+    #: Set once `turn_id` is known, or once the turn failed to start. Registered
+    #: before the submit so a follow-up arriving during that round trip waits
+    #: for the turn instead of being queued behind it as a separate reply.
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 # umo -> running turn
 ACTIVE_TURNS: dict[str, ActiveTurn] = {}
+
+#: How long a follow-up waits for a just-submitted turn to report its id.
+STEER_READY_TIMEOUT_S = 10.0
+
+#: umo -> turns holding or waiting for that chat's session lock.
+_QUEUED_TURNS: dict[str, int] = {}
+
+
+class SessionBusy(RuntimeError):
+    """Too many turns are already queued for this chat."""
+
+    def __init__(self, waiting: int) -> None:
+        super().__init__(f"{waiting} turns already queued")
+        self.waiting = waiting
+
+
+@asynccontextmanager
+async def session_slot(
+    engine: CodexEngine, umo: str, max_queued: int = 0
+) -> AsyncIterator[None]:
+    """Runs one turn at a time per chat, refusing a caller when the line is long.
+
+    One chat is one Codex thread, and a thread runs one turn at a time, so a
+    message from another sender waits here. Without a cap a busy group can pile
+    up an unbounded number of coroutines, each holding its event, all waiting
+    out a turn that may run for minutes.
+
+    Args:
+        engine: Engine owning the per-chat locks.
+        umo: Unified message origin identifying the chat.
+        max_queued: Turns allowed to hold or wait for the lock; 0 means no cap.
+
+    Raises:
+        SessionBusy: The queue is already that deep.
+    """
+    waiting = _QUEUED_TURNS.get(umo, 0)
+    if max_queued > 0 and waiting >= max_queued:
+        raise SessionBusy(waiting)
+    _QUEUED_TURNS[umo] = waiting + 1
+    try:
+        async with engine.session_lock(umo):
+            yield
+    finally:
+        remaining = _QUEUED_TURNS.get(umo, 1) - 1
+        if remaining > 0:
+            _QUEUED_TURNS[umo] = remaining
+        else:
+            _QUEUED_TURNS.pop(umo, None)
 
 
 async def try_steer(
@@ -122,6 +175,16 @@ async def try_steer(
         or active.sender_id != sender_id
     ):
         return None
+    if not active.turn_id:
+        # The turn is registered but its submit has not returned yet. Waiting
+        # keeps this follow-up in the same reply instead of making it a second
+        # turn, which is the whole point of steering.
+        try:
+            await asyncio.wait_for(active.ready.wait(), STEER_READY_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return None
+        if active.aborted or not active.turn_id:
+            return None
     try:
         result = await active.engine.submit_turn(
             active.thread_id,
@@ -283,7 +346,7 @@ class CodexEngine:
     def __init__(self, rt: Any) -> None:
         self.rt = rt
         self.pumps: dict[str, ThreadPump] = {}
-        self.thread_locks: dict[str, asyncio.Lock] = {}
+        self.session_locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
     async def get(cls, options: JsonObject) -> CodexEngine:
@@ -311,8 +374,10 @@ class CodexEngine:
             with contextlib.suppress(Exception):
                 await engine.rt.shutdown()
 
-    def lock_for(self, thread_id: str) -> asyncio.Lock:
-        return self.thread_locks.setdefault(thread_id, asyncio.Lock())
+    def session_lock(self, umo: str) -> asyncio.Lock:
+        """One lock per chat, not per thread: it also has to cover opening the
+        thread, which is what decides the thread id."""
+        return self.session_locks.setdefault(umo, asyncio.Lock())
 
     def _pump(self, thread_id: str) -> ThreadPump:
         pump = self.pumps.get(thread_id)

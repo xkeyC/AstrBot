@@ -78,6 +78,10 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "sync_history": True,
         "tool_call_timeout": 120,
         "turn_timeout": 600,
+        # One chat runs one Codex turn at a time; messages from other senders
+        # wait. This caps how many may wait before the rest are told to retry.
+        # 0 removes the cap.
+        "max_queued_turns": 5,
     },
 }
 

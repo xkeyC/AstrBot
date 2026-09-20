@@ -95,6 +95,28 @@ class RespondStage(Stage):
             word_count = len([c for c in text if c.isalnum()])
         return word_count
 
+    async def _report_send_failures(self, event, failed: int) -> None:
+        """Tells the chat that part of the reply did not go out.
+
+        Each segment is sent on its own and a failure only reached the log, so
+        a reply could arrive with a hole in it and nothing said so -- the turn
+        is over by then, and the agent never learns. The wording stays hedged
+        because the most common failure, a protocol-side send timeout, often
+        delivers the message anyway.
+
+        Args:
+            event: Event whose session the reply was sent to.
+            failed: Number of segments whose send raised.
+        """
+        if failed <= 0:
+            return
+        try:
+            await event.send(
+                MessageChain().message(f"⚠️ 有 {failed} 段内容可能未能发出。")
+            )
+        except Exception as e:  # noqa: BLE001 - the channel is already failing
+            logger.error(f"Could not report the failed sends either: {e}")
+
     async def _calc_comp_interval(self, comp: BaseMessageComponent) -> float:
         """分段回复 计算间隔时间"""
         if self.interval_method == "log":
@@ -275,6 +297,7 @@ class RespondStage(Stage):
                         f"actual_chain: {result.chain}",
                     )
                     return
+                failed = 0
                 for comp in result.chain:
                     i = await self._calc_comp_interval(comp)
                     await asyncio.sleep(i)
@@ -285,11 +308,13 @@ class RespondStage(Stage):
                             await event.send(result.derive([*header_comps, comp]))
                             header_comps.clear()
                     except Exception as e:
+                        failed += 1
                         logger.error(
                             "Failed to send the message chain: "
                             f"chain = {MessageChain([comp])}, error = {e}",
                             exc_info=True,
                         )
+                await self._report_send_failures(event, failed)
             else:
                 if all(
                     comp.type in {ComponentType.Reply, ComponentType.At}
@@ -306,11 +331,13 @@ class RespondStage(Stage):
                     need_separately,
                     modify_raw_chain=True,
                 )
+                failed = 0
                 for comp in sep_comps:
                     chain = result.derive([comp])
                     try:
                         await event.send(chain)
                     except Exception as e:
+                        failed += 1
                         logger.error(
                             f"Failed to send the message chain: chain = {chain}, "
                             f"error = {e}",
@@ -321,11 +348,13 @@ class RespondStage(Stage):
                     try:
                         await event.send(chain)
                     except Exception as e:
+                        failed += 1
                         logger.error(
                             f"Failed to send the message chain: chain = {chain}, "
                             f"error = {e}",
                             exc_info=True,
                         )
+                await self._report_send_failures(event, failed)
 
         if await call_event_hook(event, EventType.OnAfterMessageSentEvent):
             return

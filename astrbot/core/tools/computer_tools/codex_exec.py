@@ -16,10 +16,13 @@ process and no TTY.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import re
 import shlex
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +33,7 @@ from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.computer.booters.local import LocalShellComponent
 from astrbot.core.computer.computer_client import get_booter
+from astrbot.core.message.message_event_result import MessageChain
 
 from ..registry import builtin_tool
 from .util import check_admin_permission, is_local_runtime, workspace_root_for_context
@@ -163,6 +167,169 @@ class SandboxSessions:
     @classmethod
     def drop(cls, umo: str, session_id: str) -> None:
         cls._sessions.get(umo, {}).pop(session_id, None)
+
+    @classmethod
+    def count(cls, umo: str) -> int:
+        return len(cls._sessions.get(umo, {}))
+
+
+# ---------------------------------------------------- background completion
+
+#: Live sessions allowed per chat. Each is a tmux pane plus a shell inside the
+#: sandbox, and the sandbox caps how many processes it will host.
+MAX_LIVE_SESSIONS_PER_CHAT = 8
+
+#: Grace period before a watcher starts polling, so it stays out of the way
+#: while the agent is still working the session itself.
+WATCH_GRACE_SECONDS = 60
+#: How long a watcher keeps waiting for a command the agent walked away from.
+WATCH_MAX_SECONDS = 30 * 60
+#: How long each watcher poll waits.
+WATCH_POLL_MS = 15_000
+#: Output carried in the completion message.
+COMPLETION_TAIL_CHARS = 1_200
+
+#: One watcher per session, so repeated polls do not spawn more.
+_watchers: dict[tuple[str, str], asyncio.Task] = {}
+#: Sessions whose completion has been reported, by whoever got there first.
+_claimed: OrderedDict[tuple[str, str], None] = OrderedDict()
+_CLAIMED_LIMIT = 512
+
+
+def claim_completion(umo: str, session_id: str) -> bool:
+    """Returns whether the caller is the one to report this session's exit.
+
+    A session can be finished either by the agent polling it or by the watcher
+    behind it. Both must not report the same completion.
+    """
+    key = (umo, session_id)
+    if key in _claimed:
+        return False
+    _claimed[key] = None
+    while len(_claimed) > _CLAIMED_LIMIT:
+        _claimed.popitem(last=False)
+    return True
+
+
+def watch_background_session(
+    context: ContextWrapper[AstrAgentContext],
+    umo: str,
+    session_id: str,
+    *,
+    sandbox: SandboxSession | None = None,
+) -> None:
+    """Delivers a command's result to the chat once it finishes.
+
+    `exec_command` yields after `yield_time_ms` and leaves the command running;
+    the only way to see the rest is for the model to poll. When it answers the
+    chat message instead, the turn ends and nothing ever collects the output.
+    This watcher closes that loop: it waits the command out and posts the exit
+    code and the tail of its output into the same chat.
+    """
+    key = (umo, session_id)
+    if key in _watchers:
+        return
+    plugin_context = context.context.context
+    booter_args = (context, umo, session_id, sandbox)
+    task = asyncio.create_task(
+        _watch(plugin_context, *booter_args), name=f"exec-watch-{session_id}"
+    )
+    _watchers[key] = task
+    task.add_done_callback(lambda _t, k=key: _watchers.pop(k, None))
+
+
+async def _watch(
+    plugin_context: Any,
+    context: ContextWrapper[AstrAgentContext],
+    umo: str,
+    session_id: str,
+    sandbox: SandboxSession | None,
+) -> None:
+    await asyncio.sleep(WATCH_GRACE_SECONDS)
+    deadline = time.monotonic() + WATCH_MAX_SECONDS
+    cursor = sandbox.cursor if sandbox else 0
+    try:
+        booter = await get_booter(plugin_context, umo)
+    except Exception as e:  # noqa: BLE001 - sandbox may be gone by now
+        logger.debug("exec watcher could not reach the runtime for %s: %s", umo, e)
+        return
+    while time.monotonic() < deadline:
+        if sandbox is not None and SandboxSessions.get(umo, session_id) is None:
+            return  # the agent polled it through to the end itself
+        try:
+            if sandbox is not None:
+                raw = await _sandbox_exec(
+                    booter.shell,
+                    _poll_script(
+                        sandbox.directory,
+                        cursor,
+                        WATCH_POLL_MS,
+                        sandbox.session_id if sandbox.tmux else None,
+                    ),
+                    timeout=WATCH_POLL_MS // 1000 + 15,
+                )
+                output, cursor, exit_code = _parse_poll(raw, cursor)
+            else:
+                event = context.context.event
+                result = await booter.shell.poll_session(
+                    owner_id=umo,
+                    requester_id=event.get_sender_id(),
+                    requester_is_admin=event.role == "admin",
+                    session_id=session_id,
+                    yield_time_ms=WATCH_POLL_MS,
+                    max_output_chars=COMPLETION_TAIL_CHARS,
+                )
+                output = str(result.get("stdout") or "")
+                exit_code = result.get("exit_code")
+        except Exception as e:  # noqa: BLE001 - session gone, or runtime down
+            logger.debug("exec watcher stopped for session %s: %s", session_id, e)
+            return
+        if exit_code is None:
+            continue
+        if sandbox is not None:
+            SandboxSessions.drop(umo, session_id)
+        if claim_completion(umo, session_id):
+            await _deliver(plugin_context, umo, session_id, exit_code, output)
+        return
+    # Still running after the watch window. A pane nobody polls is a process
+    # nobody will ever stop, so end it here rather than leave it in the sandbox.
+    logger.info(
+        "Background command %s is still running after %d minutes; stopping it.",
+        session_id,
+        WATCH_MAX_SECONDS // 60,
+    )
+    if sandbox is not None:
+        SandboxSessions.drop(umo, session_id)
+        if sandbox.tmux:
+            with contextlib.suppress(Exception):
+                await _sandbox_exec(
+                    booter.shell,
+                    f"tmux kill-session -t {shlex.quote(session_id)} 2>/dev/null; true",
+                    timeout=30,
+                )
+    if claim_completion(umo, session_id):
+        with contextlib.suppress(Exception):
+            await plugin_context.send_message(
+                umo,
+                MessageChain().message(
+                    f"后台命令（会话 {session_id}）运行超过 "
+                    f"{WATCH_MAX_SECONDS // 60} 分钟仍未结束，已停止。"
+                ),
+            )
+
+
+async def _deliver(
+    plugin_context: Any, umo: str, session_id: str, exit_code: int, output: str
+) -> None:
+    tail = clean_terminal_output(output).strip()
+    if len(tail) > COMPLETION_TAIL_CHARS:
+        tail = "…" + tail[-COMPLETION_TAIL_CHARS:]
+    header = f"后台命令已结束（会话 {session_id}，退出码 {exit_code}）"
+    text = f"{header}\n{tail}" if tail else header
+    try:
+        await plugin_context.send_message(umo, MessageChain().message(text))
+    except Exception as e:  # noqa: BLE001
+        logger.error("Could not report background session %s: %s", session_id, e)
 
 
 def _poll_script(
@@ -359,7 +526,11 @@ class ExecCommandTool(FunctionTool):
     name: str = "exec_command"
     description: str = (
         "Runs a command in a shell session, returning output or a session ID for "
-        "ongoing interaction. Use write_stdin to keep reading or to answer prompts."
+        "ongoing interaction. Use write_stdin to keep reading or to answer prompts. "
+        "When a session ID comes back the command is still running: keep polling "
+        "with write_stdin until it reports an exit code, before you answer. A "
+        "session left running is reported to the chat on its own when it ends, "
+        "and is stopped if it outlives the watch window."
     )
     parameters: dict = field(
         default_factory=lambda: {
@@ -437,6 +608,8 @@ class ExecCommandTool(FunctionTool):
             except (PermissionError, ValueError) as e:
                 return f"Error: {e}"
             running = result.get("exit_code") is None
+            if running:
+                watch_background_session(context, umo, str(result["session_id"]))
             return format_exec_response(
                 output=str(result.get("stdout") or ""),
                 wall_time_seconds=time.monotonic() - started,
@@ -445,6 +618,15 @@ class ExecCommandTool(FunctionTool):
                 max_output_tokens=budget,
             )
 
+        if SandboxSessions.count(umo) >= MAX_LIVE_SESSIONS_PER_CHAT:
+            # Every live session is a tmux pane and a shell inside the sandbox,
+            # which has its own process limits. Refusing here is better than
+            # failing somewhere deeper once those run out.
+            return (
+                f"Error: {MAX_LIVE_SESSIONS_PER_CHAT} shell sessions are already "
+                "running for this chat. Poll them with write_stdin until they "
+                "report an exit code before starting another."
+            )
         try:
             session = await _start_sandbox_session(booter.shell, cmd, workdir, shell)
         except Exception as e:  # noqa: BLE001 - sandbox or transport failure
@@ -464,6 +646,9 @@ class ExecCommandTool(FunctionTool):
         session.cursor = cursor
         if exit_code is None:
             SandboxSessions.add(umo, session)
+            watch_background_session(context, umo, session.session_id, sandbox=session)
+        else:
+            claim_completion(umo, session.session_id)
         return format_exec_response(
             output=output,
             wall_time_seconds=time.monotonic() - started,
@@ -552,6 +737,8 @@ class WriteStdinTool(FunctionTool):
             except ValueError as e:
                 return f"Error: {e}"
             running = result.get("exit_code") is None
+            if not running:
+                claim_completion(umo, session_id)
             return format_exec_response(
                 output=str(result.get("stdout") or ""),
                 wall_time_seconds=time.monotonic() - started,
@@ -582,6 +769,8 @@ class WriteStdinTool(FunctionTool):
         if exit_code is not None:
             # The poll script already killed the pane on its way out.
             SandboxSessions.drop(umo, session_id)
+            # Reported here, so the watcher behind this session says nothing.
+            claim_completion(umo, session_id)
         return format_exec_response(
             output=output,
             wall_time_seconds=time.monotonic() - started,

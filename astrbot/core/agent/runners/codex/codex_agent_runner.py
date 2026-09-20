@@ -40,8 +40,10 @@ from .native import (
     ActiveTurn,
     CodexEngine,
     JsonObject,
+    SessionBusy,
     find_code_mode_host,
     find_codex_exe,
+    session_slot,
 )
 from .tool_bridge import CodexToolBridge
 
@@ -60,6 +62,8 @@ CONTINUE_NOTE = (
     "</request_context>"
 )
 MAX_CONTINUATIONS = 2
+# Shown instead of an answer when a chat already has too many turns waiting.
+BUSY_NOTE = "我这边还在处理前面的消息，稍后再发一次吧。"
 CODE_MODES = ("code_mode", "code_mode_only")
 
 
@@ -545,135 +549,170 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
     async def _run_turn(self) -> T.AsyncGenerator[AgentResponse, None]:
         engine = await CodexEngine.get(engine_options(self.cfg))
         self._engine = engine
-        thread_id, tools_update = await self._open_thread(engine)
-        self._thread_id = thread_id
         show_commentary = bool(self.cfg.get("show_commentary"))
         timeout = float(self.cfg.get("turn_timeout") or 600)
+        max_queued = int(self.cfg.get("max_queued_turns") or 0)
 
-        async with engine.lock_for(thread_id):
-            pump = engine.pump(thread_id)
-            queue = pump.open_turn(self._handle_tool_call, self._handle_approval)
-            phases: dict[str, str | None] = {}
-            final_texts: list[str] = []
-            commentary: list[str] = []
-            reasoning: list[str] = []
-            generated_images: list[str] = []
-            usage: JsonObject | None = None
-            error_msg: str | None = None
-            end = "task_complete"
-            started = time.monotonic()
-            active: ActiveTurn | None = None
-            event_seq = last_user_seq = last_agent_seq = 0
-            continuations = 0
-            try:
-                sub = await engine.submit_turn(
-                    thread_id, self._turn_request(tools_update)
-                )
-                if sub.get("status") == "not_submitted":
-                    raise RuntimeError(
-                        f"Codex did not accept the turn: {sub.get('reason')}"
+        try:
+            async with session_slot(engine, self.umo, max_queued):
+                # Opening the thread belongs in the critical section: it
+                # is what decides the thread id, so two senders arriving
+                # together on a new chat would otherwise each make one.
+                thread_id, tools_update = await self._open_thread(engine)
+                self._thread_id = thread_id
+                pump = engine.pump(thread_id)
+                queue = pump.open_turn(self._handle_tool_call, self._handle_approval)
+                phases: dict[str, str | None] = {}
+                final_texts: list[str] = []
+                commentary: list[str] = []
+                reasoning: list[str] = []
+                generated_images: list[str] = []
+                usage: JsonObject | None = None
+                error_msg: str | None = None
+                end = "task_complete"
+                started = time.monotonic()
+                active: ActiveTurn | None = None
+                event_seq = last_user_seq = last_agent_seq = 0
+                continuations = 0
+                try:
+                    # Registered before the submit, not after: a same-sender
+                    # follow-up arriving during that round trip should wait for
+                    # this turn and be steered into it, not become a second one.
+                    active = ActiveTurn(
+                        engine,
+                        thread_id,
+                        "",
+                        self._sender_id(),
+                        message_id=self._message_id(),
                     )
-                self._turn_running = True
-                active = ActiveTurn(
-                    engine,
-                    thread_id,
-                    str(sub.get("turn_id") or ""),
-                    self._sender_id(),
-                    message_id=self._message_id(),
-                )
-                self._active = active
-                ACTIVE_TURNS[self.umo] = active
-                while True:
-                    remaining = timeout - (time.monotonic() - started)
-                    if remaining <= 0:
-                        await engine.interrupt(thread_id)
-                        error_msg = f"Codex turn timed out after {timeout:.0f}s"
-                        break
+                    self._active = active
+                    ACTIVE_TURNS[self.umo] = active
                     try:
-                        msg = await asyncio.wait_for(queue.get(), remaining)
-                    except asyncio.TimeoutError:
-                        continue
-                    kind = msg.get("type")
-                    event_seq += 1
-                    if kind == "user_message":
-                        last_user_seq = event_seq
-                    if kind == "item_started":
-                        item = msg.get("item") or {}
-                        if item.get("type") == "AgentMessage":
-                            phases[item.get("id", "")] = item.get("phase")
-                    elif kind == "item_completed":
-                        path = generated_image_path(msg.get("item") or {})
-                        if path and path not in generated_images:
-                            generated_images.append(path)
-                    elif kind == "agent_message_content_delta":
-                        phase = phases.get(msg.get("item_id", ""))
-                        if self.streaming and (
-                            phase in _FINAL_PHASES or show_commentary
-                        ):
-                            yield AgentResponse(
-                                type="streaming_delta",
-                                data=AgentResponseData(
-                                    chain=MessageChain().message(msg.get("delta", ""))
-                                ),
+                        sub = await engine.submit_turn(
+                            thread_id, self._turn_request(tools_update)
+                        )
+                        if sub.get("status") == "not_submitted":
+                            raise RuntimeError(
+                                f"Codex did not accept the turn: {sub.get('reason')}"
                             )
-                    elif kind == "agent_message":
-                        last_agent_seq = event_seq
-                        text = msg.get("message") or ""
-                        if msg.get("phase") in _FINAL_PHASES:
-                            final_texts.append(text)
-                        else:
-                            commentary.append(text)
-                            if self.streaming and show_commentary:
+                        active.turn_id = str(sub.get("turn_id") or "")
+                    except BaseException:
+                        active.aborted = True
+                        raise
+                    finally:
+                        # Release a follow-up waiting on the turn id, including
+                        # when the submit failed.
+                        active.ready.set()
+                    self._turn_running = True
+                    while True:
+                        remaining = timeout - (time.monotonic() - started)
+                        if remaining <= 0:
+                            await engine.interrupt(thread_id)
+                            error_msg = f"Codex turn timed out after {timeout:.0f}s"
+                            break
+                        try:
+                            msg = await asyncio.wait_for(queue.get(), remaining)
+                        except asyncio.TimeoutError:
+                            continue
+                        kind = msg.get("type")
+                        event_seq += 1
+                        if kind == "user_message":
+                            last_user_seq = event_seq
+                        if kind == "item_started":
+                            item = msg.get("item") or {}
+                            if item.get("type") == "AgentMessage":
+                                phases[item.get("id", "")] = item.get("phase")
+                        elif kind == "item_completed":
+                            path = generated_image_path(msg.get("item") or {})
+                            if path and path not in generated_images:
+                                generated_images.append(path)
+                        elif kind == "agent_message_content_delta":
+                            phase = phases.get(msg.get("item_id", ""))
+                            if self.streaming and (
+                                phase in _FINAL_PHASES or show_commentary
+                            ):
                                 yield AgentResponse(
                                     type="streaming_delta",
                                     data=AgentResponseData(
-                                        chain=MessageChain().message("\n\n")
+                                        chain=MessageChain().message(
+                                            msg.get("delta", "")
+                                        )
                                     ),
                                 )
-                    elif kind == "agent_reasoning":
-                        reasoning.append(msg.get("text") or "")
-                    elif kind == "token_count":
-                        usage = (msg.get("info") or {}).get("last_token_usage") or usage
-                    elif kind == "error":
-                        error_msg = msg.get("message") or str(msg)
-                    elif kind in TERMINAL_EVENTS:
-                        end = kind
-                        # A follow-up steered in as the turn ended was recorded
-                        # but never answered (B13): answer it in one more turn.
-                        unanswered = (
-                            active.steered > 0 and last_user_seq > last_agent_seq
-                        )
-                        if (
-                            kind != "turn_aborted"
-                            and unanswered
-                            and not self._aborted
-                            and continuations < MAX_CONTINUATIONS
-                        ):
-                            continuations += 1
-                            again = await engine.submit_turn(
-                                thread_id,
-                                {
-                                    "input": [
-                                        {
-                                            "type": "text",
-                                            "text": CONTINUE_NOTE,
-                                            "text_elements": [],
-                                        }
-                                    ],
-                                    "mode": "start_if_idle",
-                                },
+                        elif kind == "agent_message":
+                            last_agent_seq = event_seq
+                            text = msg.get("message") or ""
+                            if msg.get("phase") in _FINAL_PHASES:
+                                final_texts.append(text)
+                            else:
+                                commentary.append(text)
+                                if self.streaming and show_commentary:
+                                    yield AgentResponse(
+                                        type="streaming_delta",
+                                        data=AgentResponseData(
+                                            chain=MessageChain().message("\n\n")
+                                        ),
+                                    )
+                        elif kind == "agent_reasoning":
+                            reasoning.append(msg.get("text") or "")
+                        elif kind == "token_count":
+                            usage = (msg.get("info") or {}).get(
+                                "last_token_usage"
+                            ) or usage
+                        elif kind == "error":
+                            error_msg = msg.get("message") or str(msg)
+                        elif kind in TERMINAL_EVENTS:
+                            end = kind
+                            # A follow-up steered in as the turn ended was recorded
+                            # but never answered (B13): answer it in one more turn.
+                            unanswered = (
+                                active.steered > 0 and last_user_seq > last_agent_seq
                             )
-                            if again.get("status") == "started":
-                                active.turn_id = str(again.get("turn_id") or "")
-                                continue
-                        break
-                    elif kind == "_pump_closed":
-                        raise RuntimeError(msg.get("message") or "Codex thread closed")
-            finally:
-                self._turn_running = False
-                if active is not None and ACTIVE_TURNS.get(self.umo) is active:
-                    ACTIVE_TURNS.pop(self.umo, None)
-                pump.close_turn()
+                            if (
+                                kind != "turn_aborted"
+                                and unanswered
+                                and not self._aborted
+                                and continuations < MAX_CONTINUATIONS
+                            ):
+                                continuations += 1
+                                again = await engine.submit_turn(
+                                    thread_id,
+                                    {
+                                        "input": [
+                                            {
+                                                "type": "text",
+                                                "text": CONTINUE_NOTE,
+                                                "text_elements": [],
+                                            }
+                                        ],
+                                        "mode": "start_if_idle",
+                                    },
+                                )
+                                if again.get("status") == "started":
+                                    active.turn_id = str(again.get("turn_id") or "")
+                                    continue
+                            break
+                        elif kind == "_pump_closed":
+                            raise RuntimeError(
+                                msg.get("message") or "Codex thread closed"
+                            )
+                finally:
+                    self._turn_running = False
+                    if active is not None and ACTIVE_TURNS.get(self.umo) is active:
+                        ACTIVE_TURNS.pop(self.umo, None)
+                    pump.close_turn()
+
+        except SessionBusy as busy:
+            logger.info(
+                "Codex session %s is busy; %d turns already queued.",
+                self.umo,
+                busy.waiting,
+            )
+            chain = MessageChain().message(BUSY_NOTE)
+            self.final_llm_resp = LLMResponse(role="assistant", result_chain=chain)
+            self._transition_state(AgentState.DONE)
+            yield AgentResponse(type="llm_result", data=AgentResponseData(chain=chain))
+            return
 
         text = "\n\n".join(t for t in final_texts if t.strip())
         if show_commentary and commentary:
