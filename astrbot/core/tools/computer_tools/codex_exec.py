@@ -16,6 +16,7 @@ process and no TTY.
 
 from __future__ import annotations
 
+import re
 import shlex
 import time
 import uuid
@@ -48,6 +49,37 @@ META_MARKER = "<<<ASTRBOT_EXEC_META"
 TRUNCATION_MARKER = "[... omitted middle of output ...]"
 
 
+# A PTY writes terminal control sequences into the stream: colours, cursor
+# moves, title changes and a CR before every LF. The model reads the output as
+# text, so these are dropped before it is shown. Byte offsets are unaffected:
+# the sandbox reports them with `wc -c` over the untouched log.
+_ANSI_SEQUENCES = re.compile(
+    r"""
+    \x1b\][^\x07\x1b]*(?:\x07|\x1b\\)   # OSC: window title and friends
+    | \x1b[@-Z\\-_]                     # two-byte escapes
+    | \x1b\[[0-?]*[ -/]*[@-~]           # CSI: colours, cursor moves
+    | \x1b[PX^_][^\x1b]*\x1b\\          # DCS, SOS, PM, APC strings
+    | [\x00\x07\x08\x0b\x0c\x0e\x0f]    # stray control bytes
+    """,
+    re.VERBOSE,
+)
+
+
+def clean_terminal_output(text: str) -> str:
+    """Strip terminal control sequences from PTY output.
+
+    Args:
+        text: Raw bytes decoded from the session log.
+
+    Returns:
+        The same text as a person would read it on screen, with escape
+        sequences removed and CRLF line endings normalised.
+    """
+    if not text:
+        return text
+    return _ANSI_SEQUENCES.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+
+
 def approx_token_count(text: str) -> int:
     return max(1, (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN) if text else 0
 
@@ -70,6 +102,7 @@ def format_exec_response(
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> str:
     """Render one exec result the way Codex's own exec tools do."""
+    output = clean_terminal_output(output)
     original_tokens = approx_token_count(output)
     text, truncated = truncate_middle(output, max_output_tokens)
     sections = []

@@ -303,3 +303,24 @@ def test_sandbox_start_script_guards_the_pane(monkeypatch):
     assert start.endswith(
         f"&& echo tmux-ok || {{ tmux kill-session -t {pane_id} >/dev/null 2>&1; false; }}"
     )
+
+
+def test_pty_control_sequences_are_stripped_for_the_model():
+    from astrbot.core.tools.computer_tools.codex_exec import clean_terminal_output
+
+    # Colour, a cursor move, a window title and CRLF line endings.
+    raw = (
+        "\x1b]0;bash\x07\x1b[32mok\x1b[0m\r\n"
+        "\x1b[2Kprogress 100%\r\n"
+        "\x1b[1;31mfailed\x1b[m\r\n"
+    )
+    assert clean_terminal_output(raw) == "ok\nprogress 100%\nfailed\n"
+    assert clean_terminal_output("") == ""
+    # Plain output is untouched.
+    assert clean_terminal_output("a\nb\n") == "a\nb\n"
+
+    text = format_exec_response(
+        output="\x1b[32mdone\x1b[0m\r\n", wall_time_seconds=0.1, exit_code=0
+    )
+    assert text.endswith("Output:\ndone\n")
+    assert "\x1b" not in text and "\r" not in text
