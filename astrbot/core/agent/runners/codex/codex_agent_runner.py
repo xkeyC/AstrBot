@@ -102,6 +102,14 @@ def engine_options(cfg: dict) -> JsonObject:
         ),
         "approval_policy": cfg.get("approval_policy") or "never",
         "sandbox_mode": cfg.get("sandbox") or "read-only",
+        # Codex reports skill invocations (by name), MCP tool calls and thread
+        # metadata to chatgpt.com whenever an account is signed in. A chat bot
+        # runs other people's conversations, so this is off unless the operator
+        # turns it back on through thread_config.
+        "analytics.enabled": False,
+        # Inert today (the binding builds no OTEL provider, so every metric is
+        # a no-op) but the built-in default is a Statsig exporter, so pin it.
+        "otel.metrics_exporter": "none",
     }
     if model := cfg.get("model"):
         config["model"] = model
@@ -121,16 +129,28 @@ def engine_options(cfg: dict) -> JsonObject:
                 "codex-code-mode-host not found; set code_mode_host or install Codex CLI. "
                 "code_mode_only turns will fail."
             )
-    if native_exec or cfg.get("memory_enabled"):
-        # Also needed by memory consolidation, which runs as a Codex sub-agent
-        # editing the memory folder; chat threads still start without it.
+    # The executable is what gives Codex a local execution environment. Chat
+    # never needs one -- AstrBot supplies its own tools -- but memory
+    # consolidation does: it runs as a Codex sub-agent that edits the files in
+    # the memory folder, and with no environment it gets no tools at all.
+    needs_exe = [
+        name
+        for name, enabled in (
+            ("native execution", native_exec),
+            ("memory consolidation", bool(cfg.get("memory_enabled"))),
+        )
+        if enabled
+    ]
+    if needs_exe:
         if exe := find_codex_exe(str(cfg.get("codex_self_exe") or "")):
             options["codex_self_exe"] = exe
         else:
             logger.warning(
-                "No codex executable found; native execution and memory "
-                "consolidation stay unavailable. Set codex_self_exe, or "
-                "reinstall the binding with CODEX_ASTRBOT_WITH_CODEX=1."
+                "No codex executable found, so %s cannot run: without it Codex "
+                "has no local execution environment. Chat is unaffected. Set "
+                "codex_self_exe, or reinstall the binding with "
+                "CODEX_ASTRBOT_WITH_CODEX=1.",
+                " and ".join(needs_exe),
             )
     if native_exec and (cfg.get("approval_policy") or "never") == "never":
         # Every native command asks for approval; AstrBot answers it from the

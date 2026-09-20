@@ -368,3 +368,54 @@ def test_hidden_tools_change_the_fingerprint_per_sender():
     )
     # A different tool set means the runner sends a tools update for that turn.
     assert allowed.fingerprint != denied.fingerprint
+
+
+# ============================================================
+# 遥测与 codex 可执行文件告警
+# ============================================================
+
+
+def test_engine_options_disable_codex_telemetry():
+    """Codex 会把 skill 名、MCP 调用等上报到 chatgpt.com，默认必须关掉。"""
+    config = engine_options({})["config"]
+
+    assert config["analytics.enabled"] is False
+    assert config["otel.metrics_exporter"] == "none"
+
+
+def test_thread_config_can_re_enable_analytics():
+    """运营者仍可通过 thread_config 覆盖回来。"""
+    config = engine_options({"thread_config": {"analytics.enabled": True}})["config"]
+
+    assert config["analytics.enabled"] is True
+
+
+def _captured_warnings(monkeypatch, cfg):
+    """AstrBot 用 loguru，日志不走 stdlib handler，caplog 抓不到，所以直接换掉 logger。"""
+    monkeypatch.setattr(
+        "astrbot.core.agent.runners.codex.codex_agent_runner.find_codex_exe",
+        lambda _: "",
+    )
+    messages = []
+    monkeypatch.setattr(
+        "astrbot.core.agent.runners.codex.codex_agent_runner.logger",
+        SimpleNamespace(
+            warning=lambda msg, *args: messages.append(msg % args if args else msg)
+        ),
+    )
+    engine_options(cfg)
+    return "\n".join(messages)
+
+
+def test_no_codex_exe_warning_names_only_enabled_features(monkeypatch):
+    """告警只点名真正开着的功能，且说明聊天不受影响。"""
+    message = _captured_warnings(monkeypatch, {"memory_enabled": True})
+
+    assert "memory consolidation" in message
+    assert "native execution" not in message
+    assert "Chat is unaffected" in message
+
+
+def test_no_codex_exe_warning_is_silent_when_nothing_needs_it(monkeypatch):
+    """两个功能都关着时不该报警——聊天本来就不需要这个二进制。"""
+    assert "No codex executable found" not in _captured_warnings(monkeypatch, {})
