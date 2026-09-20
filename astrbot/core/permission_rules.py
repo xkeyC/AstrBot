@@ -9,8 +9,11 @@ hit the event wins. Matching syntax (compatible with DynamicPersona):
 - ``role:admin`` / ``role:member``: by AstrBot role
 - ``*``: everyone
 
-Tool permissions are enforced when a tool is called, so the tool set declared
-to the model (and its prompt-cache prefix) never depends on who is talking.
+Tool permissions are always enforced when a tool is called. Under code mode
+the denied tools are also left out of the set the model can see, which costs
+nothing because deferred tool specs never enter the prompt prefix; without
+deferral they stay listed, so the prefix (and its cache) is the same for
+everyone.
 """
 
 from __future__ import annotations
@@ -64,8 +67,19 @@ class PermissionPolicy:
             return any(fnmatch.fnmatchcase(tool_name, p) for p in self.tools_allow)
         return True
 
-    def summary(self) -> str:
-        """Short, model-facing description of the sender's restrictions."""
+    def summary(self, *, host_exec: bool = True, sandbox_tools: tuple = ()) -> str:
+        """Short, model-facing description of the sender's restrictions.
+
+        Args:
+            host_exec: Whether commands can run on the bot host at all. With
+                the native execution tools off there is nothing to restrict,
+                so the clause is left out instead of suggesting otherwise.
+            sandbox_tools: Execution tools that still work for this sender,
+                named so the model reaches for them instead of giving up.
+
+        Returns:
+            One line, or an empty string when nothing is restricted.
+        """
         parts = []
         if self.tools_allow:
             parts.append("allowed tools: " + ", ".join(self.tools_allow))
@@ -75,8 +89,13 @@ class PermissionPolicy:
             parts.append("allowed MCP servers: " + ", ".join(self.mcp_allow))
         if self.mcp_deny:
             parts.append("denied MCP servers: " + ", ".join(self.mcp_deny))
-        if self.native_exec is False:
-            parts.append("no local command execution")
+        if self.native_exec is False and host_exec:
+            clause = "no command execution on the bot host"
+            if sandbox_tools:
+                clause += (
+                    " (the sandbox is unaffected: use " + ", ".join(sandbox_tools) + ")"
+                )
+            parts.append(clause)
         return "; ".join(parts)
 
 

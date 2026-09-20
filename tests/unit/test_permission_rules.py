@@ -110,3 +110,24 @@ def test_dynamic_persona_bindings_migrate_once(tmp_path):
     other = {"agent_runner": {"runner_type": "codex", "config": {}}}
     migrate_config_on_load(other, tmp_path / "abconf_x.json")
     assert "permission_rules" not in other
+
+
+def test_summary_names_the_sandbox_tools_that_still_work():
+    from astrbot.core.permission_rules import PermissionPolicy
+
+    denied = PermissionPolicy(native_exec=False)
+    # Host execution is on for the bot, so the restriction is worth stating,
+    # and the model is pointed at what it can still use.
+    assert denied.summary(
+        host_exec=True, sandbox_tools=("exec_command", "write_stdin")
+    ) == (
+        "no command execution on the bot host "
+        "(the sandbox is unaffected: use exec_command, write_stdin)"
+    )
+    assert denied.summary(host_exec=True) == "no command execution on the bot host"
+    # Nothing runs on the host anyway: saying so would only confuse the model.
+    assert denied.summary(host_exec=False) == ""
+    assert denied.summary(host_exec=False, sandbox_tools=("exec_command",)) == ""
+
+    mixed = PermissionPolicy(tools_deny=("weather",), native_exec=False)
+    assert mixed.summary(host_exec=False) == "denied tools: weather"

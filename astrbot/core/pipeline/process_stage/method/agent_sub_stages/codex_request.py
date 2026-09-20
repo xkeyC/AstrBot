@@ -179,12 +179,25 @@ async def prepare_codex_request(
 
     _filter_tools_by_persona_scope(event, req)
     if not policy.is_default:
-        # Per-message and append-only: the tool set and cached prefix stay the same.
-        req.add_persistent_context(
-            "sender_permissions",
-            f"Permissions of this sender: {policy.summary()}. Do not attempt restricted "
-            "actions for them; if asked, say politely that they are not allowed.",
+        # Name the execution tools this request actually carries, so a sender
+        # barred from the host does not conclude that nothing can run.
+        offered = {tool.name for tool in (req.func_tool.tools if req.func_tool else [])}
+        sandbox_tools = tuple(
+            name
+            for name in ("exec_command", "write_stdin", "astrbot_execute_python")
+            if name in offered
         )
+        summary = policy.summary(
+            host_exec=bool(runner_config.get("native_exec_tools")),
+            sandbox_tools=sandbox_tools,
+        )
+        if summary:
+            # Per-message and append-only: the tool set and cached prefix stay the same.
+            req.add_persistent_context(
+                "sender_permissions",
+                f"Permissions of this sender: {summary}. Do not attempt restricted "
+                "actions for them; if asked, say politely that they are not allowed.",
+            )
     req.context_anchors_complete = True
     if not req.prompt and (req.image_urls or req.extra_user_content_parts):
         req.prompt = "<attachment>"
