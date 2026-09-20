@@ -118,17 +118,16 @@ account is signed in. This fork pins `analytics.enabled = false` and
 
 ## Fork Behavior Differences
 
-This fork intentionally differs from upstream AstrBot in a few areas:
+This fork intentionally differs from upstream AstrBot in a few areas. The agent itself is
+covered by [Codex-Native Agent Runner](#codex-native-agent-runner) above; the rest are:
 
 1. Chat model calls are forced through streaming internally, even when callers use the non-streaming chat API.
-2. Local agents can set `provider_settings.tool_schema_mode` to `search_registry` for provider-independent progressive tool disclosure. In this mode, only AstrBot builtin core tools plus the stable `tool_search(index, keywords)` and `tool_invoke(tool_id, arguments)` meta-tools are declared directly. Plugin, MCP, and other allowed tools are discovered through an exposed `xxx_` prefix index followed by paginated weighted schema matching, then executed through the normal AstrBot tool runner so persona scope, argument validation, hooks, MCP handling, and execution constraints still apply. Search results already present in the live context are deduplicated, reported through `tools_in_context` / `filtered_in_context`, and automatically become searchable again when compression removes their structured result messages. `tool_search` and `tool_invoke` are reserved names in this mode.
-3. Docker and git/wheel installs build and prefer the bundled dashboard from this repository, so local dashboard changes are used instead of an existing upstream `data/dist` with the same version.
-4. MCP server connection tests use the configured proxy settings where applicable.
-5. The dashboard persona manager supports cloning an existing persona.
-6. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
-7. Shipyard Neo auto-start mode propagates AstrBot's global proxy settings into the managed Bay container and recreates that container when the managed proxy environment changes, so new sandbox Python/Shell sessions inherit the updated proxy.
-8. Persona tool allowlists cover all exposed tools, including builtin tools, MCP tools, scheduled task tools, web search tools, local/sandbox computer tools, and subagent handoff tools. Tool calls that are not allowed by the active persona are rejected even if the LLM constructs them manually.
-9. The agent runner is OpenAI Codex, running in-process. See [Codex-Native Agent Runner](#codex-native-agent-runner) above for what that changes.
+2. Docker and git/wheel installs build and prefer the bundled dashboard from this repository, so local dashboard changes are used instead of an existing upstream `data/dist` with the same version.
+3. MCP server connection tests use the configured proxy settings where applicable.
+4. The dashboard persona manager supports cloning an existing persona.
+5. Plugins can use event-level LLM overrides through `AstrMessageEvent.set_llm_overrides()` to select persona/provider/model for one request without changing session configuration. Forced session persona bindings still take precedence over event-level persona overrides.
+6. Shipyard Neo auto-start mode propagates AstrBot's global proxy settings into the managed Bay container and recreates that container when the managed proxy environment changes, so new sandbox Python/Shell sessions inherit the updated proxy.
+7. Persona tool allowlists cover every tool the model can reach, and a call the active persona does not allow is rejected even if the model constructs it by hand.
 
 These changes are maintained for this fork and may not match upstream behavior.
 
