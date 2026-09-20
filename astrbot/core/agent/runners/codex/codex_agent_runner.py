@@ -130,28 +130,19 @@ def engine_options(cfg: dict) -> JsonObject:
                 "codex-code-mode-host not found; set code_mode_host or install Codex CLI. "
                 "code_mode_only turns will fail."
             )
-    # The executable is what gives Codex a local execution environment. Chat
-    # never needs one -- AstrBot supplies its own tools -- but memory
-    # consolidation does: it runs as a Codex sub-agent that edits the files in
-    # the memory folder, and with no environment it gets no tools at all.
-    needs_exe = [
-        name
-        for name, enabled in (
-            ("native execution", native_exec),
-            ("memory consolidation", bool(cfg.get("memory_enabled"))),
-        )
-        if enabled
-    ]
-    if needs_exe:
+    # The executable is what gives Codex a local execution environment, which
+    # only native execution needs. Memory consolidation used to need it too;
+    # it now maintains its files through the memories extension's file tools,
+    # which run in-process.
+    if native_exec:
         if exe := find_codex_exe(str(cfg.get("codex_self_exe") or "")):
             options["codex_self_exe"] = exe
         else:
             logger.warning(
-                "No codex executable found, so %s cannot run: without it Codex "
-                "has no local execution environment. Chat is unaffected. Set "
-                "codex_self_exe, or reinstall the binding with "
-                "CODEX_ASTRBOT_WITH_CODEX=1.",
-                " and ".join(needs_exe),
+                "No codex executable found, so native execution cannot run: "
+                "without it Codex has no local execution environment. Chat and "
+                "memory consolidation are unaffected. Set codex_self_exe, or "
+                "reinstall the binding with CODEX_ASTRBOT_WITH_CODEX=1."
             )
     if native_exec and (cfg.get("approval_policy") or "never") == "never":
         # Every native command asks for approval; AstrBot answers it from the

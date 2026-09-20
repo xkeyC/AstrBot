@@ -263,15 +263,17 @@ def test_memory_thread_config_limits_global_to_permitted_private_chats(tmp_path)
     assert without_rule["memories.may_delete"] is False
     exe = tmp_path / "codex.exe"
     exe.write_bytes(b"")
-    opts = engine_options(
-        {
-            "codex_home": str(tmp_path),
-            "tool_mode": "direct",
-            "memory_enabled": True,
-            "codex_self_exe": str(exe),
-        }
+    base = {
+        "codex_home": str(tmp_path),
+        "tool_mode": "direct",
+        "codex_self_exe": str(exe),
+    }
+    # 记忆整理通过 memories 扩展的文件工具完成，进程内运行，不需要二进制。
+    assert "codex_self_exe" not in engine_options({**base, "memory_enabled": True})
+    # 原生执行仍然需要它：没有它 Codex 就没有本机执行环境。
+    assert engine_options({**base, "native_exec_tools": True})["codex_self_exe"] == str(
+        exe
     )
-    assert opts["codex_self_exe"] == str(exe)
 
 
 def test_auto_approve_off_denies_explicit_approval_policies():
@@ -408,17 +410,23 @@ def _captured_warnings(monkeypatch, cfg):
     return "\n".join(messages)
 
 
-def test_no_codex_exe_warning_names_only_enabled_features(monkeypatch):
-    """告警只点名真正开着的功能，且说明聊天不受影响。"""
-    message = _captured_warnings(monkeypatch, {"memory_enabled": True})
+def test_no_codex_exe_warning_only_fires_for_native_execution(monkeypatch):
+    """记忆整理已不依赖二进制，只有原生执行还需要。"""
+    message = _captured_warnings(monkeypatch, {"native_exec_tools": True})
 
-    assert "memory consolidation" in message
-    assert "native execution" not in message
-    assert "Chat is unaffected" in message
+    assert "native execution" in message
+    assert "memory consolidation are unaffected" in message
+
+
+def test_memory_alone_does_not_warn(monkeypatch):
+    """开着记忆但没有二进制是完全正常的配置，不该报警。"""
+    assert "No codex executable found" not in _captured_warnings(
+        monkeypatch, {"memory_enabled": True}
+    )
 
 
 def test_no_codex_exe_warning_is_silent_when_nothing_needs_it(monkeypatch):
-    """两个功能都关着时不该报警——聊天本来就不需要这个二进制。"""
+    """聊天本来就不需要这个二进制。"""
     assert "No codex executable found" not in _captured_warnings(monkeypatch, {})
 
 
