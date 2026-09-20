@@ -1,3 +1,4 @@
+from .codex_exec import ExecCommandTool, WriteStdinTool
 from .cua import (
     CuaKeyboardTypeTool,
     CuaMouseClickTool,
@@ -41,6 +42,7 @@ __all__ = [
     "CuaMouseClickTool",
     "CuaScreenshotTool",
     "EvaluateSkillCandidateTool",
+    "ExecCommandTool",
     "ExecuteShellTool",
     "FileDownloadTool",
     "FileEditTool",
@@ -59,6 +61,7 @@ __all__ = [
     "RollbackSkillReleaseTool",
     "RunBrowserSkillTool",
     "ShellSessionTool",
+    "WriteStdinTool",
     "SyncSkillReleaseTool",
     "normalize_umo_for_workspace",
     "check_admin_permission",

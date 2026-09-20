@@ -744,8 +744,12 @@ async def _ensure_persona_and_skills(
                     build_codex_skills_prompt,
                 )
 
-                event.set_extra("_codex_skills", skills)
-                req.set_context_anchor("skills", build_codex_skills_prompt(skills))
+                in_sandbox = cfg.get("_codex_skills") == "sandbox"
+                event.set_extra("_codex_skills", "sandbox" if in_sandbox else skills)
+                req.set_context_anchor(
+                    "skills",
+                    build_codex_skills_prompt(skills, in_sandbox=in_sandbox),
+                )
                 skills = []
         if skills:
             skills_prompt = build_skills_prompt(skills)

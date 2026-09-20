@@ -79,7 +79,9 @@ def engine_options(cfg: dict) -> JsonObject:
     """Process-wide Codex options derived from the runner config."""
     codex_home = str(cfg.get("codex_home") or "") or str(_data_path() / "codex_home")
     tool_mode = cfg.get("tool_mode") or "code_mode_only"
-    native_exec = bool(cfg.get("native_exec_tools"))
+    # Shipyard mode keeps every file operation inside the sandbox, so Codex
+    # never gets its own shell on this host, whatever native_exec_tools says.
+    native_exec = bool(cfg.get("native_exec_tools")) and not cfg.get("shipyard_mode")
     config: JsonObject = {
         # Chat-bot defaults: no coding-assistant scaffolding in the prompt.
         "include_permissions_instructions": False,
@@ -119,12 +121,17 @@ def engine_options(cfg: dict) -> JsonObject:
                 "codex-code-mode-host not found; set code_mode_host or install Codex CLI. "
                 "code_mode_only turns will fail."
             )
-    if (native_exec or cfg.get("memory_enabled")) and (
-        exe := find_codex_exe(str(cfg.get("codex_self_exe") or ""))
-    ):
+    if native_exec or cfg.get("memory_enabled"):
         # Also needed by memory consolidation, which runs as a Codex sub-agent
         # editing the memory folder; chat threads still start without it.
-        options["codex_self_exe"] = exe
+        if exe := find_codex_exe(str(cfg.get("codex_self_exe") or "")):
+            options["codex_self_exe"] = exe
+        else:
+            logger.warning(
+                "No codex executable found; native execution and memory "
+                "consolidation stay unavailable. Set codex_self_exe, or "
+                "reinstall the binding with CODEX_ASTRBOT_WITH_CODEX=1."
+            )
     if native_exec and (cfg.get("approval_policy") or "never") == "never":
         # Every native command asks for approval; AstrBot answers it from the
         # sender's permission rule (native_exec_decision).

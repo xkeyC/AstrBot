@@ -14,25 +14,42 @@ from typing import Any
 
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool
-from astrbot.core.skills.skill_manager import SkillInfo
+from astrbot.core.skills.skill_manager import SANDBOX_SKILLS_ROOT, SkillInfo
 
 READ_SKILL_TOOL = "astrbot_read_skill"
 MAX_READ_BYTES = 64 * 1024
 
 
-def build_codex_skills_prompt(skills: list[SkillInfo]) -> str:
+def build_codex_skills_prompt(
+    skills: list[SkillInfo], *, in_sandbox: bool = False
+) -> str:
+    """Render the compact skill list for a Codex turn.
+
+    Args:
+        skills: Skills offered to the current event.
+        in_sandbox: Whether skills are read from the sandbox copy instead of
+            this host, which is what shipyard mode does.
+
+    Returns:
+        Prompt text listing each skill and how to open it.
+    """
     lines = [
         f"- {skill.name}: {(skill.description or 'Read SKILL.md for details.').strip()}"
         for skill in skills
     ]
+    how_to_read = (
+        f"read `{SANDBOX_SKILLS_ROOT}/<name>/SKILL.md` in the sandbox (for example with "
+        "exec_command); the files a skill references sit next to it"
+        if in_sandbox
+        else f"read it with `tools.astrbot__{READ_SKILL_TOOL}({{name}})`; pass `path` "
+        "to open a file it references (e.g. `scripts/run.py`)"
+    )
     return (
         "## Skills\n"
         "Skills are instruction bundles. Use one when the user names it or the task "
         "clearly matches its description:\n"
         + "\n".join(lines)
-        + "\n\nBefore using a skill, read it with "
-        f"`tools.astrbot__{READ_SKILL_TOOL}({{name}})`; pass `path` to open a file it "
-        "references (e.g. `scripts/run.py`). Do not guess a skill's content."
+        + f"\n\nBefore using a skill, {how_to_read}. Do not guess a skill's content."
     )
 
 

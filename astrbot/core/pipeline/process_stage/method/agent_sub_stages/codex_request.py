@@ -46,9 +46,16 @@ def _build_config(
     settings = dict(original)
     # Codex reads images natively; do not caption them with another provider.
     settings["default_image_caption_provider_id"] = ""
-    # Skills are read from this host through astrbot_read_skill (not a shell).
-    settings["_codex_skills"] = True
-    settings["computer_use_runtime"] = "local"
+    # Shipyard mode keeps every agent file operation inside the sandbox: Codex
+    # is only the orchestrator, and even skills are read from the sandbox copy.
+    shipyard_mode = bool(runner_config.get("shipyard_mode"))
+    runtime = (
+        "sandbox" if shipyard_mode else original.get("computer_use_runtime", "none")
+    )
+    # Skills are read from this host through astrbot_read_skill (not a shell),
+    # unless shipyard mode moves that into the sandbox as well.
+    settings["_codex_skills"] = "sandbox" if shipyard_mode else True
+    settings["computer_use_runtime"] = "sandbox" if shipyard_mode else "local"
     proactive_cfg = settings.get("proactive_capability", {}) or {}
     return MainAgentBuildConfig(
         tool_call_timeout=int(runner_config.get("tool_call_timeout") or 120),
@@ -58,9 +65,9 @@ def _build_config(
         add_cron_tools=proactive_cfg.get("add_cron_tools", True),
         timezone=plugin_context.get_config().get("timezone"),
         max_quoted_fallback_images=settings.get("max_quoted_fallback_images", 20),
-        # Execution environment as configured by the user (sandbox / local / none);
-        # the skills path above always reads from this host.
-        computer_use_runtime=original.get("computer_use_runtime", "none"),
+        # Execution environment as configured by the user (sandbox / local /
+        # none), or the sandbox alone in shipyard mode.
+        computer_use_runtime=runtime,
         sandbox_cfg=original.get("sandbox", {}) or {},
     )
 
@@ -119,9 +126,19 @@ async def prepare_codex_request(
         _apply_local_env_tools(req, plugin_context)
     if config.computer_use_runtime in ("sandbox", "local") and req.func_tool:
         from astrbot.core.tools.computer_tools.apply_patch import ApplyPatchTool
+        from astrbot.core.tools.computer_tools.codex_exec import (
+            ExecCommandTool,
+            WriteStdinTool,
+        )
 
-        # Codex models are trained on this patch format.
+        # Codex models are trained on this patch format and on the
+        # exec_command / write_stdin session pair, so they replace AstrBot's
+        # one-shot shell tools here.
         req.func_tool.add_tool(ApplyPatchTool())
+        req.func_tool.remove_tool("astrbot_execute_shell")
+        req.func_tool.remove_tool("astrbot_shell_session")
+        req.func_tool.add_tool(ExecCommandTool())
+        req.func_tool.add_tool(WriteStdinTool())
     if config.add_cron_tools:
         _proactive_cron_job_tools(req, plugin_context)
 
@@ -138,7 +155,9 @@ async def prepare_codex_request(
     ):
         req.func_tool.add_tool(tmgr.get_builtin_tool(GetGroupMessageHistoryTool))
 
-    if event.get_extra("_codex_skills"):
+    # In shipyard mode the skills live in the sandbox, so no host reader is
+    # offered; the prompt points at the sandbox copy instead.
+    if event.get_extra("_codex_skills") not in (None, False, "sandbox"):
         from astrbot.core.agent.runners.codex.skills import ReadSkillTool
 
         req.func_tool.add_tool(ReadSkillTool())

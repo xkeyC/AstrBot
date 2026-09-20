@@ -23,91 +23,33 @@
         }
       }
     },
-    "dify_runner": {
-      "description": "Dify 配置",
-      "agent_runner": {
-        "config": {
-          "dify_api_type": { "description": "应用类型" },
-          "dify_api_key": { "description": "API Key" },
-          "dify_api_base": { "description": "API Base URL" },
-          "dify_workflow_output_key": { "description": "Workflow 输出变量名" },
-          "dify_query_input_key": { "description": "Prompt 输入变量名" },
-          "variables": { "description": "变量" },
-          "timeout": { "description": "超时时间（秒）" },
-          "proxy": { "description": "代理地址" }
-        }
-      }
-    },
-    "coze_runner": {
-      "description": "Coze 配置",
-      "agent_runner": {
-        "config": {
-          "coze_api_key": { "description": "API Key" },
-          "bot_id": { "description": "Bot ID" },
-          "coze_api_base": { "description": "API Base URL" },
-          "auto_save_history": { "description": "由 Coze 管理对话记录" },
-          "timeout": { "description": "超时时间（秒）" },
-          "proxy": { "description": "代理地址" }
-        }
-      }
-    },
-    "dashscope_runner": {
-      "description": "阿里云百炼应用配置",
-      "agent_runner": {
-        "config": {
-          "dashscope_app_type": { "description": "应用类型" },
-          "dashscope_api_key": { "description": "API Key" },
-          "dashscope_app_id": { "description": "应用 ID" },
-          "rag_options": {
-            "pipeline_ids": { "description": "知识库 Pipeline ID" },
-            "file_ids": { "description": "文件 ID" },
-            "output_reference": { "description": "输出引用" }
-          },
-          "variables": { "description": "变量" },
-          "timeout": { "description": "超时时间（秒）" },
-          "proxy": { "description": "代理地址" }
-        }
-      }
-    },
-    "deerflow_runner": {
-      "description": "DeerFlow 配置",
-      "agent_runner": {
-        "config": {
-          "deerflow_api_base": { "description": "API Base URL" },
-          "deerflow_api_key": { "description": "API Key" },
-          "deerflow_auth_header": { "description": "Authorization Header" },
-          "deerflow_assistant_id": { "description": "Assistant ID" },
-          "deerflow_model_name": { "description": "模型名称覆盖" },
-          "deerflow_thinking_enabled": { "description": "启用思考模式" },
-          "deerflow_plan_mode": { "description": "启用计划模式" },
-          "deerflow_subagent_enabled": { "description": "启用子智能体" },
-          "deerflow_max_concurrent_subagents": { "description": "子智能体最大并发数" },
-          "deerflow_recursion_limit": { "description": "递归深度上限" },
-          "timeout": { "description": "超时时间（秒）" },
-          "proxy": { "description": "代理地址" }
-        }
-      }
-    },
     "codex_runner": {
       "description": "Codex 配置",
-      "hint": "通过 codex app-server 运行 Agent 循环，插件工具以 Codex 动态工具的形式暴露。",
+      "hint": "在进程内驱动 Codex 运行 Agent 循环，插件工具以 Codex 动态工具的形式暴露。",
       "agent_runner": { "config": {
-        "codex_bin": {"description": "codex 可执行文件路径", "hint": "留空则从 PATH 查找。"},
-        "codex_home": {"description": "CODEX_HOME", "hint": "留空使用默认 ~/.codex（含登录状态与 config.toml）。"},
-        "codex_cli_overrides": {"description": "全局 --config 覆盖", "hint": "启动 app-server 时传入的 key=value 列表。"},
+        "tool_mode": {"description": "工具模式", "hint": "code_mode_only：模型通过 JS exec 编排所有工具，工具延迟加载，工具数量不影响提示词与缓存（推荐）。"},
+        "code_mode_host": {"description": "code mode 宿主程序路径", "hint": "codex-code-mode-host 可执行文件；留空则使用绑定包内自带的版本。"},
+        "exec_as_function_tool": {"description": "exec 使用函数工具形式", "hint": "供应商不支持语法约束工具（非 OpenAI 系）时开启。"},
+        "native_exec_tools": {"description": "启用 Codex 原生执行工具", "hint": "开启后 Codex 可使用本机 shell / apply_patch（受沙箱约束），群聊场景不建议开启。"},
+        "shipyard_mode": {"description": "Shipyard 模式（全部文件操作在沙箱内）", "hint": "强制使用 Shipyard Neo 沙箱执行环境，禁用 Codex 原生执行工具，skills 也从沙箱读取；Codex 只做编排，不读写本机文件。"},
+        "codex_self_exe": {"description": "codex 可执行文件路径", "hint": "原生执行工具与记忆沉淀需要；留空则使用绑定包内自带的版本（若安装时包含）。"},
+        "web_search": {"description": "启用 Codex 联网搜索"},
+        "codex_home": {"description": "CODEX_HOME", "hint": "留空使用 data/codex_home（登录状态、config.toml、会话记录与记忆）。与本机 Codex CLI 的 ~/.codex 相互独立。"},
         "model": {"description": "模型", "hint": "留空使用 Codex 默认模型。"},
-        "model_provider": {"description": "模型提供商 ID", "hint": "Codex config.toml 中 model_providers 的键，留空使用默认。"},
+        "model_provider": {"description": "模型提供商 ID", "hint": "自定义提供商在 Codex 页面管理；留空使用默认。"},
         "reasoning_effort": {"description": "推理强度"},
         "sandbox": {"description": "沙箱模式", "hint": "控制 Codex 内置 shell / 文件修改能力的范围。群聊场景建议只读。"},
         "approval_policy": {"description": "审批策略"},
         "auto_approve": {"description": "自动批准审批请求", "hint": "审批策略不为 never 时生效；关闭则全部拒绝。"},
         "cwd": {"description": "工作目录", "hint": "留空则每个会话使用 data/codex_workspaces/<会话>。"},
         "developer_instructions": {"description": "附加开发者指令"},
-        "base_instructions": {"description": "替换基础指令", "hint": "留空保留 Codex 自带的基础指令。"},
+        "base_instructions": {"description": "系统提示词", "hint": "替换 Codex 的基础指令；留空使用 AstrBot 内置的精简聊天提示词。"},
         "thread_config": {"description": "线程配置覆盖", "hint": "以 Codex config.toml 的点分键覆盖线程配置。"},
         "show_commentary": {"description": "输出过程说明", "hint": "把 Codex commentary 阶段的消息也发送给用户。"},
         "safety_mode": {"description": "注入健康模式提示词"},
         "sync_history": {"description": "同步对话记录", "hint": "把问答镜像到 AstrBot 对话历史，仅供展示；上下文由 Codex 线程维护。"},
+        "memory_enabled": {"description": "启用 Codex 记忆", "hint": "每个会话有独立记忆；仅拥有全局记忆权限用户的私聊可写入全局记忆，群聊只写本会话。"},
+        "memory_auto_consolidate": {"description": "周期性沉淀记忆", "hint": "关闭后仅保留即时写入的记忆，不再后台整理（整理需要 codex 可执行文件）。"},
         "tool_call_timeout": {"description": "工具调用超时（秒）"},
         "turn_timeout": {"description": "单轮超时（秒）"}
       } }

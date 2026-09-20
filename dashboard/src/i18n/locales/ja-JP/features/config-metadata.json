@@ -23,163 +23,35 @@
         }
       }
     },
-    "dify_runner": {
-      "description": "Dify 設定",
-      "agent_runner": {
-        "config": {
-          "dify_api_type": {
-            "description": "アプリケーションの種類"
-          },
-          "dify_api_key": {
-            "description": "API Key"
-          },
-          "dify_api_base": {
-            "description": "API Base URL"
-          },
-          "dify_workflow_output_key": {
-            "description": "ワークフロー出力変数名"
-          },
-          "dify_query_input_key": {
-            "description": "プロンプト入力変数名"
-          },
-          "variables": {
-            "description": "変数"
-          },
-          "timeout": {
-            "description": "タイムアウト（秒）"
-          },
-          "proxy": {
-            "description": "プロキシアドレス"
-          }
-        }
-      }
-    },
-    "coze_runner": {
-      "description": "Coze 設定",
-      "agent_runner": {
-        "config": {
-          "coze_api_key": {
-            "description": "API Key"
-          },
-          "bot_id": {
-            "description": "Bot ID"
-          },
-          "coze_api_base": {
-            "description": "API Base URL"
-          },
-          "auto_save_history": {
-            "description": "Coze が会話履歴を管理"
-          },
-          "timeout": {
-            "description": "タイムアウト（秒）"
-          },
-          "proxy": {
-            "description": "プロキシアドレス"
-          }
-        }
-      }
-    },
-    "dashscope_runner": {
-      "description": "Alibaba Cloud Bailianアプリケーション設定",
-      "agent_runner": {
-        "config": {
-          "dashscope_app_type": {
-            "description": "アプリケーションの種類"
-          },
-          "dashscope_api_key": {
-            "description": "API Key"
-          },
-          "dashscope_app_id": {
-            "description": "アプリケーション ID"
-          },
-          "rag_options": {
-            "pipeline_ids": {
-              "description": "ナレッジベース Pipeline ID"
-            },
-            "file_ids": {
-              "description": "ファイル ID"
-            },
-            "output_reference": {
-              "description": "参照を出力"
-            }
-          },
-          "variables": {
-            "description": "変数"
-          },
-          "timeout": {
-            "description": "タイムアウト（秒）"
-          },
-          "proxy": {
-            "description": "プロキシアドレス"
-          }
-        }
-      }
-    },
-    "deerflow_runner": {
-      "description": "DeerFlow 設定",
-      "agent_runner": {
-        "config": {
-          "deerflow_api_base": {
-            "description": "API Base URL"
-          },
-          "deerflow_api_key": {
-            "description": "API Key"
-          },
-          "deerflow_auth_header": {
-            "description": "Authorization Header"
-          },
-          "deerflow_assistant_id": {
-            "description": "Assistant ID"
-          },
-          "deerflow_model_name": {
-            "description": "モデル名の上書き"
-          },
-          "deerflow_thinking_enabled": {
-            "description": "思考モードを有効化"
-          },
-          "deerflow_plan_mode": {
-            "description": "計画モードを有効化"
-          },
-          "deerflow_subagent_enabled": {
-            "description": "サブエージェントを有効化"
-          },
-          "deerflow_max_concurrent_subagents": {
-            "description": "サブエージェントの最大同時実行数"
-          },
-          "deerflow_recursion_limit": {
-            "description": "再帰深度の上限"
-          },
-          "timeout": {
-            "description": "タイムアウト（秒）"
-          },
-          "proxy": {
-            "description": "プロキシアドレス"
-          }
-        }
-      }
-    },
     "codex_runner": {
-      "description": "Codex Configuration",
-      "hint": "Run the agent loop in codex app-server; plugin tools are exposed to Codex as dynamic tools.",
+      "description": "Codex 設定",
+      "hint": "プロセス内で Codex のエージェントループを実行します。プラグインツールは Codex の動的ツールとして公開されます。",
       "agent_runner": { "config": {
-        "codex_bin": {"description": "codex Executable Path", "hint": "Leave empty to look it up in PATH."},
-        "codex_home": {"description": "CODEX_HOME", "hint": "Leave empty to use the default ~/.codex (login state and config.toml)."},
-        "codex_cli_overrides": {"description": "Global --config Overrides", "hint": "key=value entries passed when starting app-server."},
-        "model": {"description": "Model", "hint": "Leave empty to use Codex's default model."},
-        "model_provider": {"description": "Model Provider ID", "hint": "A model_providers key from Codex config.toml; empty uses the default."},
-        "reasoning_effort": {"description": "Reasoning Effort"},
-        "sandbox": {"description": "Sandbox Mode", "hint": "Scope of Codex's built-in shell and file edits. Read-only is recommended for group chats."},
-        "approval_policy": {"description": "Approval Policy"},
-        "auto_approve": {"description": "Auto-approve Requests", "hint": "Applies when the approval policy is not never; when off, every request is declined."},
-        "cwd": {"description": "Working Directory", "hint": "Leave empty to use data/codex_workspaces/<session> per session."},
-        "developer_instructions": {"description": "Extra Developer Instructions"},
-        "base_instructions": {"description": "Replace Base Instructions", "hint": "Leave empty to keep Codex's built-in base instructions."},
-        "thread_config": {"description": "Thread Config Overrides", "hint": "Dotted Codex config.toml keys applied to each thread."},
-        "show_commentary": {"description": "Send Progress Commentary", "hint": "Also send Codex commentary-phase messages to the user."},
-        "safety_mode": {"description": "Inject Safety Prompt"},
-        "sync_history": {"description": "Mirror Conversation History", "hint": "Copy exchanges into AstrBot history for display; Codex keeps its own context."},
-        "tool_call_timeout": {"description": "Tool Call Timeout (seconds)"},
-        "turn_timeout": {"description": "Turn Timeout (seconds)"}
+        "tool_mode": {"description": "ツールモード", "hint": "code_mode_only：モデルが JS exec ですべてのツールを呼び出します。ツールは遅延読み込みされ、数が増えてもプロンプトとキャッシュに影響しません（推奨）。"},
+        "code_mode_host": {"description": "code mode ホストのパス", "hint": "codex-code-mode-host 実行ファイル。空欄の場合はバインディングに同梱されたものを使用します。"},
+        "exec_as_function_tool": {"description": "exec を関数ツールとして公開", "hint": "文法制約付きツールに対応していないプロバイダー（OpenAI 系以外）で有効にします。"},
+        "native_exec_tools": {"description": "Codex のネイティブ実行ツールを有効化", "hint": "Codex がローカルの shell と apply_patch をサンドボックスの範囲で使用できます。グループチャットでは推奨しません。"},
+        "shipyard_mode": {"description": "Shipyard モード（ファイル操作はすべてサンドボックス内）", "hint": "Shipyard Neo サンドボックスの実行環境を強制し、Codex のネイティブ実行ツールを無効化し、スキルもサンドボックスから読み取ります。Codex はオーケストレーションのみを行い、このホストのファイルには触れません。"},
+        "codex_self_exe": {"description": "codex 実行ファイルのパス", "hint": "ネイティブ実行ツールと記憶の整理に必要です。空欄の場合は、インストール時に同梱されていればバインディング内のものを使用します。"},
+        "web_search": {"description": "Codex のウェブ検索を有効化"},
+        "codex_home": {"description": "CODEX_HOME", "hint": "空欄の場合は data/codex_home を使用します（ログイン状態、config.toml、セッション記録、記憶）。ローカルの Codex CLI の ~/.codex とは独立しています。"},
+        "model": {"description": "モデル", "hint": "空欄の場合は Codex の既定モデルを使用します。"},
+        "model_provider": {"description": "モデルプロバイダー ID", "hint": "カスタムプロバイダーは Codex ページで管理します。空欄の場合は既定値を使用します。"},
+        "reasoning_effort": {"description": "推論の強度"},
+        "sandbox": {"description": "サンドボックスモード", "hint": "Codex 内蔵の shell とファイル変更の範囲を制御します。グループチャットでは読み取り専用を推奨します。"},
+        "approval_policy": {"description": "承認ポリシー"},
+        "auto_approve": {"description": "承認リクエストを自動承認", "hint": "承認ポリシーが never 以外のときに適用されます。無効にするとすべて拒否されます。"},
+        "cwd": {"description": "作業ディレクトリ", "hint": "空欄の場合、各セッションは data/codex_workspaces/<セッション> を使用します。"},
+        "developer_instructions": {"description": "追加の開発者指示"},
+        "base_instructions": {"description": "システムプロンプト", "hint": "Codex の基本指示を置き換えます。空欄の場合は AstrBot 内蔵の簡潔なチャット用プロンプトを使用します。"},
+        "thread_config": {"description": "スレッド設定の上書き", "hint": "Codex config.toml のドット区切りキーで各スレッドの設定を上書きします。"},
+        "show_commentary": {"description": "途中経過の説明を送信", "hint": "Codex の commentary フェーズのメッセージもユーザーに送信します。"},
+        "safety_mode": {"description": "セーフティプロンプトを挿入"},
+        "sync_history": {"description": "会話履歴を同期", "hint": "やり取りを表示用に AstrBot の履歴へコピーします。実際のコンテキストは Codex のスレッドが保持します。"},
+        "memory_enabled": {"description": "Codex の記憶を有効化", "hint": "チャットごとに独立した記憶を持ちます。全体記憶の権限を持つユーザーの個人チャットのみ共有記憶に書き込め、グループチャットはそのチャット内に留まります。"},
+        "memory_auto_consolidate": {"description": "記憶を定期的に整理", "hint": "無効にすると、その場で書き込まれた記憶のみが残り、バックグラウンドでの整理は行われません（整理には codex 実行ファイルが必要です）。"},
+        "tool_call_timeout": {"description": "ツール呼び出しタイムアウト（秒）"},
+        "turn_timeout": {"description": "1 ターンのタイムアウト（秒）"}
       } }
     },
     "ai": {

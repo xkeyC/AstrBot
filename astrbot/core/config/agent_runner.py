@@ -52,6 +52,9 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "code_mode_host": "",
         "exec_as_function_tool": False,
         "native_exec_tools": False,
+        # Every agent file operation happens in the Shipyard Neo sandbox;
+        # Codex only orchestrates and never touches this host's files.
+        "shipyard_mode": False,
         "codex_self_exe": "",
         "web_search": False,
         "model": "",

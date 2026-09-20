@@ -3290,6 +3290,11 @@ CONFIG_METADATA_3 = {
                         "type": "bool",
                         "hint": "开启后 Codex 可使用本机 shell / apply_patch（受沙箱约束），群聊场景不建议开启。",
                     },
+                    "agent_runner.config.shipyard_mode": {
+                        "description": "Shipyard 模式（全部文件操作在沙箱内）",
+                        "type": "bool",
+                        "hint": "强制使用 Shipyard Neo 沙箱执行环境，禁用 Codex 原生执行工具，skills 也从沙箱读取；Codex 只做编排，不读写本机文件。",
+                    },
                     "agent_runner.config.codex_self_exe": {
                         "description": "codex 可执行文件路径",
                         "type": "string",
@@ -3372,6 +3377,16 @@ CONFIG_METADATA_3 = {
                         "description": "同步对话记录",
                         "type": "bool",
                         "hint": "把问答镜像到 AstrBot 对话历史，仅供展示；上下文由 Codex 线程维护。",
+                    },
+                    "agent_runner.config.memory_enabled": {
+                        "description": "启用 Codex 记忆",
+                        "type": "bool",
+                        "hint": "每个会话有独立记忆；仅拥有全局记忆权限用户的私聊可写入全局记忆，群聊只写本会话。",
+                    },
+                    "agent_runner.config.memory_auto_consolidate": {
+                        "description": "周期性沉淀记忆",
+                        "type": "bool",
+                        "hint": "关闭后仅保留即时写入的记忆，不再后台整理（整理需要 codex 可执行文件）。",
                     },
                     "agent_runner.config.tool_call_timeout": {
                         "description": "工具调用超时（秒）",
