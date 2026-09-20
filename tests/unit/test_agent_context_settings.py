@@ -52,7 +52,6 @@ async def test_default_drops_a_whole_chunk_of_turns():
     stage = await _build_stage()
 
     assert AGENT_RUNNER_CONFIG_DEFAULTS["local"]["compression"]["trim_turns"] == 10
-    assert stage.dequeue_context_length == 10
     assert stage.main_agent_cfg.dequeue_context_length == 10
 
 
@@ -61,7 +60,7 @@ async def test_unlimited_turns_keeps_the_configured_trim_length():
     """Turn-based limiting off must not force the value back down to one turn."""
     stage = await _build_stage({"max_turns": -1, "trim_turns": 20})
 
-    assert stage.dequeue_context_length == 20
+    assert stage.main_agent_cfg.dequeue_context_length == 20
 
 
 @pytest.mark.asyncio
@@ -79,7 +78,8 @@ async def test_trim_length_never_empties_a_limited_context(
 ):
     stage = await _build_stage({"max_turns": max_turns, "trim_turns": trim_turns})
 
-    assert stage.dequeue_context_length == expected
+    assert stage.main_agent_cfg.max_context_length == max_turns
+    assert stage.main_agent_cfg.dequeue_context_length == expected
 
 
 @pytest.mark.asyncio
@@ -88,3 +88,32 @@ async def test_search_registry_tool_schema_mode_is_accepted():
 
     assert stage.tool_schema_mode == "search_registry"
     assert stage.main_agent_cfg.tool_schema_mode == "search_registry"
+
+
+@pytest.mark.asyncio
+async def test_compression_and_misc_settings_reach_the_build_config():
+    """Every configured session setting must reach the main agent build config."""
+    stage = await _build_stage(
+        {
+            "max_turns": 12,
+            "trim_turns": 3,
+            "overflow_strategy": "llm_compress",
+            "instruction": "Keep decisions and unfinished tasks.",
+            "keep_recent_ratio": 0.3,
+            "provider_id": "summary-model",
+            "fallback_max_tokens": 16384,
+        },
+        {"max_steps": 7, "tool_call_timeout": 45},
+    )
+
+    cfg = stage.main_agent_cfg
+    assert cfg.max_context_length == 12
+    assert cfg.dequeue_context_length == 3
+    assert cfg.context_limit_reached_strategy == "llm_compress"
+    assert cfg.llm_compress_instruction == "Keep decisions and unfinished tasks."
+    assert cfg.llm_compress_keep_recent_ratio == 0.3
+    assert cfg.llm_compress_provider_id == "summary-model"
+    assert cfg.fallback_max_context_tokens == 16384
+    assert cfg.tool_call_timeout == 45
+    assert stage.max_step == 7
+    assert stage.tool_call_timeout == 45

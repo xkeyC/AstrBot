@@ -96,6 +96,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "provider: LLM Provider 测试")
     config.addinivalue_line("markers", "db: 数据库相关测试")
     config.addinivalue_line("markers", "tier_c: C-tier tests (optional / non-blocking)")
+    config.addinivalue_line(
+        "markers", "real_codex_engine: allowed to start a real Codex engine"
+    )
     config.addinivalue_line("markers", "tier_d: D-tier tests (extended / integration)")
 
 
@@ -403,3 +406,37 @@ def pytest_runtest_setup(item):
             f"TEST_{required_platform.upper()}_ENABLED"
         ):
             pytest.skip(f"TEST_{required_platform.upper()}_ENABLED not set")
+
+
+# ============================================================
+# Codex 引擎隔离
+# ============================================================
+
+
+@pytest.fixture(autouse=True)
+def no_real_codex_engine(monkeypatch, request):
+    """Keep tests away from a real Codex engine.
+
+    Starting one loads the native binding and works against the real
+    ``codex_home``: it resumes stored threads and talks to the configured
+    model endpoint, which makes tests slow and lets them touch live data. A
+    test that means to exercise the engine marks itself with
+    ``@pytest.mark.real_codex_engine``; every other test gets a loud failure
+    instead of a live engine.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        request: Pytest request, used to read the opt-out marker.
+    """
+    if request.node.get_closest_marker("real_codex_engine"):
+        return
+    from astrbot.core.agent.runners.codex import native
+
+    async def refuse(options: dict) -> None:
+        raise AssertionError(
+            "This test tried to start a real Codex engine "
+            f"(codex_home={options.get('codex_home')}). Patch CodexEngine.get "
+            "with a fake, or mark the test with @pytest.mark.real_codex_engine."
+        )
+
+    monkeypatch.setattr(native.CodexEngine, "get", staticmethod(refuse))

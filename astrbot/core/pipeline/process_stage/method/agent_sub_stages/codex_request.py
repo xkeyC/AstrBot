@@ -22,9 +22,11 @@ from astrbot.core.astr_main_agent import (
     _apply_sandbox_tools,
     _decorate_llm_request,
     _filter_tools_by_persona_scope,
+    _get_quoted_message_parser_settings,
     _get_session_conv,
     _plugin_tool_fix,
     _proactive_cron_job_tools,
+    _process_quote_message,
 )
 from astrbot.core.message.components import File, Image, Record, Reply
 from astrbot.core.permission_rules import CONFIG_KEY as PERMISSION_RULES_KEY
@@ -113,6 +115,19 @@ async def prepare_codex_request(
 
     req.conversation = await _get_session_conv(event, plugin_context)
     await _decorate_llm_request(event, req, plugin_context, config, provider=None)
+    # Upstream appends the quoted message inside build_main_agent, which this
+    # path replaces. Codex reads images natively, so no caption is needed.
+    await _process_quote_message(
+        event,
+        req,
+        img_cap_prov_id="",
+        plugin_context=plugin_context,
+        quoted_message_settings=_get_quoted_message_parser_settings(
+            config.provider_settings
+        ),
+        main_provider_supports_image=True,
+        skip_quote_image_caption=True,
+    )
     await _apply_kb(event, req, plugin_context, config)
     _plugin_tool_fix(event, req)
 

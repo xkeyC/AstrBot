@@ -7,8 +7,14 @@ from astrbot.core.config.default import VERSION
 
 
 def _write_dashboard(dist: Path, version: str) -> None:
+    """Write a dist that passes the completeness check: an index referencing a
+    local entry bundle that exists, plus the version marker."""
     (dist / "assets").mkdir(parents=True)
-    (dist / "index.html").write_text("dashboard", encoding="utf-8")
+    (dist / "index.html").write_text(
+        '<html><script type="module" src="/assets/app.js"></script></html>',
+        encoding="utf-8",
+    )
+    (dist / "assets" / "app.js").write_text("export {};", encoding="utf-8")
     (dist / "assets" / "version").write_text(version, encoding="utf-8")
 
 
