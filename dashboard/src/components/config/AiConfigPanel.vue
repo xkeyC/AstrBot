@@ -93,6 +93,14 @@
             :metadata-key="thirdPartyRunnerGroup.key"
             :search-keyword="searchKeyword"
           />
+          <AstrBotConfigV4
+            v-for="group in runnerSharedGroups"
+            :key="group.key"
+            :metadata="{ [group.key]: group.metadata }"
+            :iterable="configData"
+            :metadata-key="group.key"
+            :search-keyword="searchKeyword"
+          />
         </div>
       </section>
 
@@ -342,6 +350,21 @@ const thirdPartyRunnerGroup = computed(() => {
     ? { key, metadata: props.metadata[key] }
     : null;
 });
+
+// Codex runs AstrBot's persona, knowledge base, execution environment and
+// proactive tools just like the local runner does, so its layout shows those
+// groups too. Context compression and the local model picker stay out: Codex
+// owns its own context and model.
+const runnerSharedGroups = computed(() => [
+  'persona',
+  'knowledgebase',
+  'websearch',
+  'agent_computer_use',
+  'proactive_capability'
+].filter((key) => props.metadata?.[key]).map((key) => ({
+  key,
+  metadata: props.metadata[key]
+})));
 
 const commonGroups = computed(() => [
   filterMetadataGroup(
