@@ -8,9 +8,10 @@ watchers), so these replace the plain shell tools when Codex drives the turn.
 
 The local runtime uses AstrBot's managed shell sessions. The Shipyard Neo SDK
 only offers one-shot ``exec``, so a session is emulated inside the sandbox: the
-command runs detached with its output in a log file, stdin arrives through a
-FIFO held open by a sleeper process, and each poll reads the log from the last
-offset.
+command runs in a detached tmux pane with ``pipe-pane`` mirroring it into a log
+file, and each poll reads the log from the last offset. Without tmux the command
+runs detached instead, with stdin arriving through a FIFO held open by a sleeper
+process and no TTY.
 """
 
 from __future__ import annotations
@@ -109,6 +110,8 @@ class SandboxSession:
     session_id: str
     directory: str
     cursor: int = 0
+    tmux: bool = False
+    """Whether the command runs in a tmux pane, which gives it a real PTY."""
 
 
 class SandboxSessions:
@@ -129,13 +132,39 @@ class SandboxSessions:
         cls._sessions.get(umo, {}).pop(session_id, None)
 
 
-def _poll_script(directory: str, cursor: int, yield_ms: int) -> str:
+def _poll_script(
+    directory: str, cursor: int, yield_ms: int, tmux_session: str | None = None
+) -> str:
     """Wait inside the sandbox for new output or exit, then report both.
 
     The wait happens in the sandbox so one poll costs one round trip. The
     trailing metadata line carries the log size and exit code.
+
+    Args:
+        directory: Session directory holding ``out.log`` and ``exit``.
+        cursor: Byte offset already reported to the model.
+        yield_ms: How long to wait for new output before giving up.
+        tmux_session: tmux session name when the command runs in a pane. It
+            adds a liveness probe, because a pane that died without writing an
+            exit code -- killed, signalled with Ctrl-C, or lost with the tmux
+            server -- would otherwise stay "running" for the rest of the chat.
+
+    Returns:
+        A shell script to run in the sandbox.
     """
     seconds = (max(0, yield_ms) + 999) // 1000
+    probe = cleanup = ""
+    if tmux_session:
+        probe = (
+            '[ -f "$d/exit" ] || tmux has-session -t '
+            f"{tmux_session} 2>/dev/null || "
+            '{ echo "[session ended without an exit code]" >> "$d/out.log"; '
+            'echo -1 > "$d/exit"; }; '
+        )
+        cleanup = (
+            f'; [ -f "$d/exit" ] && tmux kill-session -t {tmux_session} '
+            ">/dev/null 2>&1; true"
+        )
     return (
         f"d={shlex.quote(directory)}; c={cursor}; "
         f"end=$(( $(date +%s) + {seconds} )); "
@@ -143,11 +172,10 @@ def _poll_script(directory: str, cursor: int, yield_ms: int) -> str:
         'size=$(wc -c < "$d/out.log" 2>/dev/null || echo 0); size=$((size + 0)); '
         '{ [ -f "$d/exit" ] || [ "$size" -gt "$c" ] || '
         '[ "$(date +%s)" -ge "$end" ]; } && break; '
-        "sleep 0.2; done; "
-        'tail -c +$((c + 1)) "$d/out.log" 2>/dev/null; '
+        "sleep 0.2; done; " + probe + 'tail -c +$((c + 1)) "$d/out.log" 2>/dev/null; '
         f'printf "\\n{META_MARKER} %s %s>>>\\n" '
         '"$(( $(wc -c < "$d/out.log" 2>/dev/null || echo 0) + 0 ))" '
-        '"$(cat "$d/exit" 2>/dev/null || echo none)"'
+        '"$(cat "$d/exit" 2>/dev/null || echo none)"' + cleanup
     )
 
 
@@ -190,24 +218,103 @@ async def _sandbox_exec(shell: Any, script: str, timeout: int) -> str:
 async def _start_sandbox_session(
     shell: Any, cmd: str, workdir: str | None, shell_binary: str | None
 ) -> SandboxSession:
+    """Start a detached command in the sandbox and return its session.
+
+    With tmux available the command gets a real PTY, so programs that ask for
+    confirmation, prompt for a password or run a REPL behave as they would for
+    a person. `pipe-pane` mirrors the raw pane output into a log file, which
+    keeps the byte-offset reads that `write_stdin` uses. Without tmux the
+    command runs under a FIFO instead: plain pipes, no TTY.
+
+    The pane waits for a `go` file before it runs anything, because
+    `pipe-pane` only forwards what the pane prints after it is attached and
+    refuses a pane that has already exited. Starting the command first would
+    lose the output of short commands, and losing `pipe-pane` would send the
+    whole call down the fallback path with the command already running -- so a
+    command such as `pip install` would run a second time.
+
+    Args:
+        shell: Sandbox shell capability (one-shot exec).
+        cmd: Command line to run.
+        workdir: Working directory, or None for the sandbox default.
+        shell_binary: Shell to launch the command with, or None for `sh`.
+
+    Returns:
+        The session, with `tmux` telling which backend started it.
+    """
     session_id = uuid.uuid4().hex[:8]
     directory = f"{SANDBOX_SESSION_ROOT}/{session_id}"
     runner = shell_binary or "sh"
+    quoted_dir = shlex.quote(directory)
+    quoted_workdir = shlex.quote(workdir or ".")
+    log = shlex.quote(directory + "/out.log")
+    exit_file = shlex.quote(directory + "/exit")
+    go_file = shlex.quote(directory + "/go")
+    # The command keeps a shell of its own, so `echo $?` still runs when the
+    # command ends in `;` or `&`, ends in a comment, or calls `exit` itself.
+    # The wait gives up after five seconds in case the start call never got
+    # far enough to write the go file.
+    pane = (
+        f"i=0; while [ ! -e {go_file} ]; do i=$((i + 1)); "
+        '[ "$i" -gt 100 ] && exit 1; sleep 0.05; done; '
+        f"{runner} -c {shlex.quote(cmd)}; echo $? > {exit_file}"
+    )
+    tmux_script = (
+        f"cd {quoted_workdir} && mkdir -p {quoted_dir} && : > {log} && "
+        f"tmux new-session -d -s {session_id} -x 120 -y 40 "
+        f"-c {quoted_workdir} {shlex.quote(pane)} && "
+        f"tmux pipe-pane -o -t {session_id} {shlex.quote(f'cat >> {log}')} && "
+        f": > {go_file} && echo tmux-ok || "
+        f"{{ tmux kill-session -t {session_id} >/dev/null 2>&1; false; }}"
+    )
+    if "tmux-ok" in await _sandbox_exec(shell, tmux_script, timeout=30):
+        return SandboxSession(session_id=session_id, directory=directory, tmux=True)
+
     # The sleeper keeps a writer on the FIFO so the command does not see EOF
     # between write_stdin calls.
+    fifo = shlex.quote(directory + "/stdin")
     script = (
-        f"mkdir -p {shlex.quote(directory)} && cd {shlex.quote(workdir or '.')} && "
-        f"mkfifo {shlex.quote(directory + '/stdin')} 2>/dev/null; "
-        f": > {shlex.quote(directory + '/out.log')}; "
-        f"(sleep 86400 > {shlex.quote(directory + '/stdin')} &) ; "
-        f"( {runner} -c {shlex.quote(cmd)} "
-        f"< {shlex.quote(directory + '/stdin')} "
-        f"> {shlex.quote(directory + '/out.log')} 2>&1; "
-        f"echo $? > {shlex.quote(directory + '/exit')} ) >/dev/null 2>&1 & "
+        f"mkdir -p {quoted_dir} && cd {quoted_workdir} && "
+        f"mkfifo {fifo} 2>/dev/null; : > {log}; "
+        f"(sleep 86400 > {fifo} &) ; "
+        f"( {runner} -c {shlex.quote(cmd)} < {fifo} > {log} 2>&1; "
+        f"echo $? > {exit_file} ) >/dev/null 2>&1 & "
         f"echo $! > {shlex.quote(directory + '/pid')}"
     )
     await _sandbox_exec(shell, script, timeout=30)
     return SandboxSession(session_id=session_id, directory=directory)
+
+
+def _write_stdin_script(session: SandboxSession, chars: str) -> str:
+    """Build the command that delivers `chars` to a session's stdin.
+
+    tmux takes the text literally through `send-keys -l`, with a trailing
+    newline sent as Enter so line-based programs see a submitted line. Two
+    tmux argument rules need care before the text reaches the pane: an
+    argument that ends in `;` is a command separator unless the semicolon is
+    escaped, and an argument that starts with `-` is read as a flag unless it
+    comes after `--`.
+
+    Args:
+        session: Session to write to.
+        chars: Text to deliver; one trailing newline becomes Enter.
+
+    Returns:
+        A shell command for the sandbox, or `true` when there is nothing to send.
+    """
+    if not session.tmux:
+        return f"printf %s {shlex.quote(chars)} > {shlex.quote(session.directory + '/stdin')}"
+    # Only the final newline is the submit key; the rest is part of the text.
+    body = chars[:-1] if chars.endswith("\n") else chars
+    parts = []
+    if body:
+        literal = f"{body[:-1]}\\;" if body.endswith(";") else body
+        parts.append(
+            f"tmux send-keys -t {session.session_id} -l -- {shlex.quote(literal)}"
+        )
+    if chars.endswith("\n"):
+        parts.append(f"tmux send-keys -t {session.session_id} Enter")
+    return " && ".join(parts) or "true"
 
 
 # -------------------------------------------------------------------- the tools
@@ -312,7 +419,12 @@ class ExecCommandTool(FunctionTool):
             return f"Error starting command: {e}"
         raw = await _sandbox_exec(
             booter.shell,
-            _poll_script(session.directory, 0, wait_ms),
+            _poll_script(
+                session.directory,
+                0,
+                wait_ms,
+                session.session_id if session.tmux else None,
+            ),
             timeout=max(30, wait_ms // 1000 + 15),
         )
         output, cursor, exit_code = _parse_poll(raw, 0)
@@ -420,18 +532,22 @@ class WriteStdinTool(FunctionTool):
             return f"Error: unknown session {session_id}."
         if chars:
             await _sandbox_exec(
-                booter.shell,
-                f"printf %s {shlex.quote(chars)} > {shlex.quote(session.directory + '/stdin')}",
-                timeout=30,
+                booter.shell, _write_stdin_script(session, chars), timeout=30
             )
         raw = await _sandbox_exec(
             booter.shell,
-            _poll_script(session.directory, session.cursor, wait_ms),
+            _poll_script(
+                session.directory,
+                session.cursor,
+                wait_ms,
+                session.session_id if session.tmux else None,
+            ),
             timeout=max(30, wait_ms // 1000 + 15),
         )
         output, cursor, exit_code = _parse_poll(raw, session.cursor)
         session.cursor = cursor
         if exit_code is not None:
+            # The poll script already killed the pane on its way out.
             SandboxSessions.drop(umo, session_id)
         return format_exec_response(
             output=output,

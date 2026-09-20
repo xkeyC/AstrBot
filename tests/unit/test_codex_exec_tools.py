@@ -105,10 +105,15 @@ def test_local_runtime_surfaces_blocked_commands(monkeypatch):
 
 
 class FakeSandboxShell:
-    """Minimal stand-in for the Shipyard Neo one-shot shell capability."""
+    """Minimal stand-in for the Shipyard Neo one-shot shell capability.
 
-    def __init__(self, polls):
+    ``has_tmux`` decides whether the image looks like it has tmux, which is
+    what the session start script probes for.
+    """
+
+    def __init__(self, polls, has_tmux=True):
         self.polls = list(polls)
+        self.has_tmux = has_tmux
         self.scripts = []
 
     async def exec(self, command, *, timeout=30, **_kwargs):
@@ -117,6 +122,8 @@ class FakeSandboxShell:
             return SimpleNamespace(
                 output=self.polls.pop(0), error=None, model_dump=None
             )
+        if "tmux new-session" in command:
+            return {"output": "tmux-ok" if self.has_tmux else "", "error": ""}
         return {"output": "", "error": None}
 
 
@@ -134,13 +141,17 @@ def test_sandbox_session_lifecycle(monkeypatch):
     assert "Process running with session ID" in out
     assert out.endswith("waiting for input")
     start_script = shell.scripts[0]
-    assert "mkfifo" in start_script and "sleep 86400" in start_script
+    # tmux gives the command a real PTY and mirrors the pane into the log.
+    assert "tmux new-session" in start_script and "pipe-pane" in start_script
     session_id = out.split("session ID ")[1].splitlines()[0]
     session = SandboxSessions.get("qq:FriendMessage:1", session_id)
     assert session is not None and session.cursor == 18
 
     out = asyncio.run(WriteStdinTool().call(ctx, session_id, chars="hi\n"))
-    assert any("printf %s" in script for script in shell.scripts)
+    assert any(
+        "send-keys -t" in script and " -l " in script for script in shell.scripts
+    )
+    assert any(script.endswith("Enter") for script in shell.scripts)
     assert "Process exited with code 0" in out
     # A finished session is forgotten.
     assert SandboxSessions.get("qq:FriendMessage:1", session_id) is None
@@ -167,6 +178,19 @@ def test_poll_script_waits_inside_the_sandbox():
     assert "c=42" in script and "+ 3 ))" in script
     assert "tail -c +$((c + 1))" in script
     assert codex_exec.META_MARKER in script
+    # Without a tmux session there is nothing to probe or clean up.
+    assert "tmux" not in script
+
+
+def test_poll_script_probes_a_tmux_pane_that_died_without_an_exit_code():
+    script = _poll_script("/tmp/astrbot-exec/abc", 0, 1_000, "abc")
+    # A pane killed from outside, or signalled, never runs `echo $? > exit`;
+    # without this probe the session would stay "running" forever.
+    assert "tmux has-session -t abc" in script
+    assert 'echo -1 > "$d/exit"' in script
+    assert script.endswith(
+        '; [ -f "$d/exit" ] && tmux kill-session -t abc >/dev/null 2>&1; true'
+    )
 
 
 def test_shipyard_mode_forces_sandbox_and_disables_native_exec(tmp_path):
@@ -203,3 +227,79 @@ def test_shipyard_mode_forces_sandbox_and_disables_native_exec(tmp_path):
         skills, in_sandbox=True
     )
     assert "astrbot__astrbot_read_skill" in build_codex_skills_prompt(skills)
+
+
+def test_sandbox_falls_back_to_a_fifo_without_tmux(monkeypatch):
+    marker = codex_exec.META_MARKER
+    shell = FakeSandboxShell([f"ready\n{marker} 6 none>>>\n"], has_tmux=False)
+    ctx = _context(monkeypatch, SimpleNamespace(shell=shell), local=False)
+
+    out = asyncio.run(ExecCommandTool().call(ctx, "top", workdir="/w"))
+    session_id = out.split("session ID ")[1].splitlines()[0]
+    session = SandboxSessions.get("qq:FriendMessage:1", session_id)
+    assert session is not None and session.tmux is False
+    assert any(
+        "mkfifo" in script and "sleep 86400" in script for script in shell.scripts
+    )
+
+    shell.polls.append(f"done\n{marker} 11 0>>>\n")
+    asyncio.run(WriteStdinTool().call(ctx, session_id, chars="q"))
+    assert any(script.startswith("printf %s") for script in shell.scripts)
+
+
+def test_write_stdin_script_shapes():
+    tmux = codex_exec.SandboxSession(session_id="s1", directory="/d", tmux=True)
+    fifo = codex_exec.SandboxSession(session_id="s2", directory="/d", tmux=False)
+
+    line = codex_exec._write_stdin_script(tmux, "yes\n")
+    assert "send-keys -t s1 -l -- yes" in line
+    assert line.endswith("send-keys -t s1 Enter")
+    # A bare control byte (Ctrl-C) is sent literally, with no Enter.
+    assert codex_exec._write_stdin_script(tmux, "\x03").endswith("-l -- '\x03'")
+    assert codex_exec._write_stdin_script(tmux, "\x04").endswith("-l -- '\x04'")
+    assert codex_exec._write_stdin_script(tmux, "\n") == "tmux send-keys -t s1 Enter"
+    # Empty input writes nothing; the caller polls instead.
+    assert codex_exec._write_stdin_script(tmux, "") == "true"
+    # `-l` keeps tmux key names as text, and `--` keeps a leading dash as text.
+    assert codex_exec._write_stdin_script(tmux, "Enter").endswith("-l -- Enter")
+    assert codex_exec._write_stdin_script(tmux, "C-c").endswith("-l -- C-c")
+    assert codex_exec._write_stdin_script(tmux, "-l").endswith("-l -- -l")
+    # tmux eats a trailing semicolon as a command separator unless it is
+    # escaped, so `cd /x; ls;` would otherwise arrive as `cd /x; ls`.
+    assert codex_exec._write_stdin_script(tmux, "cd /x; ls;\n").startswith(
+        "tmux send-keys -t s1 -l -- 'cd /x; ls\\;' && "
+    )
+    # Only the submit newline becomes Enter; the rest stays part of the text.
+    assert codex_exec._write_stdin_script(tmux, "a\n\n").startswith(
+        "tmux send-keys -t s1 -l -- 'a\n'"
+    )
+    assert codex_exec._write_stdin_script(fifo, "q").startswith(
+        "printf %s q > /d/stdin"
+    )
+
+
+def test_sandbox_start_script_guards_the_pane(monkeypatch):
+    marker = codex_exec.META_MARKER
+    shell = FakeSandboxShell([f"ok\n{marker} 3 none>>>\n"])
+    ctx = _context(monkeypatch, SimpleNamespace(shell=shell), local=False)
+
+    asyncio.run(ExecCommandTool().call(ctx, "echo semi;", workdir="/w"))
+    start = shell.scripts[0]
+    # The command keeps its own shell, so a command ending in `;`, in a
+    # comment, or calling `exit` still records an exit code. The pane command
+    # reaches the script single-quoted, hence the escaping here.
+    assert (
+        "sh -c 'echo semi;'; echo $? > /tmp/astrbot-exec/".replace("'", "'\"'\"'")
+        in start
+    )
+    # Nothing runs until pipe-pane is attached: otherwise short commands lose
+    # their output, and a failed pipe-pane would leave the command running in
+    # an orphan pane while the fallback path starts it a second time.
+    assert "while [ ! -e /tmp/astrbot-exec/" in start and "/go ]" in start
+    assert start.index("pipe-pane") < start.index("/go && echo tmux-ok")
+    # A partial start (pipe-pane refused, for instance) takes the fallback
+    # path, so the half-built tmux session has to go with it.
+    pane_id = start.split("new-session -d -s ")[1].split()[0]
+    assert start.endswith(
+        f"&& echo tmux-ok || {{ tmux kill-session -t {pane_id} >/dev/null 2>&1; false; }}"
+    )
