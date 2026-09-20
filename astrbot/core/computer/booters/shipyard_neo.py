@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 from typing import Any, cast
 
@@ -338,6 +339,43 @@ class NeoBrowserComponent(BrowserComponent):
         return _maybe_model_dump(result)
 
 
+#: Process limit a sandbox should offer. Each shell session costs a tmux pane
+#: and a shell, and the limit is part of the Bay profile, not anything AstrBot
+#: can set on a sandbox it creates.
+RECOMMENDED_NPROC = 1024
+
+
+def _quantity(value: Any) -> float:
+    """Best-effort number for a Kubernetes-style resource quantity.
+
+    Profiles report values such as ``2``, ``"1500m"`` or ``"4Gi"``. Only the
+    ordering matters here, so anything unparsable scores zero rather than
+    failing profile selection.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.match(r"^\s*([0-9.]+)\s*([A-Za-z]*)\s*$", str(value or ""))
+    if not match:
+        return 0.0
+    factors = {
+        "": 1.0,
+        "m": 1e-3,
+        "k": 1e3,
+        "K": 1e3,
+        "Ki": 1024.0,
+        "M": 1e6,
+        "Mi": 1024.0**2,
+        "G": 1e9,
+        "Gi": 1024.0**3,
+        "T": 1e12,
+        "Ti": 1024.0**4,
+    }
+    try:
+        return float(match.group(1)) * factors.get(match.group(2), 1.0)
+    except ValueError:
+        return 0.0
+
+
 class ShipyardNeoBooter(ComputerBooter):
     """Booter backed by Shipyard Neo (Bay).
 
@@ -460,6 +498,8 @@ class ShipyardNeoBooter(ComputerBooter):
             NeoBrowserComponent(self._sandbox) if "browser" in caps else None
         )
 
+        # Resources, including the process limit every tmux session competes
+        # for, are fixed by the profile; nothing here can raise them.
         logger.info(
             "Got Shipyard Neo sandbox: %s (profile=%s, capabilities=%s, auto=%s)",
             self._sandbox.id,
@@ -467,6 +507,41 @@ class ShipyardNeoBooter(ComputerBooter):
             list(caps),
             bool(self._bay_manager),
         )
+        await self._warn_if_process_limit_is_low()
+
+    async def _warn_if_process_limit_is_low(self) -> None:
+        """Says so when the sandbox cannot host many shell sessions.
+
+        Every `exec_command` session is a tmux pane plus a shell, so a low
+        process limit shows up as commands failing to fork, which is hard to
+        recognise for what it is. The limit belongs to the Bay profile and
+        cannot be raised from here, so name it at boot instead.
+        """
+        if self._shell is None:
+            return
+        try:
+            result = await self._shell.exec("ulimit -Hu", timeout=15)
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not fail boot
+            logger.debug("[Computer] Could not read the sandbox process limit: %s", exc)
+            return
+        text = str(
+            (result or {}).get("stdout") if isinstance(result, dict) else result or ""
+        ).strip()
+        if text == "unlimited":
+            return
+        try:
+            limit = int(text.splitlines()[-1])
+        except (ValueError, IndexError):
+            return
+        if limit < RECOMMENDED_NPROC:
+            logger.warning(
+                "[Computer] Sandbox process limit is %d, below the %d shell "
+                "sessions this setup expects to be able to run. Raise nproc/pids "
+                "in the Bay profile, or lower "
+                "provider_settings.sandbox.max_shell_sessions.",
+                limit,
+                RECOMMENDED_NPROC,
+            )
 
     @property
     def sandbox_id(self) -> str:
@@ -625,21 +700,32 @@ class ShipyardNeoBooter(ComputerBooter):
         if not profiles:
             return self.DEFAULT_PROFILE
 
-        def _score(p: Any) -> tuple[int, int]:
-            """(has_browser, capability_count) — higher is better."""
+        def _score(p: Any) -> tuple[int, int, float, float]:
+            """(has_browser, capability_count, cpu, memory) — higher is better.
+
+            Capabilities still come first: a profile that cannot do what the
+            session needs is no use however large it is. Size breaks the tie,
+            because every shell session costs processes and memory, and the
+            profile is the only place those limits are set.
+            """
             caps = getattr(p, "capabilities", []) or []
-            return (1 if "browser" in caps else 0, len(caps))
+            resources = getattr(p, "resources", {}) or {}
+            return (
+                1 if "browser" in caps else 0,
+                len(caps),
+                _quantity(resources.get("cpu")),
+                _quantity(resources.get("memory")),
+            )
 
         best = max(profiles, key=_score)
         chosen = getattr(best, "id", self.DEFAULT_PROFILE)
 
-        if chosen != self.DEFAULT_PROFILE:
-            caps = getattr(best, "capabilities", [])
-            logger.info(
-                "[Computer] Auto-selected profile %s (capabilities=%s)",
-                chosen,
-                caps,
-            )
+        logger.info(
+            "[Computer] Auto-selected profile %s (capabilities=%s, resources=%s)",
+            chosen,
+            getattr(best, "capabilities", []),
+            getattr(best, "resources", {}),
+        )
 
         return chosen
 

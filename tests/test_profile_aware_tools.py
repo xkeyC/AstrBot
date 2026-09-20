@@ -292,3 +292,85 @@ class TestBaseComputerBooter:
 
         booter = ComputerBooter()
         assert booter.browser is None
+
+
+class TestProfileSizeSelection:
+    """能力相同时，自动选择应当挑资源更大的 profile。
+
+    每个 exec_command 会话在沙箱里是一个 tmux 面板加一个 shell，而 CPU、
+    内存和进程数上限全部由 profile 决定，AstrBot 这边无法单独调整。
+    """
+
+    def _make_booter(self):
+        from astrbot.core.computer.booters.shipyard_neo import ShipyardNeoBooter
+
+        return ShipyardNeoBooter(
+            endpoint_url="http://localhost:8114",
+            access_token="sk-bay-test",
+            profile="",
+        )
+
+    @staticmethod
+    def _client(items):
+        async def _list_profiles():
+            return SimpleNamespace(items=items)
+
+        return SimpleNamespace(list_profiles=_list_profiles)
+
+    @pytest.mark.asyncio
+    async def test_larger_profile_wins_a_tie(self):
+        client = self._client(
+            [
+                SimpleNamespace(
+                    id="small",
+                    capabilities=["python"],
+                    resources={"cpu": "1", "memory": "2Gi"},
+                ),
+                SimpleNamespace(
+                    id="large",
+                    capabilities=["python"],
+                    resources={"cpu": "4", "memory": "8Gi"},
+                ),
+            ]
+        )
+
+        assert await self._make_booter()._resolve_profile(client) == "large"
+
+    @pytest.mark.asyncio
+    async def test_capabilities_still_outrank_size(self):
+        """再大的 profile，缺少需要的能力也没用。"""
+        client = self._client(
+            [
+                SimpleNamespace(
+                    id="huge",
+                    capabilities=["python"],
+                    resources={"cpu": "16", "memory": "64Gi"},
+                ),
+                SimpleNamespace(
+                    id="browser",
+                    capabilities=["python", "browser"],
+                    resources={"cpu": "1", "memory": "1Gi"},
+                ),
+            ]
+        )
+
+        assert await self._make_booter()._resolve_profile(client) == "browser"
+
+    @pytest.mark.asyncio
+    async def test_unparsable_resources_do_not_break_selection(self):
+        client = self._client(
+            [
+                SimpleNamespace(
+                    id="weird",
+                    capabilities=["python"],
+                    resources={"cpu": "lots", "memory": None},
+                ),
+                SimpleNamespace(
+                    id="sane",
+                    capabilities=["python"],
+                    resources={"cpu": "2", "memory": "4Gi"},
+                ),
+            ]
+        )
+
+        assert await self._make_booter()._resolve_profile(client) == "sane"

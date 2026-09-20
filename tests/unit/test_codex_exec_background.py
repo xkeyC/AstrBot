@@ -11,7 +11,7 @@ import pytest
 
 from astrbot.core.tools.computer_tools import codex_exec
 from astrbot.core.tools.computer_tools.codex_exec import (
-    MAX_LIVE_SESSIONS_PER_CHAT,
+    DEFAULT_MAX_LIVE_SESSIONS,
     SandboxSession,
     SandboxSessions,
     claim_completion,
@@ -62,9 +62,32 @@ def test_session_count_is_per_chat():
     assert SandboxSessions.count(UMO) == 1
 
 
-def test_the_live_session_cap_is_low_enough_to_matter():
-    """上限存在的意义是先于沙箱的进程限制拦下来。"""
-    assert 0 < MAX_LIVE_SESSIONS_PER_CHAT <= 16
+def test_the_live_session_cap_is_configurable_with_a_usable_default():
+    """默认值要够用，但仍然先于沙箱的进程限制拦下来。"""
+    assert DEFAULT_MAX_LIVE_SESSIONS >= 128
+
+    class _Ctx:
+        class context:  # noqa: N801 - mirrors ContextWrapper's shape
+            class context:  # noqa: N801
+                @staticmethod
+                def get_config(umo=None):
+                    return {
+                        "provider_settings": {"sandbox": {"max_shell_sessions": 64}}
+                    }
+
+            class event:  # noqa: N801
+                unified_msg_origin = UMO
+
+    assert codex_exec.max_live_sessions(_Ctx()) == 64
+
+
+def test_the_cap_falls_back_when_config_is_unreadable():
+    class _Broken:
+        class context:  # noqa: N801
+            context = None
+            event = None
+
+    assert codex_exec.max_live_sessions(_Broken()) == DEFAULT_MAX_LIVE_SESSIONS
 
 
 @pytest.mark.asyncio

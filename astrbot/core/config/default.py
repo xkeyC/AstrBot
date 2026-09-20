@@ -165,8 +165,15 @@ DEFAULT_CONFIG = {
             "shipyard_max_sessions": 10,
             "shipyard_neo_endpoint": "",
             "shipyard_neo_access_token": "",
-            "shipyard_neo_profile": "python-default",
+            # A profile with room for many concurrent shell sessions. Empty
+            # means auto-select the largest one with the needed capabilities;
+            # python-default, the stock profile, is the smallest.
+            "shipyard_neo_profile": "python-gpu",
             "shipyard_neo_ttl": 43200,
+            # Live exec_command sessions one sandbox may hold. Each is a tmux
+            # pane plus a shell, so the real ceiling is the profile's process
+            # limit, which should leave headroom above this.
+            "max_shell_sessions": 128,
             "cua_image": CUA_DEFAULT_CONFIG["image"],
             "cua_os_type": CUA_DEFAULT_CONFIG["os_type"],
             "cua_idle_timeout": CUA_DEFAULT_CONFIG["idle_timeout"],
@@ -3706,7 +3713,13 @@ CONFIG_METADATA_3 = {
                     "provider_settings.sandbox.shipyard_neo_profile": {
                         "description": "Shipyard Neo Profile",
                         "type": "string",
-                        "hint": "Shipyard Neo 沙箱 profile，如 python-default。留空时自动选择能力更完整的 profile。",
+                        "hint": (
+                            "Shipyard Neo 沙箱 profile，如 python-default。"
+                            "留空（默认）时自动选择：先看能力是否齐全，再取资源"
+                            "最大的那个。CPU、内存和进程数上限都由 profile 决定，"
+                            "AstrBot 无法单独调整，shell 会话开始 fork 失败时应当"
+                            "换一个更大的 profile。"
+                        ),
                         "condition": {
                             "provider_settings.computer_use_runtime": "sandbox",
                             "provider_settings.sandbox.booter": "shipyard_neo",
@@ -3719,6 +3732,19 @@ CONFIG_METADATA_3 = {
                         "condition": {
                             "provider_settings.computer_use_runtime": "sandbox",
                             "provider_settings.sandbox.booter": "shipyard_neo",
+                        },
+                    },
+                    "provider_settings.sandbox.max_shell_sessions": {
+                        "description": "单会话最大 shell 会话数",
+                        "type": "int",
+                        "hint": (
+                            "一个聊天同时可持有的 exec_command 会话数，默认 128。"
+                            "每个会话在沙箱里是一个 tmux 面板加一个 shell，真正的"
+                            "上限是沙箱 profile 的进程数限制；命令开始 fork 失败时"
+                            "应当换一个资源更大的 profile，而不是继续调高这里。"
+                        ),
+                        "condition": {
+                            "provider_settings.computer_use_runtime": "sandbox",
                         },
                     },
                     "provider_settings.sandbox.cua_image": {

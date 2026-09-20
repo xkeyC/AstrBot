@@ -657,7 +657,7 @@ async def get_booter(
             ep = sandbox_cfg.get("shipyard_neo_endpoint", "")
             token = sandbox_cfg.get("shipyard_neo_access_token", "")
             ttl = sandbox_cfg.get("shipyard_neo_ttl", 43200)
-            profile = sandbox_cfg.get("shipyard_neo_profile", "python-default")
+            profile = sandbox_cfg.get("shipyard_neo_profile", "")
 
             # Auto-discover token from Bay's credentials.json if not configured
             if not token:

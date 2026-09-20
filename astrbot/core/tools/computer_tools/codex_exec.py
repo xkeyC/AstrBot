@@ -175,9 +175,15 @@ class SandboxSessions:
 
 # ---------------------------------------------------- background completion
 
-#: Live sessions allowed per chat. Each is a tmux pane plus a shell inside the
-#: sandbox, and the sandbox caps how many processes it will host.
-MAX_LIVE_SESSIONS_PER_CHAT = 8
+#: Live sessions allowed per chat when nothing is configured. Each one is a
+#: tmux pane plus a shell, so the real ceiling is the sandbox's own process
+#: limit, which comes from the Bay profile and cannot be raised from here.
+DEFAULT_MAX_LIVE_SESSIONS = 128
+
+#: Raises the session's soft process limit to whatever the container's hard
+#: limit allows. The hard limit and the container's pids cgroup come from the
+#: Bay profile; this only stops a low soft default from biting first.
+RAISE_NPROC = 'ulimit -u "$(ulimit -Hu)" 2>/dev/null || true; '
 
 #: Grace period before a watcher starts polling, so it stays out of the way
 #: while the agent is still working the session itself.
@@ -194,6 +200,25 @@ _watchers: dict[tuple[str, str], asyncio.Task] = {}
 #: Sessions whose completion has been reported, by whoever got there first.
 _claimed: OrderedDict[tuple[str, str], None] = OrderedDict()
 _CLAIMED_LIMIT = 512
+
+
+def max_live_sessions(context: ContextWrapper[AstrAgentContext]) -> int:
+    """Live shell sessions one chat may hold.
+
+    Raise it with `provider_settings.sandbox.max_shell_sessions`. The hard
+    ceiling is the sandbox's process limit, which is part of the Bay profile:
+    if commands start failing to fork, pick a profile with more headroom
+    rather than raising this.
+    """
+    try:
+        conf = context.context.context.get_config(
+            umo=context.context.event.unified_msg_origin
+        )
+        sandbox = (conf.get("provider_settings") or {}).get("sandbox") or {}
+        configured = int(sandbox.get("max_shell_sessions") or 0)
+    except Exception:  # noqa: BLE001 - config shape is not guaranteed
+        return DEFAULT_MAX_LIVE_SESSIONS
+    return configured if configured > 0 else DEFAULT_MAX_LIVE_SESSIONS
 
 
 def claim_completion(umo: str, session_id: str) -> bool:
@@ -455,7 +480,7 @@ async def _start_sandbox_session(
     # The wait gives up after five seconds in case the start call never got
     # far enough to write the go file.
     pane = (
-        f"i=0; while [ ! -e {go_file} ]; do i=$((i + 1)); "
+        RAISE_NPROC + f"i=0; while [ ! -e {go_file} ]; do i=$((i + 1)); "
         '[ "$i" -gt 100 ] && exit 1; sleep 0.05; done; '
         f"{runner} -c {shlex.quote(cmd)}; echo $? > {exit_file}"
     )
@@ -474,7 +499,7 @@ async def _start_sandbox_session(
     # between write_stdin calls.
     fifo = shlex.quote(directory + "/stdin")
     script = (
-        f"mkdir -p {quoted_dir} && cd {quoted_workdir} && "
+        RAISE_NPROC + f"mkdir -p {quoted_dir} && cd {quoted_workdir} && "
         f"mkfifo {fifo} 2>/dev/null; : > {log}; "
         f"(sleep 86400 > {fifo} &) ; "
         f"( {runner} -c {shlex.quote(cmd)} < {fifo} > {log} 2>&1; "
@@ -618,12 +643,13 @@ class ExecCommandTool(FunctionTool):
                 max_output_tokens=budget,
             )
 
-        if SandboxSessions.count(umo) >= MAX_LIVE_SESSIONS_PER_CHAT:
+        max_sessions = max_live_sessions(context)
+        if SandboxSessions.count(umo) >= max_sessions:
             # Every live session is a tmux pane and a shell inside the sandbox,
             # which has its own process limits. Refusing here is better than
             # failing somewhere deeper once those run out.
             return (
-                f"Error: {MAX_LIVE_SESSIONS_PER_CHAT} shell sessions are already "
+                f"Error: {max_sessions} shell sessions are already "
                 "running for this chat. Poll them with write_stdin until they "
                 "report an exit code before starting another."
             )
