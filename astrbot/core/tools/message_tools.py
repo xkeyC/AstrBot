@@ -22,6 +22,7 @@ from astrbot.core.tools.computer_tools.fs import _remote_basename
 from astrbot.core.tools.computer_tools.util import (
     check_admin_permission,
     is_local_runtime,
+    reject_secret_path,
     workspace_root,
     workspace_root_for_context,
 )
@@ -69,6 +70,10 @@ def _can_send_local_file(
     current_workspace_root: Path | None = None,
 ) -> bool:
     umo = context.context.event.unified_msg_origin
+    # Sending a file puts it in the chat, so credentials are never eligible,
+    # not even for an admin on the local runtime.
+    if reject_secret_path(local_path):
+        return False
     allowed_roots = _file_send_allowed_roots(umo, current_workspace_root)
     if _is_path_within(local_path, allowed_roots):
         return True

@@ -62,6 +62,7 @@ from .util import (
     check_admin_permission,
     is_local_runtime,
     normalize_umo_for_workspace,
+    reject_secret_path,
     workspace_root_for_context,
 )
 
@@ -833,6 +834,10 @@ class FileUploadTool(FunctionTool):
     ) -> str | None:
         if permission_error := check_admin_permission(context, "File upload/download"):
             return permission_error
+        # This tool reads a host path into the sandbox, where the model can
+        # read it back, so credentials are refused before anything is opened.
+        if secret_error := reject_secret_path(local_path):
+            return secret_error
         sb = await get_booter(
             context.context.context,
             context.context.event.unified_msg_origin,
