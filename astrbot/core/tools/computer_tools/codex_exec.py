@@ -236,6 +236,20 @@ def claim_completion(umo: str, session_id: str) -> bool:
     return True
 
 
+@dataclass
+class _WatchTarget:
+    """What a watcher needs after the turn that started the command is gone."""
+
+    plugin_context: Any
+    umo: str
+    session_id: str
+    sandbox: SandboxSession | None
+    #: The command's initiator. The completion is delivered as a message from
+    #: them, so their permission rule and their place in the queue apply.
+    sender_id: str
+    is_admin: bool
+
+
 def watch_background_session(
     context: ContextWrapper[AstrAgentContext],
     umo: str,
@@ -254,22 +268,25 @@ def watch_background_session(
     key = (umo, session_id)
     if key in _watchers:
         return
-    plugin_context = context.context.context
-    booter_args = (context, umo, session_id, sandbox)
-    task = asyncio.create_task(
-        _watch(plugin_context, *booter_args), name=f"exec-watch-{session_id}"
+    event = context.context.event
+    target = _WatchTarget(
+        plugin_context=context.context.context,
+        umo=umo,
+        session_id=session_id,
+        sandbox=sandbox,
+        sender_id=str(event.get_sender_id() or ""),
+        is_admin=getattr(event, "role", "") == "admin",
     )
+    task = asyncio.create_task(_watch(target), name=f"exec-watch-{session_id}")
     _watchers[key] = task
     task.add_done_callback(lambda _t, k=key: _watchers.pop(k, None))
 
 
-async def _watch(
-    plugin_context: Any,
-    context: ContextWrapper[AstrAgentContext],
-    umo: str,
-    session_id: str,
-    sandbox: SandboxSession | None,
-) -> None:
+async def _watch(target: _WatchTarget) -> None:
+    plugin_context = target.plugin_context
+    umo = target.umo
+    session_id = target.session_id
+    sandbox = target.sandbox
     await asyncio.sleep(WATCH_GRACE_SECONDS)
     deadline = time.monotonic() + WATCH_MAX_SECONDS
     cursor = sandbox.cursor if sandbox else 0
@@ -295,11 +312,10 @@ async def _watch(
                 )
                 output, cursor, exit_code = _parse_poll(raw, cursor)
             else:
-                event = context.context.event
                 result = await booter.shell.poll_session(
                     owner_id=umo,
-                    requester_id=event.get_sender_id(),
-                    requester_is_admin=event.role == "admin",
+                    requester_id=target.sender_id,
+                    requester_is_admin=target.is_admin,
                     session_id=session_id,
                     yield_time_ms=WATCH_POLL_MS,
                     max_output_chars=COMPLETION_TAIL_CHARS,
@@ -314,7 +330,7 @@ async def _watch(
         if sandbox is not None:
             SandboxSessions.drop(umo, session_id)
         if claim_completion(umo, session_id):
-            await _deliver(plugin_context, umo, session_id, exit_code, output)
+            await _deliver(target, exit_code, output)
         return
     # Still running after the watch window. A pane nobody polls is a process
     # nobody will ever stop, so end it here rather than leave it in the sandbox.
@@ -343,18 +359,32 @@ async def _watch(
             )
 
 
-async def _deliver(
-    plugin_context: Any, umo: str, session_id: str, exit_code: int, output: str
-) -> None:
+async def _deliver(target: _WatchTarget, exit_code: int, output: str) -> None:
+    """Hands the result back to the agent as a message from whoever started it.
+
+    A fixed notice would be cheaper, but it leaves the agent unaware: the
+    result would not be in its history, so it could neither mention it in its
+    own voice nor act on it. Routing it as a message also means the ordinary
+    rules apply -- steered into the initiator's running turn, or queued behind
+    whatever else the chat is doing.
+    """
+    from astrbot.core.agent.runners.codex.wake import run_background_exec_completion
+
     tail = clean_terminal_output(output).strip()
     if len(tail) > COMPLETION_TAIL_CHARS:
         tail = "…" + tail[-COMPLETION_TAIL_CHARS:]
-    header = f"后台命令已结束（会话 {session_id}，退出码 {exit_code}）"
-    text = f"{header}\n{tail}" if tail else header
     try:
-        await plugin_context.send_message(umo, MessageChain().message(text))
+        await run_background_exec_completion(
+            target.plugin_context,
+            session_str=target.umo,
+            sender_id=target.sender_id,
+            role="admin" if target.is_admin else "member",
+            session_id=target.session_id,
+            exit_code=exit_code,
+            output=tail,
+        )
     except Exception as e:  # noqa: BLE001
-        logger.error("Could not report background session %s: %s", session_id, e)
+        logger.error("Could not report background session %s: %s", target.session_id, e)
 
 
 def _poll_script(
@@ -552,10 +582,11 @@ class ExecCommandTool(FunctionTool):
     description: str = (
         "Runs a command in a shell session, returning output or a session ID for "
         "ongoing interaction. Use write_stdin to keep reading or to answer prompts. "
-        "When a session ID comes back the command is still running: keep polling "
-        "with write_stdin until it reports an exit code, before you answer. A "
-        "session left running is reported to the chat on its own when it ends, "
-        "and is stopped if it outlives the watch window."
+        "A session ID means the command is still running. Poll it with write_stdin "
+        "when it should be done in seconds. For anything slower, do not hold up the "
+        "conversation: say what you started, end your turn, and the result comes "
+        "back to you as a message when the command finishes. Never idle with sleep "
+        "or repeated empty polls to keep a turn alive."
     )
     parameters: dict = field(
         default_factory=lambda: {

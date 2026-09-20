@@ -160,3 +160,78 @@ async def run_codex_background_wake(
     await run_in_session_thread(
         ctx, event, cfg, prompt, origin_event.unified_msg_origin
     )
+
+
+def build_background_exec_prompt(session_id: str, exit_code: int, output: str) -> str:
+    """Prompt announcing a background command that finished after its turn."""
+    lines = [
+        f'<background_command session="{session_id}" exit_code="{exit_code}">',
+        "A command you started earlier has finished. Its turn was already over, so "
+        "this is how the result reaches you. Tell the user what happened, in your "
+        "own voice, and act on it if the situation calls for it. Do not start the "
+        "command again.",
+        "Output:",
+        output.strip() or "(no output)",
+        "</background_command>",
+    ]
+    return "\n".join(lines)
+
+
+async def run_background_exec_completion(
+    ctx: Any,
+    *,
+    session_str: str,
+    sender_id: str,
+    role: str,
+    session_id: str,
+    exit_code: int,
+    output: str,
+) -> None:
+    """Delivers a finished background command into its own chat.
+
+    It arrives as a message from whoever started the command, so it follows the
+    same rules any message of theirs would: if their own turn is still running
+    it is steered into that turn and answered in the same reply, and otherwise
+    it queues behind whatever else that chat is doing.
+    """
+    from astrbot.core.agent.runners.codex.codex_agent_runner import build_turn_input
+    from astrbot.core.agent.runners.codex.native import try_steer
+    from astrbot.core.cron.events import CronMessageEvent
+
+    prompt = build_background_exec_prompt(session_id, exit_code, output)
+    req = ProviderRequest()
+    req.session_id = session_str
+    req.prompt = prompt
+    if sender_id:
+        steered = await try_steer(
+            session_str, sender_id, build_turn_input(req), prompt=prompt
+        )
+        if steered is not None:
+            return
+
+    try:
+        session = MessageSession.from_str(session_str)
+    except Exception as e:  # noqa: BLE001
+        logger.error("Invalid session for background command %s: %s", session_id, e)
+        return
+    event = CronMessageEvent(
+        context=ctx,
+        session=session,
+        message=prompt,
+        message_type=session.message_type,
+    )
+    if sender_id:
+        event.message_obj.sender.user_id = sender_id
+    event.role = role or "member"
+    cfg = ctx.get_config(umo=event.unified_msg_origin)
+    if not await run_in_session_thread(ctx, event, cfg, prompt, session_str):
+        logger.warning(
+            "Background command %s produced no reply; reporting it plainly.",
+            session_id,
+        )
+        await ctx.send_message(
+            session_str,
+            MessageChain().message(
+                f"后台命令已结束（会话 {session_id}，退出码 {exit_code}）"
+            ),
+        )

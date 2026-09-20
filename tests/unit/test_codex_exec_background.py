@@ -31,6 +31,20 @@ def _clean():
     codex_exec._watchers.clear()
 
 
+def _ctx(sender_id: str = "20017", role: str = "member"):
+    class _Ctx:
+        class context:  # noqa: N801 - mirrors ContextWrapper's shape
+            context = object()
+
+            class event:  # noqa: N801
+                @staticmethod
+                def get_sender_id():
+                    return sender_id
+
+    _Ctx.context.event.role = role
+    return _Ctx()
+
+
 def test_only_one_side_reports_a_completion():
     """agent 轮询到退出和 watcher 观察到退出，只能有一个人播报。"""
     assert claim_completion(UMO, "sess-1") is True
@@ -94,22 +108,86 @@ def test_the_cap_falls_back_when_config_is_unreadable():
 async def test_watch_background_session_starts_one_task_per_session(monkeypatch):
     started: list[str] = []
 
-    async def _fake_watch(plugin_context, context, umo, session_id, sandbox):
-        started.append(session_id)
+    async def _fake_watch(target):
+        started.append(target.session_id)
         await asyncio.sleep(0)
 
     monkeypatch.setattr(codex_exec, "_watch", _fake_watch)
 
-    class _Ctx:
-        class context:  # noqa: N801 - mirrors ContextWrapper's shape
-            context = object()
-
-    codex_exec.watch_background_session(_Ctx(), UMO, "sess-1")
-    codex_exec.watch_background_session(_Ctx(), UMO, "sess-1")
-    codex_exec.watch_background_session(_Ctx(), UMO, "sess-2")
+    codex_exec.watch_background_session(_ctx(), UMO, "sess-1")
+    codex_exec.watch_background_session(_ctx(), UMO, "sess-1")
+    codex_exec.watch_background_session(_ctx(), UMO, "sess-2")
     await asyncio.gather(*list(codex_exec._watchers.values()))
     await asyncio.sleep(0)
 
     assert started == ["sess-1", "sess-2"], "同一个会话不该被重复监视"
     # 任务结束后要把自己从表里摘掉，否则同一个会话再也不会被监视
     assert codex_exec._watchers == {}
+
+
+@pytest.mark.asyncio
+async def test_the_watcher_remembers_who_started_the_command(monkeypatch):
+    """结果要以发起人的身份送回去——插队和排队都按这个人算。"""
+    captured: list[codex_exec._WatchTarget] = []
+
+    async def _fake_watch(target):
+        captured.append(target)
+
+    monkeypatch.setattr(codex_exec, "_watch", _fake_watch)
+
+    codex_exec.watch_background_session(
+        _ctx(sender_id="20017", role="admin"), UMO, "sess-9"
+    )
+    await asyncio.gather(*list(codex_exec._watchers.values()))
+
+    assert captured[0].sender_id == "20017"
+    assert captured[0].is_admin is True
+    assert captured[0].umo == UMO
+
+
+@pytest.mark.asyncio
+async def test_a_completion_is_delivered_as_that_sender_s_message(monkeypatch):
+    """闭环走的是一条消息，而不是一句固定播报——否则 agent 根本不知道结果。"""
+    calls: list[dict] = []
+
+    async def _fake_completion(ctx, **kwargs):
+        calls.append(kwargs)
+
+    import astrbot.core.agent.runners.codex.wake as wake
+
+    monkeypatch.setattr(wake, "run_background_exec_completion", _fake_completion)
+    target = codex_exec._WatchTarget(
+        plugin_context=object(),
+        umo=UMO,
+        session_id="sess-3",
+        sandbox=None,
+        sender_id="20017",
+        is_admin=False,
+    )
+
+    await codex_exec._deliver(target, 0, "BACKGROUND_DONE_7741\n")
+
+    assert calls[0]["sender_id"] == "20017"
+    assert calls[0]["role"] == "member"
+    assert calls[0]["exit_code"] == 0
+    assert "BACKGROUND_DONE_7741" in calls[0]["output"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_delivery_does_not_escape_the_watcher(monkeypatch):
+    import astrbot.core.agent.runners.codex.wake as wake
+
+    async def _boom(ctx, **kwargs):
+        raise RuntimeError("pipeline down")
+
+    monkeypatch.setattr(wake, "run_background_exec_completion", _boom)
+    target = codex_exec._WatchTarget(
+        plugin_context=object(),
+        umo=UMO,
+        session_id="sess-4",
+        sandbox=None,
+        sender_id="20017",
+        is_admin=False,
+    )
+
+    await codex_exec._deliver(target, 1, "boom")
