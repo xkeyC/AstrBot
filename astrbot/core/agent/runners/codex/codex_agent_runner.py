@@ -13,13 +13,13 @@ import contextlib
 import hashlib
 import os
 import re
+import shutil
 import sys
 import time
 import typing as T
 from pathlib import Path
 
 from astrbot.core import logger, sp
-from astrbot.core.message.components import Image
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
 from astrbot.core.permission_rules import PermissionPolicy
@@ -233,12 +233,43 @@ def system_prompt(cfg: dict) -> str:
     return custom or DEFAULT_SYSTEM_PROMPT
 
 
-# Codex saves a generated image under CODEX_HOME and tells the model the user
-# has already seen it, which is true in the TUI but not here. Both the hosted
-# Responses item ("ImageGeneration") and the standalone extension item
+# Codex saves a generated image under CODEX_HOME, on the host and outside every
+# tool the model has -- the message tools refuse CODEX_HOME outright. So the
+# image is copied into the chat's workspace and the model is told where, and it
+# decides whether to send it or keep working on it. Both the hosted Responses
+# item ("ImageGeneration") and the standalone extension item
 # ("image_gen.generation") carry the same `saved_path`.
 _IMAGE_ITEM_TYPES = ("ImageGeneration",)
 _IMAGE_ITEM_KIND = "image_gen.generation"
+#: Workspace-relative directory generated images are copied into. The same
+#: relative path resolves for send_message_to_user in every runtime: the host
+#: workspace is tried first, then the sandbox.
+GENERATED_IMAGE_DIR = "generated_images"
+#: Where Shipyard Neo mounts the sandbox workspace.
+SANDBOX_WORKSPACE = "/workspace"
+
+
+def generated_image_note(relative_path: str, where: str) -> str:
+    """Tells the model where its generated image went and what to do with it."""
+    return (
+        '<request_context name="generated_image">' + "\n"
+        f"The image you just generated is now at {where}. It has NOT been sent to "
+        "the user, and nothing will send it for you. To show it, call "
+        f'send_message_to_user with {{"type": "image", "path": "{relative_path}"}}. '
+        "You can also keep working with the file where it is." + "\n"
+        "</request_context>"
+    )
+
+
+def generated_image_failure_note(error: str) -> str:
+    """Tells the model its generated image could not be made reachable."""
+    return (
+        '<request_context name="generated_image">' + "\n"
+        f"The image you just generated could not be copied into your workspace "
+        f"({error}), so you cannot send or use it. Tell the user it could not be "
+        "delivered." + "\n"
+        "</request_context>"
+    )
 
 
 def generated_image_path(item: JsonObject) -> str | None:
@@ -546,6 +577,81 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             request["model"] = self.req.model
         return request
 
+    def _computer_runtime(self) -> str:
+        """Execution environment this chat's tools run in, as codex_request sets it."""
+        if self.cfg.get("shipyard_mode"):
+            return "sandbox"
+        try:
+            ctx = self.run_context.context.context  # type: ignore[attr-defined]
+            settings = ctx.get_config(umo=self.umo).get("provider_settings") or {}
+        except Exception:  # noqa: BLE001 - no config means no execution runtime
+            return "none"
+        return str(settings.get("computer_use_runtime") or "none")
+
+    async def _place_generated_image(self, path: str) -> str:
+        """Copies a generated image into the chat's workspace.
+
+        The sandbox workspace when tools run there, the host workspace
+        otherwise -- the same place a relative path given to
+        send_message_to_user resolves to.
+
+        Returns:
+            The note to give the model: where the image is, or why it is not
+            anywhere it can reach.
+        """
+        from astrbot.core.computer.computer_client import get_booter
+        from astrbot.core.tools.computer_tools.util import (
+            workspace_root,
+            workspace_root_for_context,
+        )
+
+        relative = f"{GENERATED_IMAGE_DIR}/{os.path.basename(path)}"
+        runtime = self._computer_runtime()
+        try:
+            if runtime == "sandbox":
+                ctx = self.run_context.context.context  # type: ignore[attr-defined]
+                booter = await get_booter(ctx, self.umo)
+                await booter.upload_file(path, relative)
+                where = (
+                    f"`{relative}` in your sandbox workspace "
+                    f"(`{SANDBOX_WORKSPACE}/{relative}`)"
+                )
+            else:
+                root = (
+                    await workspace_root_for_context(self.run_context)  # type: ignore[arg-type]
+                    if runtime == "local"
+                    else workspace_root(self.umo)
+                )
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(shutil.copyfile, path, target)
+                where = f"`{relative}` in your workspace"
+        except Exception as e:  # noqa: BLE001 - sandbox or filesystem failure
+            logger.warning("Could not place generated image %s: %s", path, e)
+            return generated_image_failure_note(str(e))
+        logger.info("Generated image placed at %s (%s runtime)", relative, runtime)
+        return generated_image_note(relative, where)
+
+    async def _steer_note(
+        self, engine: CodexEngine, thread_id: str, active: ActiveTurn | None, note: str
+    ) -> bool:
+        """Adds a note to the running turn; False when the turn is already over."""
+        if active is None or not active.turn_id:
+            return False
+        try:
+            result = await engine.submit_turn(
+                thread_id,
+                {
+                    "input": [{"type": "text", "text": note, "text_elements": []}],
+                    "mode": "steer",
+                    "expected_turn_id": active.turn_id,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not steer a note into %s: %s", thread_id, e)
+            return False
+        return result.get("status") == "steered"
+
     async def _run_turn(self) -> T.AsyncGenerator[AgentResponse, None]:
         engine = await CodexEngine.get(engine_options(self.cfg))
         self._engine = engine
@@ -566,7 +672,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 final_texts: list[str] = []
                 commentary: list[str] = []
                 reasoning: list[str] = []
-                generated_images: list[str] = []
+                # Generated images already handled, and notes about them that
+                # could not be steered in because the turn was ending.
+                placed_images: set[str] = set()
+                pending_notes: list[str] = []
                 usage: JsonObject | None = None
                 error_msg: str | None = None
                 end = "task_complete"
@@ -624,8 +733,13 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                 phases[item.get("id", "")] = item.get("phase")
                         elif kind == "item_completed":
                             path = generated_image_path(msg.get("item") or {})
-                            if path and path not in generated_images:
-                                generated_images.append(path)
+                            if path and path not in placed_images:
+                                placed_images.add(path)
+                                note = await self._place_generated_image(path)
+                                if not await self._steer_note(
+                                    engine, thread_id, active, note
+                                ):
+                                    pending_notes.append(note)
                         elif kind == "agent_message_content_delta":
                             phase = phases.get(msg.get("item_id", ""))
                             if self.streaming and (
@@ -668,9 +782,15 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                             unanswered = (
                                 active.steered > 0 and last_user_seq > last_agent_seq
                             )
+                            # An image note that missed the turn gets the same
+                            # treatment: without it the model never learns
+                            # where its image went.
+                            notes = [CONTINUE_NOTE] if unanswered else []
+                            notes += pending_notes
+                            pending_notes.clear()
                             if (
                                 kind != "turn_aborted"
-                                and unanswered
+                                and notes
                                 and not self._aborted
                                 and continuations < MAX_CONTINUATIONS
                             ):
@@ -681,9 +801,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                         "input": [
                                             {
                                                 "type": "text",
-                                                "text": CONTINUE_NOTE,
+                                                "text": note,
                                                 "text_elements": [],
                                             }
+                                            for note in notes
                                         ],
                                         "mode": "start_if_idle",
                                     },
@@ -724,11 +845,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         if end == "turn_aborted" and not text:
             text = "（已中断）" if self._aborted else ""
 
-        chain = MessageChain().message(text) if text else MessageChain()
-        # Codex only writes the image to disk and then tells the model the user
-        # has already seen it; nothing here has. Send it with this turn's reply.
-        for path in generated_images:
-            chain.chain.append(Image.fromFileSystem(path))
+        chain = MessageChain().message(text)
         self.final_llm_resp = LLMResponse(
             role="assistant",
             result_chain=chain,
