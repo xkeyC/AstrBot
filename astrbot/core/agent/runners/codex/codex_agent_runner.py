@@ -67,6 +67,9 @@ CONTINUE_NOTE = (
 MAX_CONTINUATIONS = 2
 # Shown instead of an answer when a chat already has too many turns waiting.
 BUSY_NOTE = "我这边还在处理前面的消息，稍后再发一次吧。"
+# Appended when a follow-up was steered in but the turn to answer it could not
+# be started: without it the follow-up would look answered.
+FOLLOW_UP_DROPPED_NOTE = "（后面补充的消息没能处理，请再发一次。）"
 CODE_MODES = ("code_mode", "code_mode_only")
 
 
@@ -711,6 +714,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 # existed then: it stands unless the continuation answers.
                 carried_error: str | None = None
                 answers_before = 0
+                follow_up_dropped = False
                 try:
                     # Registered before the submit, not after: a same-sender
                     # follow-up arriving during that round trip should wait for
@@ -879,14 +883,15 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                     logger.warning(
                                         "Codex continuation not submitted: %s", e
                                     )
-                                    break
+                                    again = {}
                                 if again.get("status") == "started":
                                     active.turn_id = str(again.get("turn_id") or "")
                                     if error_msg:
                                         carried_error = error_msg
-                                        answers_before = len(final_texts)
+                                        answers_before = _answer_count(final_texts)
                                         error_msg = None
                                     continue
+                                follow_up_dropped = unanswered
                             break
                         elif kind == "_pump_closed":
                             raise RuntimeError(
@@ -930,10 +935,20 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             text = (commentary or final_texts)[-1]
         # A continuation that produced no answer of its own does not clear
         # the error before it.
-        if carried_error and not error_msg and len(final_texts) == answers_before:
+        if (
+            carried_error
+            and not error_msg
+            and _answer_count(final_texts) == answers_before
+        ):
             error_msg = carried_error
-        if error_msg and not text:
+        if error_msg and not text.strip():
             raise RuntimeError(error_msg)
+        if follow_up_dropped:
+            text = (
+                f"{text}\n\n{FOLLOW_UP_DROPPED_NOTE}"
+                if text
+                else FOLLOW_UP_DROPPED_NOTE
+            )
         if end == "turn_aborted" and not text:
             text = "（已中断）" if self._aborted else ""
 
@@ -1026,6 +1041,11 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to mirror codex exchange into history: %s", e)
+
+
+def _answer_count(final_texts: list[str]) -> int:
+    """Final answers with any text; a blank one answers nothing."""
+    return sum(1 for t in final_texts if t.strip())
 
 
 def _token_usage(usage: JsonObject | None) -> TokenUsage | None:

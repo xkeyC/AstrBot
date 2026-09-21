@@ -457,6 +457,64 @@ async def test_a_failed_continuation_keeps_the_first_answer(monkeypatch, temp_db
     )
 
     assert responses[-1].type == "llm_result"
-    assert responses[-1].data["chain"].get_plain_text() == "first"
+    assert responses[-1].data["chain"].get_plain_text().startswith("first")
     [row] = rows
     assert row.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_then_an_error_and_a_silent_continuation_is_an_error(
+    monkeypatch, temp_db
+):
+    _steered_engine(monkeypatch)
+    events = [
+        {"type": "agent_message", "message": "part one", "phase": "final_answer"},
+        {"type": "user_message", "message": "and also"},
+        {"type": "error", "message": "stream disconnected"},
+        {"type": "task_complete"},
+        {"type": "task_complete"},  # the continuation, silent
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)]
+    )
+
+    # The partial answer still goes out, but the run counts as failed.
+    assert responses[-1].type == "llm_result"
+    [row] = rows
+    assert row.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_blank_continuation_answer_does_not_hide_the_error(
+    monkeypatch, temp_db
+):
+    _steered_engine(monkeypatch)
+    events = [
+        {"type": "user_message", "message": "and also"},
+        {"type": "error", "message": "stream disconnected"},
+        {"type": "task_complete"},
+        {"type": "agent_message", "message": "  ", "phase": "final_answer"},
+        {"type": "task_complete"},
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)]
+    )
+
+    assert [r.type for r in responses] == ["err"]
+    [row] = rows
+    assert row.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_follow_up_is_not_passed_off_as_answered(monkeypatch, temp_db):
+    _steered_engine(monkeypatch, fail_continuation=True)
+    events = [
+        {"type": "agent_message", "message": "first", "phase": "final_answer"},
+        {"type": "user_message", "message": "and also"},
+        {"type": "task_complete"},
+    ]
+    _, responses, _ = await _run(monkeypatch, temp_db, events, [None, _total(10, 0, 1)])
+
+    text = responses[-1].data["chain"].get_plain_text()
+    assert text.startswith("first")
+    assert text.endswith(runner_mod.FOLLOW_UP_DROPPED_NOTE)
