@@ -16,6 +16,7 @@ import psutil
 from sqlmodel import col, func, select
 
 from astrbot.core import DEMO_MODE, logger
+from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
 from astrbot.core.config import VERSION
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
@@ -321,7 +322,8 @@ class StatService:
                 result = await session.execute(
                     select(ProviderStat)
                     .where(
-                        ProviderStat.agent_type == "internal",
+                        # This fork runs every reply through Codex.
+                        ProviderStat.agent_type == CODEX_RUNNER_TYPE,
                         ProviderStat.created_at >= query_start_utc,
                     )
                     .order_by(col(ProviderStat.created_at).asc())
@@ -342,6 +344,8 @@ class StatService:
             total_by_bucket: dict[int, int] = defaultdict(int)
             range_total_tokens = 0
             range_total_output_tokens = 0
+            range_input_tokens = 0
+            range_cached_input_tokens = 0
             range_total_calls = 0
             range_success_calls = 0
             range_ttft_total_ms = 0.0
@@ -361,8 +365,10 @@ class StatService:
                     + record.token_input_cached
                     + record.token_output
                 )
-                provider_id = record.provider_id or "unknown"
                 provider_model = record.provider_model or "Unknown"
+                # Codex rows share a provider (usually "openai"), so the trend
+                # and ranking are by model, which is what tells them apart.
+                provider_id = record.provider_model or record.provider_id or "unknown"
 
                 if created_at_local >= range_start_local:
                     bucket_local = created_at_local.replace(
@@ -374,6 +380,10 @@ class StatService:
                     total_by_umo[record.umo or "unknown"] += token_total
                     total_by_bucket[bucket_ts] += token_total
                     range_total_tokens += token_total
+                    range_input_tokens += (
+                        record.token_input_other + record.token_input_cached
+                    )
+                    range_cached_input_tokens += record.token_input_cached
                     range_total_calls += 1
                     if record.status != "error":
                         range_success_calls += 1
@@ -491,6 +501,14 @@ class StatService:
                     if range_duration_total_ms > 0
                     else 0
                 ),
+                # Share of input tokens served from the prompt cache.
+                "range_cache_hit_rate": (
+                    range_cached_input_tokens / range_input_tokens
+                    if range_input_tokens
+                    else 0
+                ),
+                "range_input_tokens": range_input_tokens,
+                "range_cached_input_tokens": range_cached_input_tokens,
                 "range_success_rate": (
                     range_success_calls / range_total_calls if range_total_calls else 0
                 ),

@@ -67,6 +67,7 @@ async def run_third_party_agent(
     runner: "BaseAgentRunner",
     stream_to_general: bool = False,
     custom_error_message: str | None = None,
+    event: AstrMessageEvent | None = None,
 ) -> AsyncGenerator[tuple[MessageChain, bool], None]:
     """
     运行第三方 agent runner 并转换响应格式
@@ -83,6 +84,11 @@ async def run_third_party_agent(
                     yield resp.data["chain"], False
             elif resp.type == "err":
                 yield resp.data["chain"], True
+            elif resp.type == "agent_stats":
+                # WebChat shows per-reply usage; other platforms have no use
+                # for it (the stats page reads the database).
+                if event is not None and event.get_platform_name() == "webchat":
+                    await event.send(resp.data["chain"])
     except Exception as e:
         logger.error(f"Third party agent runner error: {e}")
         err_msg = custom_error_message
@@ -253,6 +259,7 @@ class ThirdPartyAgentSubStage(Stage):
                     runner,
                     stream_to_general=False,
                     custom_error_message=custom_error_message,
+                    event=event,
                 ):
                     aggregator.add_chunk(chain, is_error)
                     if is_error:
@@ -295,6 +302,7 @@ class ThirdPartyAgentSubStage(Stage):
             runner,
             stream_to_general=stream_to_general,
             custom_error_message=custom_error_message,
+            event=event,
         ):
             aggregator.add_chunk(chain, is_error)
             if is_error:

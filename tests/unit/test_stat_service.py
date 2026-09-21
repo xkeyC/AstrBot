@@ -89,11 +89,13 @@ async def test_provider_token_ranking_includes_umo_display_names(temp_db):
         umo=aliased_umo,
         provider_id="provider-1",
         stats={"token_usage": {"input_other": 3, "input_cached": 4, "output": 5}},
+        agent_type="codex",
     )
     await temp_db.insert_provider_stat(
         umo=raw_umo,
         provider_id="provider-1",
         stats={"token_usage": {"input_other": 1, "input_cached": 1, "output": 1}},
+        agent_type="codex",
     )
     await temp_db.upsert_umo_alias(
         umo=aliased_umo,
@@ -121,4 +123,56 @@ async def test_provider_token_ranking_includes_umo_display_names(temp_db):
             "platform_type": "webchat",
             "tokens": 3,
         },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_token_stats_read_codex_runs(temp_db):
+    """The page shows Codex runs, ranked by model, with the cache hit rate."""
+    now = time.time()
+    for model, other, cached, ttft in (
+        ("gpt-5.5", 200, 800, 1.5),
+        ("gpt-5.5", 100, 900, 0.5),
+        ("gpt-5.4-mini", 500, 500, 0.0),
+    ):
+        await temp_db.insert_provider_stat(
+            umo="qq:GroupMessage:g",
+            provider_id="openai",
+            provider_model=model,
+            stats={
+                "token_usage": {
+                    "input_other": other,
+                    "input_cached": cached,
+                    "output": 50,
+                },
+                "start_time": now - 10,
+                "end_time": now,
+                "time_to_first_token": ttft,
+            },
+            agent_type="codex",
+        )
+    # A row from the replaced internal runner is not part of the page.
+    await temp_db.insert_provider_stat(
+        umo="qq:GroupMessage:g",
+        provider_id="legacy",
+        stats={"token_usage": {"input_other": 9999, "input_cached": 0, "output": 0}},
+    )
+
+    result = await _make_service(temp_db).get_provider_token_stats(1)
+
+    assert result["range_total_calls"] == 3
+    assert result["range_total_tokens"] == 3150
+    assert result["range_input_tokens"] == 3000
+    assert result["range_cached_input_tokens"] == 2200
+    assert result["range_cache_hit_rate"] == pytest.approx(2200 / 3000)
+    # Only runs that measured it count toward the average.
+    assert result["range_avg_ttft_ms"] == pytest.approx(1000)
+    assert result["range_avg_duration_ms"] == pytest.approx(10000, rel=0.01)
+    assert [r["provider_id"] for r in result["range_by_provider"]] == [
+        "gpt-5.5",
+        "gpt-5.4-mini",
+    ]
+    assert [s["name"] for s in result["trend"]["series"]] == [
+        "gpt-5.5",
+        "gpt-5.4-mini",
     ]

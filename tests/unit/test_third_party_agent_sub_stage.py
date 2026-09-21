@@ -110,3 +110,42 @@ async def test_codex_runner_receives_inline_profile_config(
     assert runner_factory_calls == [True]
     registry.register_agent_stop_callback.assert_called_once()
     registry.unregister_agent_stop_callback.assert_called_once_with(event)
+
+
+class _StatsRunner:
+    """Yields a stats chunk, then the reply."""
+
+    def __init__(self):
+        self.stats_chain = MessageChain(type="agent_stats")
+        self.reply = MessageChain().message("hi")
+
+    async def step_until_done(self, max_step=30):
+        from astrbot.core.agent.response import AgentResponse
+
+        yield AgentResponse(type="agent_stats", data={"chain": self.stats_chain})
+        yield AgentResponse(type="llm_result", data={"chain": self.reply})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "sent"), [("webchat", True), ("aiocqhttp", False)]
+)
+async def test_run_stats_reach_webchat_only(platform: str, sent: bool):
+    runner = _StatsRunner()
+    event = MagicMock()
+    event.get_platform_name.return_value = platform
+    event.send = AsyncMock()
+
+    chunks = [
+        chain
+        async for chain, _ in third_party.run_third_party_agent(
+            runner, stream_to_general=True, event=event
+        )
+    ]
+
+    # The stats never become part of the reply.
+    assert chunks == [runner.reply]
+    if sent:
+        event.send.assert_awaited_once_with(runner.stats_chain)
+    else:
+        event.send.assert_not_awaited()

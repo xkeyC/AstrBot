@@ -19,17 +19,19 @@ import time
 import typing as T
 from pathlib import Path
 
-from astrbot.core import logger, sp
+from astrbot.core import db_helper, logger, sp
+from astrbot.core.message.components import Json
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
 from astrbot.core.permission_rules import PermissionPolicy
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
 
 from ...hooks import BaseAgentRunHooks
-from ...response import AgentResponseData
+from ...response import AgentResponseData, AgentStats
 from ...run_context import ContextWrapper, TContext
 from ..base import AgentResponse, AgentState, BaseAgentRunner
 from .constants import (
+    CODEX_RUNNER_TYPE,
     CODEX_THREAD_STATE_KEY,
     DEFAULT_SYSTEM_PROMPT,
     NATIVE_EXEC_SESSION_KEY,
@@ -46,6 +48,7 @@ from .native import (
     session_slot,
 )
 from .tool_bridge import CodexToolBridge
+from .usage import FIRST_TOKEN_EVENTS, thread_usage, usage_between
 
 if sys.version_info >= (3, 12):
     from typing import override
@@ -429,6 +432,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         self._turn_running = False
         self._aborted = False
         self._active: ActiveTurn | None = None
+        # Usage of this run, in the shape the stats page and WebChat read.
+        self.stats = AgentStats()
+        self._usage_before: JsonObject | None = None
+        self._stats_recorded = False
 
     # ------------------------------------------------------------------ public
 
@@ -448,6 +455,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             msg = f"Codex 请求失败：{e!s}"
             self._transition_state(AgentState.ERROR)
             self.final_llm_resp = LLMResponse(role="err", completion_text=msg)
+            await self._record_stats("error")
             yield AgentResponse(
                 type="err", data=AgentResponseData(chain=MessageChain().message(msg))
             )
@@ -695,6 +703,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 started = time.monotonic()
                 active: ActiveTurn | None = None
                 event_seq = last_user_seq = last_agent_seq = 0
+                codex_ttft = 0.0
                 continuations = 0
                 try:
                     # Registered before the submit, not after: a same-sender
@@ -709,6 +718,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                     )
                     self._active = active
                     ACTIVE_TURNS[self.umo] = active
+                    self._usage_before = await thread_usage(engine, thread_id)
+                    self.stats.start_time = time.time()
                     try:
                         sub = await engine.submit_turn(
                             thread_id, self._turn_request(tools_update)
@@ -738,6 +749,14 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                             continue
                         kind = msg.get("type")
                         event_seq += 1
+                        if (
+                            not self.stats.time_to_first_token
+                            and kind in FIRST_TOKEN_EVENTS
+                        ):
+                            # Floored: 0 means "not measured" to the stats.
+                            self.stats.time_to_first_token = max(
+                                time.time() - self.stats.start_time, 0.001
+                            )
                         if kind == "user_message":
                             last_user_seq = event_seq
                         if kind == "item_started":
@@ -790,13 +809,26 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         elif kind == "agent_reasoning":
                             reasoning.append(msg.get("text") or "")
                         elif kind == "token_count":
-                            usage = (msg.get("info") or {}).get(
-                                "last_token_usage"
-                            ) or usage
+                            info = msg.get("info") or {}
+                            usage = info.get("last_token_usage") or usage
+                            # The request that last filled the context.
+                            self.stats.current_context_tokens = int(
+                                (usage or {}).get("input_tokens") or 0
+                            )
                         elif kind == "error":
                             error_msg = msg.get("message") or str(msg)
                         elif kind in TERMINAL_EVENTS:
                             end = kind
+                            # Codex's own measure, from the turn's first model
+                            # request; continuations do not replace it.
+                            ttft_ms = msg.get("time_to_first_token_ms")
+                            if (
+                                not codex_ttft
+                                and isinstance(ttft_ms, int | float)
+                                and ttft_ms > 0
+                            ):
+                                codex_ttft = ttft_ms / 1000
+                                self.stats.time_to_first_token = codex_ttft
                             # A follow-up steered in as the turn ended was recorded
                             # but never answered (B13): answer it in one more turn.
                             unanswered = (
@@ -878,12 +910,56 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             usage=_token_usage(usage),
         )
         self._transition_state(AgentState.DONE)
+        await self._record_stats("aborted" if end == "turn_aborted" else "completed")
         await self._sync_history(text)
+        yield AgentResponse(
+            type="agent_stats",
+            data=AgentResponseData(
+                chain=MessageChain(
+                    type="agent_stats", chain=[Json(data=self.stats.to_dict())]
+                )
+            ),
+        )
         try:
             await self.agent_hooks.on_agent_done(self.run_context, self.final_llm_resp)
         except Exception as e:  # noqa: BLE001
             logger.error("Error in on_agent_done hook: %s", e, exc_info=True)
         yield AgentResponse(type="llm_result", data=AgentResponseData(chain=chain))
+
+    async def _record_stats(self, status: str) -> None:
+        """Closes this run's stats and stores them for the stats page.
+
+        Once per run, and never raising: stats must not break a reply. Rows are
+        written with agent type ``codex``, which is what the stats page reads.
+        """
+        if self._stats_recorded or not self.stats.start_time:
+            return
+        self._stats_recorded = True
+        self.stats.end_time = time.time()
+        after: JsonObject | None = None
+        if self._engine is not None and self._thread_id:
+            after = await thread_usage(self._engine, self._thread_id)
+        spent = usage_between(self._usage_before, after)
+        if spent is not None:
+            self.stats.token_usage = spent
+        elif self.final_llm_resp and self.final_llm_resp.usage:
+            # Older binding: the last request's usage is the best there is.
+            self.stats.token_usage = self.final_llm_resp.usage
+        model = (after or {}).get("model") or self.req.model or self.cfg.get("model")
+        provider = (after or {}).get("model_provider") or self.cfg.get("model_provider")
+        try:
+            conv = self.req.conversation
+            await db_helper.insert_provider_stat(
+                umo=self.umo,
+                conversation_id=conv.cid if conv else None,
+                provider_id=str(provider or CODEX_RUNNER_TYPE),
+                provider_model=str(model) if model else None,
+                status=status,
+                stats=self.stats.to_dict(),
+                agent_type=CODEX_RUNNER_TYPE,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Persist codex stats failed: %s", e, exc_info=True)
 
     async def _sync_history(self, text: str) -> None:
         """Mirror the exchange into AstrBot's conversation for the WebUI."""
@@ -899,6 +975,13 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": text},
             )
+            # What the conversation list shows as the context size.
+            if self.stats.current_context_tokens:
+                await ctx.conversation_manager.update_conversation(
+                    self.umo,
+                    conv.cid,
+                    token_usage=self.stats.current_context_tokens,
+                )
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to mirror codex exchange into history: %s", e)
 

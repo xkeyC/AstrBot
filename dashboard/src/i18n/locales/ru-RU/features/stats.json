@@ -63,7 +63,8 @@
     "avgTtft": "Средний TTFT",
     "avgDuration": "Среднее время ответа",
     "avgTpm": "Средний Output TPM",
-    "successRate": "Доля успешных вызовов"
+    "successRate": "Доля успешных вызовов",
+    "cacheHitRate": "Доля попаданий в кэш"
   },
   "modelRanking": {
     "title": "Рейтинг использования моделей"

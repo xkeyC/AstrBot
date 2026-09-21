@@ -142,7 +142,7 @@ class ConversationCommands:
                         "total_output",
                     ),
                 ).where(
-                    col(ProviderStat.agent_type) == "internal",
+                    col(ProviderStat.agent_type) == CODEX_RUNNER_TYPE,
                     col(ProviderStat.conversation_id) == cid,
                 )
             )

@@ -140,6 +140,10 @@
                   <span>{{ t('modelTotal.successRate') }}</span>
                   <strong>{{ rangeSuccessRateLabel }}</strong>
                 </div>
+                <div class="token-meta-item">
+                  <span>{{ t('modelTotal.cacheHitRate') }}</span>
+                  <strong>{{ rangeCacheHitRateLabel }}</strong>
+                </div>
               </div>
             </section>
 
@@ -323,6 +327,9 @@ interface ProviderTokenStatsResponse {
   range_avg_duration_ms: number
   range_avg_tpm: number
   range_success_rate: number
+  range_cache_hit_rate?: number
+  range_input_tokens?: number
+  range_cached_input_tokens?: number
   range_by_provider: ProviderRankingItem[]
   range_by_umo: UmoRankingItem[]
   today_total_tokens: number
@@ -574,6 +581,15 @@ const rangeSuccessRateLabel = computed(() => {
     return '—'
   }
   const rate = providerStats.value?.range_success_rate ?? 0
+  return `${(rate * 100).toFixed(1)}%`
+})
+
+// Share of input tokens served from the prompt cache.
+const rangeCacheHitRateLabel = computed(() => {
+  if (!(providerStats.value?.range_input_tokens ?? 0)) {
+    return '—'
+  }
+  const rate = providerStats.value?.range_cache_hit_rate ?? 0
   return `${(rate * 100).toFixed(1)}%`
 })
 
