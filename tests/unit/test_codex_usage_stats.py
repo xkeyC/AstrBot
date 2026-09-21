@@ -167,7 +167,8 @@ async def _run(monkeypatch, temp_db, events, totals, cfg=None):
         request=req,
         run_context=_Wrapper(),
         agent_hooks=BaseAgentRunHooks(),
-        provider_config=cfg or {},
+        # A short timeout: a test that runs out of events fails, not hangs.
+        provider_config={"turn_timeout": 10, **(cfg or {})},
     )
     responses = [r async for r in runner.step_until_done()]
     async with temp_db.get_db() as session:
@@ -381,3 +382,81 @@ async def test_the_closing_total_is_read_before_the_chat_is_released(
 
     # Baseline and closing total, both while this turn held the chat.
     assert seen_locked == [True, True]
+
+
+# ------------------------------------------------------------ continuations
+
+
+def _steered_engine(monkeypatch, fail_continuation=False):
+    """The first submit marks a follow-up as steered in, forcing a continuation."""
+    calls = []
+
+    async def submit_turn(self, thread_id, request):
+        calls.append(request)
+        if len(calls) == 1:
+            native.ACTIVE_TURNS[UMO].steered = 1
+        elif fail_continuation:
+            raise RuntimeError("thread gone")
+        return {"status": "started", "turn_id": f"turn-{len(calls)}"}
+
+    monkeypatch.setattr(_Engine, "submit_turn", submit_turn)
+    # One continuation: a silent one would otherwise be continued again.
+    monkeypatch.setattr(runner_mod, "MAX_CONTINUATIONS", 1)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_without_an_answer_keeps_the_error(monkeypatch, temp_db):
+    calls = _steered_engine(monkeypatch)
+    events = [
+        {"type": "user_message", "message": "and also"},
+        {"type": "error", "message": "stream disconnected"},
+        {"type": "task_complete"},
+        {"type": "task_complete"},  # the continuation, silent
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)]
+    )
+
+    assert len(calls) == 2
+    assert [r.type for r in responses] == ["err"]
+    assert "stream disconnected" in responses[0].data["chain"].get_plain_text()
+    [row] = rows
+    assert row.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_that_answers_clears_the_error(monkeypatch, temp_db):
+    _steered_engine(monkeypatch)
+    events = [
+        {"type": "user_message", "message": "and also"},
+        {"type": "error", "message": "stream disconnected"},
+        {"type": "task_complete"},
+        {"type": "agent_message", "message": "done", "phase": "final_answer"},
+        {"type": "task_complete"},
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)]
+    )
+
+    assert responses[-1].type == "llm_result"
+    [row] = rows
+    assert row.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_continuation_keeps_the_first_answer(monkeypatch, temp_db):
+    _steered_engine(monkeypatch, fail_continuation=True)
+    events = [
+        {"type": "agent_message", "message": "first", "phase": "final_answer"},
+        {"type": "user_message", "message": "and also"},
+        {"type": "task_complete"},
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)]
+    )
+
+    assert responses[-1].type == "llm_result"
+    assert responses[-1].data["chain"].get_plain_text() == "first"
+    [row] = rows
+    assert row.status == "completed"

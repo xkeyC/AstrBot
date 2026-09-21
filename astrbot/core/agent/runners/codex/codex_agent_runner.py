@@ -707,6 +707,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 event_seq = last_user_seq = last_agent_seq = 0
                 first_end = True
                 continuations = 0
+                # An error from before a continuation, and how many answers
+                # existed then: it stands unless the continuation answers.
+                carried_error: str | None = None
+                answers_before = 0
                 try:
                     # Registered before the submit, not after: a same-sender
                     # follow-up arriving during that round trip should wait for
@@ -855,24 +859,33 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                 and continuations < MAX_CONTINUATIONS
                             ):
                                 continuations += 1
-                                again = await engine.submit_turn(
-                                    thread_id,
-                                    {
-                                        "input": [
-                                            {
-                                                "type": "text",
-                                                "text": note,
-                                                "text_elements": [],
-                                            }
-                                            for note in notes
-                                        ],
-                                        "mode": "start_if_idle",
-                                    },
-                                )
+                                try:
+                                    again = await engine.submit_turn(
+                                        thread_id,
+                                        {
+                                            "input": [
+                                                {
+                                                    "type": "text",
+                                                    "text": note,
+                                                    "text_elements": [],
+                                                }
+                                                for note in notes
+                                            ],
+                                            "mode": "start_if_idle",
+                                        },
+                                    )
+                                except Exception as e:  # noqa: BLE001
+                                    # Keep the answer this turn already has.
+                                    logger.warning(
+                                        "Codex continuation not submitted: %s", e
+                                    )
+                                    break
                                 if again.get("status") == "started":
                                     active.turn_id = str(again.get("turn_id") or "")
-                                    # The continuation is judged on its own.
-                                    error_msg = None
+                                    if error_msg:
+                                        carried_error = error_msg
+                                        answers_before = len(final_texts)
+                                        error_msg = None
                                     continue
                             break
                         elif kind == "_pump_closed":
@@ -915,6 +928,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             text = "\n\n".join([*commentary, text]) if text else "\n\n".join(commentary)
         if not text and (commentary or final_texts):
             text = (commentary or final_texts)[-1]
+        # A continuation that produced no answer of its own does not clear
+        # the error before it.
+        if carried_error and not error_msg and len(final_texts) == answers_before:
+            error_msg = carried_error
         if error_msg and not text:
             raise RuntimeError(error_msg)
         if end == "turn_aborted" and not text:
