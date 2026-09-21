@@ -891,7 +891,13 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                         answers_before = _answer_count(final_texts)
                                         error_msg = None
                                     continue
-                                follow_up_dropped = unanswered
+                            # Also when out of continuations: a follow-up that
+                            # no turn will answer must not look answered.
+                            follow_up_dropped = (
+                                unanswered
+                                and kind != "turn_aborted"
+                                and not self._aborted
+                            )
                             break
                         elif kind == "_pump_closed":
                             raise RuntimeError(
@@ -943,14 +949,23 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             error_msg = carried_error
         if error_msg and not text.strip():
             raise RuntimeError(error_msg)
+        answered = bool(text.strip())
+        # Host text after the model's answer. A streamed reply is already out
+        # and its final result is not sent again, so it goes out as a delta.
+        tail = ""
         if follow_up_dropped:
-            text = (
-                f"{text}\n\n{FOLLOW_UP_DROPPED_NOTE}"
-                if text
-                else FOLLOW_UP_DROPPED_NOTE
-            )
-        if end == "turn_aborted" and not text:
-            text = "（已中断）" if self._aborted else ""
+            tail = FOLLOW_UP_DROPPED_NOTE
+        elif end == "turn_aborted" and not text and self._aborted:
+            tail = "（已中断）"
+        if tail:
+            if answered:
+                tail = f"\n\n{tail}"
+            text = f"{text}{tail}" if answered else tail.lstrip()
+            if self.streaming:
+                yield AgentResponse(
+                    type="streaming_delta",
+                    data=AgentResponseData(chain=MessageChain().message(tail)),
+                )
 
         chain = MessageChain().message(text)
         self.final_llm_resp = LLMResponse(
@@ -960,8 +975,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             usage=_token_usage(usage),
         )
         self._transition_state(AgentState.DONE)
-        if error_msg:
-            status = "error"  # e.g. timed out, with a partial answer
+        if error_msg or (follow_up_dropped and not answered):
+            # Timed out with a partial answer, or nothing was answered at all.
+            status = "error"
         elif end == "turn_aborted":
             status = "aborted"
         else:

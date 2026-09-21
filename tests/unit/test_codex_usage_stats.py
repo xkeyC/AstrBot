@@ -138,7 +138,7 @@ class _Engine:
         return {"status": "started", "turn_id": "turn-1"}
 
 
-async def _run(monkeypatch, temp_db, events, totals, cfg=None):
+async def _run(monkeypatch, temp_db, events, totals, cfg=None, streaming=False):
     engine = _Engine(events, totals)
 
     async def get(options):
@@ -169,6 +169,7 @@ async def _run(monkeypatch, temp_db, events, totals, cfg=None):
         agent_hooks=BaseAgentRunHooks(),
         # A short timeout: a test that runs out of events fails, not hangs.
         provider_config={"turn_timeout": 10, **(cfg or {})},
+        streaming=streaming,
     )
     responses = [r async for r in runner.step_until_done()]
     async with temp_db.get_db() as session:
@@ -387,7 +388,7 @@ async def test_the_closing_total_is_read_before_the_chat_is_released(
 # ------------------------------------------------------------ continuations
 
 
-def _steered_engine(monkeypatch, fail_continuation=False):
+def _steered_engine(monkeypatch, fail_continuation=False, refuse=False):
     """The first submit marks a follow-up as steered in, forcing a continuation."""
     calls = []
 
@@ -397,6 +398,8 @@ def _steered_engine(monkeypatch, fail_continuation=False):
             native.ACTIVE_TURNS[UMO].steered = 1
         elif fail_continuation:
             raise RuntimeError("thread gone")
+        elif refuse:
+            return {"status": "not_submitted", "reason": "busy"}
         return {"status": "started", "turn_id": f"turn-{len(calls)}"}
 
     monkeypatch.setattr(_Engine, "submit_turn", submit_turn)
@@ -518,3 +521,61 @@ async def test_a_dropped_follow_up_is_not_passed_off_as_answered(monkeypatch, te
     text = responses[-1].data["chain"].get_plain_text()
     assert text.startswith("first")
     assert text.endswith(runner_mod.FOLLOW_UP_DROPPED_NOTE)
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_reply_gets_the_dropped_follow_up_note(monkeypatch, temp_db):
+    _steered_engine(monkeypatch, refuse=True)
+    events = [
+        {"type": "agent_message", "message": "first", "phase": "final_answer"},
+        {"type": "user_message", "message": "and also"},
+        {"type": "task_complete"},
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)], streaming=True
+    )
+
+    deltas = [
+        r.data["chain"].get_plain_text()
+        for r in responses
+        if r.type == "streaming_delta"
+    ]
+    # The streamed answer is already out, so the note follows as a delta.
+    assert deltas[-1] == "\n\n" + runner_mod.FOLLOW_UP_DROPPED_NOTE
+    [row] = rows
+    assert row.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_past_the_last_continuation_is_not_passed_off(
+    monkeypatch, temp_db
+):
+    _steered_engine(monkeypatch)
+    monkeypatch.setattr(runner_mod, "MAX_CONTINUATIONS", 0)
+    events = [
+        {"type": "agent_message", "message": "first", "phase": "final_answer"},
+        {"type": "user_message", "message": "and also"},
+        {"type": "task_complete"},
+    ]
+    _, responses, _ = await _run(monkeypatch, temp_db, events, [None, _total(10, 0, 1)])
+
+    text = responses[-1].data["chain"].get_plain_text()
+    assert text == "first\n\n" + runner_mod.FOLLOW_UP_DROPPED_NOTE
+
+
+@pytest.mark.asyncio
+async def test_nothing_answered_but_the_note_is_an_error(monkeypatch, temp_db):
+    _steered_engine(monkeypatch, fail_continuation=True)
+    events = [
+        {"type": "user_message", "message": "and also"},
+        {"type": "task_complete"},
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)]
+    )
+
+    assert responses[-1].data["chain"].get_plain_text() == (
+        runner_mod.FOLLOW_UP_DROPPED_NOTE
+    )
+    [row] = rows
+    assert row.status == "error"
