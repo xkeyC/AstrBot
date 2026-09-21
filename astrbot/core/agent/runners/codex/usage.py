@@ -113,15 +113,3 @@ class UsageMeter:
     def spent(self) -> TokenUsage | None:
         """The turn's usage, or None when there was no baseline."""
         return self._spent if self.started else None
-
-
-def usage_between(
-    before: JsonObject | None, after: JsonObject | None
-) -> TokenUsage | None:
-    """Usage spent between two ``thread_usage`` snapshots of one thread."""
-    meter = UsageMeter()
-    meter.start(before if before is not None else {})
-    meter.observe((after or {}).get("total_token_usage"))
-    if (after or {}).get("total_token_usage") is None:
-        return None
-    return meter.spent

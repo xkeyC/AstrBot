@@ -10,11 +10,7 @@ from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.runners.codex import codex_agent_runner as runner_mod
 from astrbot.core.agent.runners.codex import native
 from astrbot.core.agent.runners.codex.codex_agent_runner import CodexAgentRunner
-from astrbot.core.agent.runners.codex.usage import (
-    UsageMeter,
-    to_token_usage,
-    usage_between,
-)
+from astrbot.core.agent.runners.codex.usage import UsageMeter, to_token_usage
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.provider.entities import ProviderRequest, TokenUsage
 
@@ -40,24 +36,30 @@ def test_codex_input_includes_cached_tokens():
     assert usage == TokenUsage(input_other=200, input_cached=800, output=50)
 
 
-def test_turn_usage_is_the_growth_of_the_thread_total():
-    before = {"total_token_usage": _total(1000, 800, 50)}
-    after = {"total_token_usage": _total(3500, 3000, 170)}
+def _meter(before, *totals):
+    meter = UsageMeter()
+    meter.start(before)
+    for total in totals:
+        meter.observe(total)
+    return meter.spent
 
-    assert usage_between(before, after) == TokenUsage(
-        input_other=300, input_cached=2200, output=120
+
+def test_turn_usage_is_the_growth_of_the_thread_total():
+    spent = _meter(
+        {"total_token_usage": _total(1000, 800, 50)}, _total(3500, 3000, 170)
     )
+
+    assert spent == TokenUsage(input_other=300, input_cached=2200, output=120)
 
 
 def test_a_new_thread_counts_from_zero():
-    after = {"total_token_usage": _total(900, 0, 40)}
+    spent = _meter({"total_token_usage": None}, _total(900, 0, 40))
 
-    assert usage_between(None, after) == TokenUsage(input_other=900, output=40)
+    assert spent == TokenUsage(input_other=900, output=40)
 
 
-def test_unknown_usage_is_none():
-    assert usage_between(None, None) is None
-    assert usage_between(None, {"total_token_usage": None}) is None
+def test_an_unknown_total_changes_nothing():
+    assert _meter({"total_token_usage": None}, None) == TokenUsage()
 
 
 def test_a_reset_total_keeps_what_was_spent_before_it():
@@ -326,3 +328,56 @@ async def test_an_estimate_does_not_replace_the_context_size(monkeypatch, temp_d
 
     assert runner.stats.current_context_tokens == 1200
     assert runner.final_llm_resp.usage.total == 1230
+
+
+def _count(total):
+    return {
+        "type": "token_count",
+        "info": {"total_token_usage": total, "last_token_usage": total},
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_survives_a_context_overflow_reset(monkeypatch, temp_db):
+    events = [
+        _count(_total(3000, 2500, 150)),
+        # Overflow: Codex swaps the total for a zeroed placeholder.
+        _count(_total(0, 0, 0)),
+        _count(_total(500, 0, 20)),
+        {"type": "agent_message", "message": "ok", "phase": "final_answer"},
+        {"type": "task_complete"},
+    ]
+    _, _, rows = await _run(
+        monkeypatch,
+        temp_db,
+        events,
+        [_total(1000, 800, 50), _total(500, 0, 20)],
+    )
+
+    [row] = rows
+    assert (row.token_input_other, row.token_input_cached, row.token_output) == (
+        800,
+        1700,
+        120,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_closing_total_is_read_before_the_chat_is_released(
+    monkeypatch, temp_db
+):
+    seen_locked = []
+
+    async def thread_usage(engine, thread_id):
+        seen_locked.append(engine.lock.locked())
+        return {"model": "m", "total_token_usage": _total(10, 0, 1)}
+
+    monkeypatch.setattr(runner_mod, "thread_usage", thread_usage)
+    events = [
+        {"type": "agent_message", "message": "ok", "phase": "final_answer"},
+        {"type": "task_complete"},
+    ]
+    await _run(monkeypatch, temp_db, events, [])
+
+    # Baseline and closing total, both while this turn held the chat.
+    assert seen_locked == [True, True]

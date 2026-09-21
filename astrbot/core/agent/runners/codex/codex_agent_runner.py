@@ -871,6 +871,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                 )
                                 if again.get("status") == "started":
                                     active.turn_id = str(again.get("turn_id") or "")
+                                    # The continuation is judged on its own.
+                                    error_msg = None
                                     continue
                             break
                         elif kind == "_pump_closed":
@@ -953,8 +955,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
         Once per run, and never raising: stats must not break a reply. Rows are
         written with agent type ``codex``, which is what the stats page reads.
-        Only runs that reached Codex are recorded: a refused (busy) chat, or a
-        failure before the turn was submitted, spent nothing to count.
+        Recorded from the moment the turn is about to be submitted, so a
+        submit that fails shows up as an error; a refused (busy) chat, or a
+        failure opening the thread, reached no model and is not recorded.
         """
         if self._stats_recorded or not self.stats.start_time:
             return
