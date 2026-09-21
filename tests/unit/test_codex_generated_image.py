@@ -194,3 +194,86 @@ async def test_no_turn_id_yet_means_no_steer():
 
     assert await _runner()._steer_note(engine, "thread-1", active, "NOTE") is False
     assert engine.requests == []
+
+
+# ------------------------------------------------------------------ 单回调
+
+
+@pytest.mark.asyncio
+async def test_the_engine_hook_routes_to_the_thread_s_turn():
+    """Codex 保存图片后回调引擎，引擎按 thread 交给正在跑的那一轮。"""
+    from astrbot.core.agent.runners.codex.native import CodexEngine
+
+    engine = CodexEngine(rt=object())
+    calls = []
+
+    async def _handler(call_id, saved_path):
+        calls.append((call_id, saved_path))
+        return "copied to generated_images/call-1.png"
+
+    engine.saved_image_handlers["thread-1"] = _handler
+
+    text = await engine._on_saved_image("thread-1", "call-1", "/codex/call-1.png")
+
+    assert text == "copied to generated_images/call-1.png"
+    assert calls == [("call-1", "/codex/call-1.png")]
+
+
+@pytest.mark.asyncio
+async def test_no_running_turn_keeps_codex_s_own_hint():
+    from astrbot.core.agent.runners.codex.native import CodexEngine
+
+    engine = CodexEngine(rt=object())
+
+    assert await engine._on_saved_image("thread-9", "call-1", "/x.png") is None
+
+
+@pytest.mark.asyncio
+async def test_a_failing_handler_never_reaches_codex():
+    """回调里抛异常只意味着退回 Codex 自带提示，不能把工具调用带崩。"""
+    from astrbot.core.agent.runners.codex.native import CodexEngine
+
+    engine = CodexEngine(rt=object())
+
+    async def _boom(call_id, saved_path):
+        raise RuntimeError("sandbox down")
+
+    engine.saved_image_handlers["thread-1"] = _boom
+
+    assert await engine._on_saved_image("thread-1", "call-1", "/x.png") is None
+
+
+@pytest.mark.asyncio
+async def test_the_runner_handler_places_the_image_and_marks_it_handled(
+    monkeypatch, image, tmp_path
+):
+    """经回调处理过的图，事件流那条兜底路径不会再处理第二次。"""
+    import astrbot.core.tools.computer_tools.util as util
+
+    monkeypatch.setattr(util, "workspace_root", lambda umo: tmp_path / "ws")
+    runner = _runner("none")
+    runner._hooked_images = set()
+
+    text = await runner._on_saved_image("call-1", str(image))
+
+    assert str(image) in runner._hooked_images
+    assert "NOT been sent" in text
+    assert f"{GENERATED_IMAGE_DIR}/call-1.png" in text
+
+
+@pytest.mark.asyncio
+async def test_a_path_that_is_already_gone_is_left_to_codex():
+    runner = _runner("none")
+    runner._hooked_images = set()
+
+    assert await runner._on_saved_image("call-1", "/nowhere/call-1.png") is None
+    assert runner._hooked_images == set()
+
+
+def test_fallback_notes_are_wrapped_as_request_context():
+    """兜底路径是作为输入插进回合的，要和工具结果区分开。"""
+    wrapped = runner_mod.request_context("generated_image", "BODY")
+
+    assert wrapped.startswith('<request_context name="generated_image">')
+    assert "BODY" in wrapped
+    assert wrapped.endswith("</request_context>")

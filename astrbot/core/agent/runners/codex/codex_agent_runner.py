@@ -252,24 +252,24 @@ SANDBOX_WORKSPACE = "/workspace"
 def generated_image_note(relative_path: str, where: str) -> str:
     """Tells the model where its generated image went and what to do with it."""
     return (
-        '<request_context name="generated_image">' + "\n"
-        f"The image you just generated is now at {where}. It has NOT been sent to "
-        "the user, and nothing will send it for you. To show it, call "
-        f'send_message_to_user with {{"type": "image", "path": "{relative_path}"}}. '
-        "You can also keep working with the file where it is." + "\n"
-        "</request_context>"
+        f"The image was copied to {where}. It has NOT been sent to the user, and "
+        "nothing will send it for you. To show it, call send_message_to_user with "
+        f'{{"type": "image", "path": "{relative_path}"}}. You can also keep working '
+        "with the file where it is."
     )
 
 
 def generated_image_failure_note(error: str) -> str:
     """Tells the model its generated image could not be made reachable."""
     return (
-        '<request_context name="generated_image">' + "\n"
-        f"The image you just generated could not be copied into your workspace "
-        f"({error}), so you cannot send or use it. Tell the user it could not be "
-        "delivered." + "\n"
-        "</request_context>"
+        f"The image could not be copied into your workspace ({error}), so you "
+        "cannot send or use it. Tell the user it could not be delivered."
     )
+
+
+def request_context(name: str, text: str) -> str:
+    """Wraps host text given to the model as input rather than as a tool result."""
+    return f'<request_context name="{name}">\n{text}\n</request_context>'
 
 
 def generated_image_path(item: JsonObject) -> str | None:
@@ -632,6 +632,13 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         logger.info("Generated image placed at %s (%s runtime)", relative, runtime)
         return generated_image_note(relative, where)
 
+    async def _on_saved_image(self, call_id: str, saved_path: str) -> str | None:
+        """Places an image Codex just saved; the result is the tool's output."""
+        if not os.path.isfile(saved_path):
+            return None
+        self._hooked_images.add(saved_path)
+        return await self._place_generated_image(saved_path)
+
     async def _steer_note(
         self, engine: CodexEngine, thread_id: str, active: ActiveTurn | None, note: str
     ) -> bool:
@@ -666,6 +673,12 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 # together on a new chat would otherwise each make one.
                 thread_id, tools_update = await self._open_thread(engine)
                 self._thread_id = thread_id
+                # Images Codex saves during this turn are placed through the
+                # engine's hook, so the model reads where the image went in the
+                # tool result itself. The event-stream path below only covers
+                # an image the hook did not handle.
+                self._hooked_images = set()
+                engine.saved_image_handlers[thread_id] = self._on_saved_image
                 pump = engine.pump(thread_id)
                 queue = pump.open_turn(self._handle_tool_call, self._handle_approval)
                 phases: dict[str, str | None] = {}
@@ -733,9 +746,16 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                 phases[item.get("id", "")] = item.get("phase")
                         elif kind == "item_completed":
                             path = generated_image_path(msg.get("item") or {})
-                            if path and path not in placed_images:
+                            if (
+                                path
+                                and path not in placed_images
+                                and path not in self._hooked_images
+                            ):
                                 placed_images.add(path)
-                                note = await self._place_generated_image(path)
+                                note = request_context(
+                                    "generated_image",
+                                    await self._place_generated_image(path),
+                                )
                                 if not await self._steer_note(
                                     engine, thread_id, active, note
                                 ):
@@ -819,6 +839,11 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                             )
                 finally:
                     self._turn_running = False
+                    if (
+                        engine.saved_image_handlers.get(thread_id)
+                        == self._on_saved_image
+                    ):
+                        engine.saved_image_handlers.pop(thread_id, None)
                     if active is not None and ACTIVE_TURNS.get(self.umo) is active:
                         ACTIVE_TURNS.pop(self.umo, None)
                     pump.close_turn()

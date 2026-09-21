@@ -24,6 +24,8 @@ JsonObject = dict[str, Any]
 ToolCallHandler = Callable[[JsonObject], Awaitable[JsonObject]]
 # (kind "exec" | "patch", request) -> (approved, reason)
 ApprovalHandler = Callable[[str, JsonObject], Awaitable[tuple[bool, str]]]
+# (call id, saved path) -> text the model sees as the image tool's result
+SavedImageHandler = Callable[[str, str], Awaitable[str | None]]
 
 APPROVAL_EVENTS = {
     "exec_approval_request": "exec",
@@ -347,6 +349,26 @@ class CodexEngine:
         self.rt = rt
         self.pumps: dict[str, ThreadPump] = {}
         self.session_locks: dict[str, asyncio.Lock] = {}
+        #: thread id -> handler of images Codex saves during that thread's turn.
+        self.saved_image_handlers: dict[str, SavedImageHandler] = {}
+
+    async def _on_saved_image(
+        self, thread_id: str, call_id: str, saved_path: str
+    ) -> str | None:
+        """Codex's saved-image hook: the returned text is the tool result.
+
+        Routed to the turn running on that thread, which knows the chat and so
+        where the image has to go. Never raises: a failure here only means
+        Codex falls back to its own hint.
+        """
+        handler = self.saved_image_handlers.get(thread_id)
+        if handler is None:
+            return None
+        try:
+            return await handler(call_id, saved_path)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Saved-image handler failed for %s: %s", saved_path, e)
+            return None
 
     @classmethod
     async def get(cls, options: JsonObject) -> CodexEngine:
@@ -362,6 +384,10 @@ class CodexEngine:
                     json.dumps(options, ensure_ascii=False)
                 )
                 engine = cls(rt)
+                # Older bindings have no hook; images then arrive through the
+                # event stream alone.
+                if hasattr(rt, "set_saved_image_hook"):
+                    rt.set_saved_image_hook(engine._on_saved_image)
                 cls._instances[key] = engine
                 logger.info("Codex engine ready (codex_home=%s)", options["codex_home"])
             return engine
