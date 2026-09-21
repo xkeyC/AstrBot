@@ -48,7 +48,7 @@ from .native import (
     session_slot,
 )
 from .tool_bridge import CodexToolBridge
-from .usage import FIRST_TOKEN_EVENTS, thread_usage, usage_between
+from .usage import FIRST_TOKEN_EVENTS, UsageMeter, thread_usage
 
 if sys.version_info >= (3, 12):
     from typing import override
@@ -434,7 +434,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         self._active: ActiveTurn | None = None
         # Usage of this run, in the shape the stats page and WebChat read.
         self.stats = AgentStats()
-        self._usage_before: JsonObject | None = None
+        self._usage = UsageMeter()
+        # The thread's model and provider, read when the turn closes.
+        self._usage_after: JsonObject | None = None
         self._stats_recorded = False
 
     # ------------------------------------------------------------------ public
@@ -703,7 +705,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 started = time.monotonic()
                 active: ActiveTurn | None = None
                 event_seq = last_user_seq = last_agent_seq = 0
-                codex_ttft = 0.0
+                first_end = True
                 continuations = 0
                 try:
                     # Registered before the submit, not after: a same-sender
@@ -718,7 +720,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                     )
                     self._active = active
                     ACTIVE_TURNS[self.umo] = active
-                    self._usage_before = await thread_usage(engine, thread_id)
+                    self._usage.start(await thread_usage(engine, thread_id))
                     self.stats.start_time = time.time()
                     try:
                         sub = await engine.submit_turn(
@@ -810,25 +812,31 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                             reasoning.append(msg.get("text") or "")
                         elif kind == "token_count":
                             info = msg.get("info") or {}
-                            usage = info.get("last_token_usage") or usage
-                            # The request that last filled the context.
-                            self.stats.current_context_tokens = int(
-                                (usage or {}).get("input_tokens") or 0
-                            )
+                            self._usage.observe(info.get("total_token_usage"))
+                            last = info.get("last_token_usage") or {}
+                            # A real request, not an estimate after compaction
+                            # or overflow (those carry no input count): it is
+                            # what last filled the context.
+                            if int(last.get("input_tokens") or 0) > 0:
+                                usage = last
+                                self.stats.current_context_tokens = int(
+                                    last["input_tokens"]
+                                )
                         elif kind == "error":
                             error_msg = msg.get("message") or str(msg)
                         elif kind in TERMINAL_EVENTS:
                             end = kind
-                            # Codex's own measure, from the turn's first model
-                            # request; continuations do not replace it.
+                            # Codex's own measure, from the first turn only: a
+                            # continuation times from its own start, and
+                            # would understate what the user waited.
                             ttft_ms = msg.get("time_to_first_token_ms")
                             if (
-                                not codex_ttft
+                                first_end
                                 and isinstance(ttft_ms, int | float)
                                 and ttft_ms > 0
                             ):
-                                codex_ttft = ttft_ms / 1000
-                                self.stats.time_to_first_token = codex_ttft
+                                self.stats.time_to_first_token = ttft_ms / 1000
+                            first_end = False
                             # A follow-up steered in as the turn ended was recorded
                             # but never answered (B13): answer it in one more turn.
                             unanswered = (
@@ -879,6 +887,14 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                     if active is not None and ACTIVE_TURNS.get(self.umo) is active:
                         ACTIVE_TURNS.pop(self.umo, None)
                     pump.close_turn()
+                    # Still holding the chat's slot: once it is released the
+                    # next queued turn may run on this thread, and its usage
+                    # would land in this turn's closing total too.
+                    if self.stats.start_time:
+                        self._usage_after = await thread_usage(engine, thread_id)
+                        self._usage.observe(
+                            (self._usage_after or {}).get("total_token_usage")
+                        )
 
         except SessionBusy as busy:
             logger.info(
@@ -910,7 +926,13 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             usage=_token_usage(usage),
         )
         self._transition_state(AgentState.DONE)
-        await self._record_stats("aborted" if end == "turn_aborted" else "completed")
+        if error_msg:
+            status = "error"  # e.g. timed out, with a partial answer
+        elif end == "turn_aborted":
+            status = "aborted"
+        else:
+            status = "completed"
+        await self._record_stats(status)
         await self._sync_history(text)
         yield AgentResponse(
             type="agent_stats",
@@ -931,15 +953,15 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
         Once per run, and never raising: stats must not break a reply. Rows are
         written with agent type ``codex``, which is what the stats page reads.
+        Only runs that reached Codex are recorded: a refused (busy) chat, or a
+        failure before the turn was submitted, spent nothing to count.
         """
         if self._stats_recorded or not self.stats.start_time:
             return
         self._stats_recorded = True
         self.stats.end_time = time.time()
-        after: JsonObject | None = None
-        if self._engine is not None and self._thread_id:
-            after = await thread_usage(self._engine, self._thread_id)
-        spent = usage_between(self._usage_before, after)
+        after = self._usage_after
+        spent = self._usage.spent
         if spent is not None:
             self.stats.token_usage = spent
         elif self.final_llm_resp and self.final_llm_resp.usage:
@@ -975,12 +997,12 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": text},
             )
-            # What the conversation list shows as the context size.
-            if self.stats.current_context_tokens:
+            # The conversation list's context size: the last request's input
+            # plus output, as the built-in runner records it.
+            last = self.final_llm_resp.usage if self.final_llm_resp else None
+            if last is not None and last.total:
                 await ctx.conversation_manager.update_conversation(
-                    self.umo,
-                    conv.cid,
-                    token_usage=self.stats.current_context_tokens,
+                    self.umo, conv.cid, token_usage=last.total
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to mirror codex exchange into history: %s", e)

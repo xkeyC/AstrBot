@@ -8,8 +8,13 @@ from sqlmodel import select
 
 from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.runners.codex import codex_agent_runner as runner_mod
+from astrbot.core.agent.runners.codex import native
 from astrbot.core.agent.runners.codex.codex_agent_runner import CodexAgentRunner
-from astrbot.core.agent.runners.codex.usage import to_token_usage, usage_between
+from astrbot.core.agent.runners.codex.usage import (
+    UsageMeter,
+    to_token_usage,
+    usage_between,
+)
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.provider.entities import ProviderRequest, TokenUsage
 
@@ -53,6 +58,34 @@ def test_a_new_thread_counts_from_zero():
 def test_unknown_usage_is_none():
     assert usage_between(None, None) is None
     assert usage_between(None, {"total_token_usage": None}) is None
+
+
+def test_a_reset_total_keeps_what_was_spent_before_it():
+    # Context overflow replaces the total with a zeroed placeholder.
+    meter = UsageMeter()
+    meter.start({"total_token_usage": _total(1000, 800, 50)})
+    meter.observe(_total(3000, 2500, 150))
+    meter.observe(_total(0, 0, 0))
+    meter.observe(_total(500, 0, 20))
+
+    assert meter.spent == TokenUsage(input_other=800, input_cached=1700, output=120)
+
+
+def test_repeated_totals_are_counted_once():
+    meter = UsageMeter()
+    meter.start({"total_token_usage": None})
+    for _ in range(3):
+        meter.observe(_total(900, 100, 40))
+
+    assert meter.spent == TokenUsage(input_other=800, input_cached=100, output=40)
+
+
+def test_no_baseline_means_no_meter():
+    meter = UsageMeter()
+    meter.start(None)
+    meter.observe(_total(900, 100, 40))
+
+    assert meter.spent is None
 
 
 # ------------------------------------------------------------ a whole turn
@@ -103,7 +136,7 @@ class _Engine:
         return {"status": "started", "turn_id": "turn-1"}
 
 
-async def _run(monkeypatch, temp_db, events, totals):
+async def _run(monkeypatch, temp_db, events, totals, cfg=None):
     engine = _Engine(events, totals)
 
     async def get(options):
@@ -132,7 +165,7 @@ async def _run(monkeypatch, temp_db, events, totals):
         request=req,
         run_context=_Wrapper(),
         agent_hooks=BaseAgentRunHooks(),
-        provider_config={},
+        provider_config=cfg or {},
     )
     responses = [r async for r in runner.step_until_done()]
     async with temp_db.get_db() as session:
@@ -212,3 +245,84 @@ async def test_an_aborted_turn_is_recorded_as_aborted(monkeypatch, temp_db):
 
     [row] = rows
     assert row.status == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_is_recorded_once_as_an_error(monkeypatch, temp_db):
+    events = [
+        {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": _total(300, 0, 20),
+                "last_token_usage": _total(300, 0, 20),
+            },
+        },
+        {"type": "_pump_closed", "message": "thread closed"},
+    ]
+    runner, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(300, 0, 20)]
+    )
+
+    assert [r.type for r in responses] == ["err"]
+    [row] = rows
+    assert row.status == "error"
+    assert (row.token_input_other, row.token_output) == (300, 20)
+
+
+@pytest.mark.asyncio
+async def test_a_partial_answer_with_an_error_counts_as_an_error(monkeypatch, temp_db):
+    events = [
+        {"type": "agent_message", "message": "half", "phase": "final_answer"},
+        {"type": "error", "message": "stream disconnected"},
+        {"type": "task_complete"},
+    ]
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)]
+    )
+
+    assert responses[-1].type == "llm_result"
+    [row] = rows
+    assert row.status == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_chat_records_nothing(monkeypatch, temp_db):
+    monkeypatch.setitem(native._QUEUED_TURNS, UMO, 1)
+
+    _, responses, rows = await _run(
+        monkeypatch, temp_db, [], [], cfg={"max_queued_turns": 1}
+    )
+
+    assert [r.type for r in responses] == ["llm_result"]
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_an_estimate_does_not_replace_the_context_size(monkeypatch, temp_db):
+    # After compaction Codex re-sends an estimate with no input count.
+    real = {
+        "type": "token_count",
+        "info": {
+            "total_token_usage": _total(1200, 0, 30),
+            "last_token_usage": _total(1200, 0, 30),
+        },
+    }
+    estimate = {
+        "type": "token_count",
+        "info": {
+            "total_token_usage": _total(1200, 0, 30),
+            "last_token_usage": {"input_tokens": 0, "total_tokens": 400},
+        },
+    }
+    events = [
+        real,
+        estimate,
+        {"type": "agent_message", "message": "ok", "phase": "final_answer"},
+        {"type": "task_complete"},
+    ]
+    runner, responses, _ = await _run(
+        monkeypatch, temp_db, events, [None, _total(1200, 0, 30)]
+    )
+
+    assert runner.stats.current_context_tokens == 1200
+    assert runner.final_llm_resp.usage.total == 1230

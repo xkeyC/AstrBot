@@ -2,8 +2,11 @@
 
 Codex reports usage on ``token_count`` events, but re-sends the same numbers
 on rate-limit and context updates, so adding those up double counts. The
-thread's cumulative ``total_token_usage`` only grows when a model response
-reports usage: its difference across a turn is exactly that turn's usage.
+thread's cumulative ``total_token_usage`` grows only when a model response
+reports usage, so its growth across a turn is that turn's usage -- with one
+exception: when the context window overflows, Codex replaces the total with a
+placeholder (every count zero). ``UsageMeter`` follows the total through the
+turn's events so usage spent before such a reset is kept.
 """
 
 from __future__ import annotations
@@ -70,16 +73,55 @@ def to_token_usage(usage: JsonObject | None) -> TokenUsage | None:
     )
 
 
+def _grew(prev: TokenUsage, cur: TokenUsage) -> bool:
+    return (
+        cur.input_other >= prev.input_other
+        and cur.input_cached >= prev.input_cached
+        and cur.output >= prev.output
+    )
+
+
+class UsageMeter:
+    """Adds up a thread's usage across one turn from its cumulative totals.
+
+    Fed the ``thread_usage`` snapshot taken before the turn, then every total
+    seen during it (``token_count`` events and the closing snapshot). Growth
+    is added; a total that went down was reset, and becomes the new baseline.
+    """
+
+    def __init__(self) -> None:
+        self._last: TokenUsage | None = None
+        self._spent = TokenUsage()
+        self.started = False
+
+    def start(self, snapshot: JsonObject | None) -> None:
+        """Baseline from the pre-turn snapshot; None (old binding) disables."""
+        if snapshot is None:
+            return
+        self.started = True
+        self._last = to_token_usage(snapshot.get("total_token_usage")) or TokenUsage()
+
+    def observe(self, total: JsonObject | None) -> None:
+        cur = to_token_usage(total)
+        if not self.started or cur is None or self._last is None:
+            return
+        if _grew(self._last, cur):
+            self._spent = self._spent + (cur - self._last)
+        self._last = cur
+
+    @property
+    def spent(self) -> TokenUsage | None:
+        """The turn's usage, or None when there was no baseline."""
+        return self._spent if self.started else None
+
+
 def usage_between(
     before: JsonObject | None, after: JsonObject | None
 ) -> TokenUsage | None:
     """Usage spent between two ``thread_usage`` snapshots of one thread."""
-    end = to_token_usage((after or {}).get("total_token_usage"))
-    if end is None:
+    meter = UsageMeter()
+    meter.start(before if before is not None else {})
+    meter.observe((after or {}).get("total_token_usage"))
+    if (after or {}).get("total_token_usage") is None:
         return None
-    start = to_token_usage((before or {}).get("total_token_usage")) or TokenUsage()
-    return TokenUsage(
-        input_other=max(end.input_other - start.input_other, 0),
-        input_cached=max(end.input_cached - start.input_cached, 0),
-        output=max(end.output - start.output, 0),
-    )
+    return meter.spent

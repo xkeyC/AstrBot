@@ -149,3 +149,20 @@ async def test_run_stats_reach_webchat_only(platform: str, sent: bool):
         event.send.assert_awaited_once_with(runner.stats_chain)
     else:
         event.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stats_send_does_not_cost_the_reply():
+    runner = _StatsRunner()
+    event = MagicMock()
+    event.get_platform_name.return_value = "webchat"
+    event.send = AsyncMock(side_effect=ConnectionError("client gone"))
+
+    results = [
+        pair
+        async for pair in third_party.run_third_party_agent(
+            runner, stream_to_general=True, event=event
+        )
+    ]
+
+    assert results == [(runner.reply, False)]

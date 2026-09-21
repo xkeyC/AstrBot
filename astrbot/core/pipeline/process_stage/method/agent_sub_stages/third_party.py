@@ -88,7 +88,10 @@ async def run_third_party_agent(
                 # WebChat shows per-reply usage; other platforms have no use
                 # for it (the stats page reads the database).
                 if event is not None and event.get_platform_name() == "webchat":
-                    await event.send(resp.data["chain"])
+                    try:
+                        await event.send(resp.data["chain"])
+                    except Exception as e:  # noqa: BLE001 - never costs the reply
+                        logger.warning("Sending agent stats failed: %s", e)
     except Exception as e:
         logger.error(f"Third party agent runner error: {e}")
         err_msg = custom_error_message
