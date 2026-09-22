@@ -239,3 +239,14 @@ def test_reconnect_state_is_reset():
     finally:
         asyncio.open_connection = original
     assert client.users == {} and client.server_config == {} and client.session is None
+
+
+def test_server_release_falls_back_to_version_numbers():
+    client = MumbleClient("localhost")
+    assert client.server_release == "unknown"
+    client.server_version = {"version_v1": version_v1(1, 4, 287)}
+    assert client.server_release == "1.4.255"
+    client.server_version = {"version_v2": version_v2(1, 5, 735)}
+    assert client.server_release == "1.5.735"
+    client.server_version = {"release": "1.5.915", "version_v2": 1}
+    assert client.server_release == "1.5.915"

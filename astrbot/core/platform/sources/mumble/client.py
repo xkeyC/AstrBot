@@ -274,6 +274,18 @@ class MumbleClient:
                 pass
 
     @property
+    def server_release(self) -> str:
+        """Server version for display; servers may omit the release string."""
+        version = self.server_version
+        if version.get("release"):
+            return version["release"]
+        if v2 := version.get("version_v2"):
+            return f"{v2 >> 48}.{(v2 >> 32) & 0xFFFF}.{(v2 >> 16) & 0xFFFF}"
+        if v1 := version.get("version_v1"):
+            return f"{v1 >> 16}.{(v1 >> 8) & 0xFF}.{v1 & 0xFF}"
+        return "unknown"
+
+    @property
     def connected(self) -> bool:
         return self._writer is not None and self.session is not None
 

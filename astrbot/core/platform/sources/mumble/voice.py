@@ -128,6 +128,25 @@ def _local_address() -> str:
 logging.getLogger("aioice").setLevel(logging.WARNING)
 
 
+def _disable_consent_expiry() -> None:
+    """Keeps aioice from dropping a working call on a slow path.
+
+    aioice checks consent (RFC 7675) every ~5 s with a single STUN request
+    that waits about 0.5 s and is never retransmitted, and closes the ICE
+    connection after 6 misses. On a path with a round trip above that (a
+    proxy, a distant network) every check misses and a healthy call is torn
+    down after ~30 s. Consent freshness guards browsers against being used to
+    send traffic; here the end of a call is known from the peer closing DTLS,
+    from Codex reporting the realtime session closed, and from standby.
+    """
+    import aioice.ice as ice
+
+    ice.CONSENT_FAILURES = 1_000_000_000
+
+
+_disable_consent_expiry()
+
+
 @dataclass
 class VoiceOptions:
     name: str
@@ -329,6 +348,12 @@ class VoiceSession:
             info, started_new = await engine.open_thread(state or None, params)
             self._thread_id = info["thread_id"]
             self._phase("thread opened")
+            logger.info(
+                "Mumble voice agent thread for %s: %s (%s)",
+                self.key,
+                self._thread_id,
+                "new" if started_new else "resumed",
+            )
             if self._closed:
                 self._thread_released = True
                 await engine.forget_thread(self._thread_id)

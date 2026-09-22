@@ -240,7 +240,7 @@ class MumblePlatformAdapter(Platform):
             self.host,
             self.username,
             self.client.session,
-            self.client.server_version.get("release"),
+            self.client.server_release,
         )
         if self.home_channel and me is not None:
             channel = self.client.find_channel(self.home_channel)

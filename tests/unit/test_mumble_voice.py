@@ -242,3 +242,9 @@ async def test_late_start_cannot_unload_a_newer_sessions_thread(engine, monkeypa
     assert new_closed == []
     await new.close("done")
     assert engine.forgotten == ["t1", "t1"]
+
+
+def test_consent_expiry_is_disabled():
+    import aioice.ice
+
+    assert aioice.ice.CONSENT_FAILURES >= 1_000_000
