@@ -44,6 +44,8 @@ export function getPlatformIcon(name) {
     return new URL('@/assets/images/platform_logos/matrix.svg', import.meta.url).href
   } else if (name === 'mattermost') {
     return new URL('@/assets/images/platform_logos/mattermost.svg', import.meta.url).href
+  } else if (name === 'mumble') {
+    return new URL('@/assets/images/platform_logos/mumble.svg', import.meta.url).href
   }
 }
 
@@ -73,6 +75,7 @@ export function getTutorialLink(platformType) {
     "line": "https://docs.astrbot.app/platform/line.html",
     "matrix": "https://docs.astrbot.app/platform/matrix.html",
     "mattermost": "https://docs.astrbot.app/platform/mattermost.html",
+    "mumble": "https://docs.astrbot.app/platform/mumble.html",
   }
   return tutorialMap[platformType] || "https://docs.astrbot.app";
 }

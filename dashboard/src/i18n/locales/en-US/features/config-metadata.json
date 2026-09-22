@@ -747,7 +747,7 @@
       },
       "mumble_voice_enabled": {
         "description": "Enable Realtime Voice",
-        "hint": "Use Codex realtime voice (requires the Codex agent runner signed in with a ChatGPT plan that includes voice). Channel voice and each whisper use their own voice agent thread, which cannot access other conversations."
+        "hint": "Use Codex realtime voice (requires the Codex agent runner signed in with a ChatGPT plan that includes voice). Channel voice and each whisper use their own voice agent thread, with the tools and execution environment an ordinary member of the paired conversation has (per permission rules)."
       },
       "mumble_voice_name": {
         "description": "Voice Wake Name",

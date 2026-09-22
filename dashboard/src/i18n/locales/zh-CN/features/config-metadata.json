@@ -760,7 +760,7 @@
       },
       "mumble_voice_enabled": {
         "description": "启用实时语音",
-        "hint": "使用 Codex 实时语音（需要 Codex Agent 执行器登录含语音的 ChatGPT 订阅账号）。有人说话时接入，频道语音与私语各自使用独立的语音 Agent 线程，不会访问其他会话。"
+        "hint": "使用 Codex 实时语音（需要 Codex Agent 执行器登录含语音的 ChatGPT 订阅账号）。有人说话时接入，频道语音与私语各自使用独立的语音 Agent 线程，拥有配套会话中普通成员可用的工具与执行环境（按权限规则）。"
       },
       "mumble_voice_name": {
         "description": "语音唤醒名",

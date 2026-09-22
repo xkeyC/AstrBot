@@ -137,6 +137,7 @@ def test_voice_thread_config_follows_runner_limits(monkeypatch):
         "features.image_generation": False,
         "agents.enabled": False,
         "features.multi_agent_v2": False,
+        "include_environment_context": True,
     }
 
 
@@ -248,3 +249,17 @@ def test_consent_expiry_is_disabled():
     import aioice.ice
 
     assert aioice.ice.CONSENT_FAILURES >= 1_000_000
+
+
+def test_realtime_prompts_state_the_date(monkeypatch):
+    import datetime
+
+    options = voice.VoiceOptions(name="Jarvis", aliases=["贾维斯"])
+    today = datetime.datetime.now().astimezone().strftime("%Y-%m-%d")
+    for prompt in (
+        voice.channel_prompt(options),
+        voice.whisper_prompt(options, "alice"),
+    ):
+        assert f"Today is {today}" in prompt
+        assert "must be delegated to the backend" in prompt
+    assert '("Jarvis", "贾维斯")' in voice.channel_prompt(options)

@@ -1,11 +1,11 @@
 """Full-duplex voice through Codex realtime over WebRTC.
 
-Each voice conversation has its own Codex thread (the "voice agent"), kept
-apart from the chat threads: it has no AstrBot tools and no execution
-environment, so what is said by voice cannot reach other conversations. The
-thread is persisted per conversation key and resumed the next time. The
-realtime model listens and speaks; tasks it hands off run on that thread and
-its results are fed back to the model by Codex.
+Each voice conversation has its own Codex thread (the "voice agent"), apart
+from the chat threads, persisted per conversation key and resumed the next
+time. It gets what an ordinary member of its paired chat gets there (tools,
+execution environment, approvals; see ``voice_tools``). The realtime model
+listens and speaks; tasks it hands off run on that thread and its results are
+fed back to the model by Codex.
 """
 
 from __future__ import annotations
@@ -44,10 +44,9 @@ REALTIME_VOICES = (
 )
 # Per-thread overrides of the voice agent, on top of the runner's engine
 # config (model, provider, effort, web search, sandbox, approvals and
-# agents.enabled=false all come from there, as for chat threads). These keep
-# the voice thread from reaching anything beyond its own conversation.
+# agents.enabled=false all come from there, as for chat threads).
 VOICE_THREAD_CONFIG = {
-    # No tools to orchestrate, so no code mode (and no host needed).
+    # Tools are sent directly: no code mode, so no code-mode host needed.
     "model_tool_mode": "direct",
     # ChatGPT apps (connectors) would expose the account's connected data.
     "features.apps": False,
@@ -59,6 +58,11 @@ VOICE_THREAD_CONFIG = {
     # precedence over agents.enabled).
     "agents.enabled": False,
     "features.multi_agent_v2": False,
+    # Chat turns carry their send time in AstrBot's message metadata; voice
+    # handoffs carry nothing, so let Codex state today's date and timezone
+    # every turn. Without it the model searches for "latest" news as of its
+    # training data.
+    "include_environment_context": True,
 }
 SDP_TIMEOUT = 30.0
 CONNECT_TIMEOUT = 15.0
@@ -81,6 +85,9 @@ You are listening to a voice chat room where several people talk with each other
 The one rule that matters most: speak ONLY when the speaker says your name{aliases} to you in that utterance, or is directly continuing an exchange with you from a few seconds ago. In every other case produce no audio and no text at all - complete silence. Do not acknowledge, do not react, do not say "mm", do not comment, do not delegate.
 
 When you are addressed, answer briefly in the speaker's language. Delegate real tasks (anything needing facts, lookups or work) to the backend and tell the speaker the result briefly."""
+
+# Appended to both prompts: the realtime model has no clock of its own.
+TIME_PROMPT = """Today is {date} ({weekday}), time zone {timezone}; the current time was {time} when this conversation started. Your own knowledge is older than that: anything about current events, news, prices, weather, schedules or other recent or changing information must be delegated to the backend, never answered from memory."""
 
 WHISPER_PROMPT = """Your name is {name}. You are talking privately, one to one, with {speaker} in a Mumble voice chat. Everything you hear is meant for you.
 
@@ -329,7 +336,24 @@ class VoiceSession:
             scope="umo", scope_id=self.scope_id, key=VOICE_THREAD_KEY, default={}
         )
         self._check_open()
-        workspace = Path(get_astrbot_data_path()) / "mumble_voice"
+        runner_cfg = _runner_config()
+        tools = None
+        if self.memory_scope:
+            from .voice_tools import voice_agent_tools
+
+            tools = await voice_agent_tools(self.memory_scope, runner_cfg)
+            self._check_open()
+        if runner_cfg.get("cwd"):
+            workspace = Path(str(runner_cfg["cwd"]))
+        elif self.memory_scope:
+            from astrbot.core.agent.runners.codex.codex_agent_runner import (
+                _default_cwd,
+            )
+
+            # The paired chat's workspace, as its own thread uses.
+            workspace = Path(_default_cwd(self.memory_scope))
+        else:
+            workspace = Path(get_astrbot_data_path()) / "mumble_voice"
         workspace.mkdir(parents=True, exist_ok=True)
         params = {
             "cwd": str(workspace),
@@ -337,7 +361,8 @@ class VoiceSession:
                 self.options.agent_instructions
                 or VOICE_AGENT_INSTRUCTIONS.format(name=self.options.name)
             ),
-            "no_environment": True,
+            "dynamic_tools": tools.dynamic_tools if tools else [],
+            "no_environment": not (tools and tools.native_exec),
             "config": voice_thread_config(self.memory_scope),
         }
         # Opening and unloading this key's thread are serialised: a session
@@ -371,7 +396,10 @@ class VoiceSession:
         self._check_open()
         # This thread only ever carries the voice conversation, so its pump
         # route stays open for the whole session and sees every event.
-        events = engine.pump(self._thread_id).open_turn(None, None)
+        events = engine.pump(self._thread_id).open_turn(
+            tools.tool_handler if tools else None,
+            tools.approval_handler if tools else None,
+        )
         self._events_queue = events
 
         # No STUN: the far end offers public host candidates and we connect
@@ -570,6 +598,25 @@ class VoiceSession:
                 await engine.forget_thread(thread_id)
 
 
+def _time_prompt() -> str:
+    """The current date for the realtime model, in AstrBot's configured zone."""
+    import datetime
+    import zoneinfo
+
+    now = None
+    if zone := astrbot_config.get("timezone"):
+        with contextlib.suppress(Exception):
+            now = datetime.datetime.now(zoneinfo.ZoneInfo(zone))
+    if now is None:
+        now = datetime.datetime.now().astimezone()
+    return TIME_PROMPT.format(
+        date=now.strftime("%Y-%m-%d"),
+        weekday=now.strftime("%A"),
+        timezone=now.strftime("%Z") or now.strftime("%z"),
+        time=now.strftime("%H:%M"),
+    )
+
+
 def channel_prompt(options: VoiceOptions) -> str:
     aliases = [a for a in options.aliases if a and a != options.name]
     alias_text = (
@@ -578,6 +625,7 @@ def channel_prompt(options: VoiceOptions) -> str:
         else f' "{options.name}"'
     )
     prompt = CHANNEL_PROMPT.format(name=options.name, aliases=alias_text)
+    prompt += "\n\n" + _time_prompt()
     if options.extra_prompt:
         prompt += "\n\n" + options.extra_prompt
     return prompt
@@ -585,6 +633,7 @@ def channel_prompt(options: VoiceOptions) -> str:
 
 def whisper_prompt(options: VoiceOptions, speaker: str) -> str:
     prompt = WHISPER_PROMPT.format(name=options.name, speaker=speaker)
+    prompt += "\n\n" + _time_prompt()
     if options.extra_prompt:
         prompt += "\n\n" + options.extra_prompt
     return prompt

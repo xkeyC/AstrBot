@@ -120,6 +120,16 @@ class PlatformManagerProtocol(Protocol):
     get_insts: Callable[[], list[Platform]]
 
 
+#: The plugin Context of the running core, for code without one handed in
+#: (platform adapters that run agent work outside the message pipeline).
+_current: Context | None = None
+
+
+def current_context() -> Context | None:
+    """The Context the core created, or None before it exists."""
+    return _current
+
+
 class Context:
     """暴露给插件的接口上下文。"""
 
@@ -167,6 +177,8 @@ class Context:
         self.cron_manager = cron_manager
         """Cron job manager, initialized by core lifecycle."""
         self.subagent_orchestrator = subagent_orchestrator
+        global _current
+        _current = self
 
     async def llm_generate(
         self,
