@@ -375,12 +375,16 @@ class ThirdPartyAgentSubStage(Stage):
         # Same sender while a Codex turn runs: steer into that turn (after the
         # request hooks, so moderation plugins still apply); the running turn
         # answers. Other senders queue behind it.
-        target = await try_steer(
-            event.unified_msg_origin,
-            str(event.get_sender_id() or ""),
-            build_turn_input(req),
-            prompt=req.prompt or "",
-        )
+        try:
+            target = await try_steer(
+                event.unified_msg_origin,
+                str(event.get_sender_id() or ""),
+                build_turn_input(req),
+                prompt=req.prompt or "",
+            )
+        except BaseException:
+            await release_group_history(event)
+            raise
         if target is not None:
             keep_group_history(event)
             event.set_extra("_follow_up_captured", {"target_run_id": target})
@@ -417,6 +421,9 @@ class ThirdPartyAgentSubStage(Stage):
                 return
             runner_closed = True
             await _close_runner_if_supported(runner)
+            # A streamed run closed before it was ever consumed never started;
+            # after a started run this is a no-op.
+            await release_group_history(event)
 
         def mark_stream_consumed() -> None:
             nonlocal stream_consumed
@@ -473,6 +480,10 @@ class ThirdPartyAgentSubStage(Stage):
                 stream_watchdog_task.cancel()
             if not streaming_used:
                 await close_runner_once()
+            elif stream_watchdog_task is None:
+                # Failed before the stream was set up (runner.reset): the run
+                # never starts, so its group history goes back.
+                await release_group_history(event)
             active_event_registry.unregister_agent_stop_callback(event)
 
         asyncio.create_task(

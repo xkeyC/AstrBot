@@ -166,3 +166,108 @@ async def test_a_failed_stats_send_does_not_cost_the_reply():
     ]
 
     assert results == [(runner.reply, False)]
+
+
+async def _process_with(
+    monkeypatch, *, hook_stops=False, steer=None, reset=None, streaming=False
+):
+    """Runs the stage once; returns the (release, keep) mocks for group history."""
+    runner = MagicMock()
+    runner.reset = reset or AsyncMock()
+    runner.get_final_llm_resp.return_value = LLMResponse(
+        role="assistant", result_chain=MessageChain().message("done")
+    )
+    runner.close = AsyncMock()
+
+    async def step_until_done(max_step: int = 30):
+        if False:
+            yield None
+
+    runner.step_until_done = step_until_done
+
+    class RunnerFactory:
+        @classmethod
+        def __class_getitem__(cls, item):
+            return cls
+
+        def __new__(cls):
+            return runner
+
+    release, keep = AsyncMock(), MagicMock()
+    monkeypatch.setattr(third_party, "release_group_history", release)
+    monkeypatch.setattr(third_party, "keep_group_history", keep)
+    monkeypatch.setattr(third_party, "CodexAgentRunner", RunnerFactory)
+    monkeypatch.setattr(third_party, "prepare_codex_request", AsyncMock())
+    monkeypatch.setattr(third_party, "try_steer", steer or AsyncMock(return_value=None))
+    monkeypatch.setattr(third_party, "build_turn_input", MagicMock(return_value=[]))
+    monkeypatch.setattr(third_party, "active_event_registry", MagicMock())
+    monkeypatch.setattr(
+        third_party, "AstrAgentContext", MagicMock(return_value=object())
+    )
+    monkeypatch.setattr(
+        third_party, "AgentContextWrapper", MagicMock(return_value=object())
+    )
+    monkeypatch.setattr(
+        third_party, "call_event_hook", AsyncMock(return_value=hook_stops)
+    )
+    monkeypatch.setattr(third_party.Metric, "upload", AsyncMock(return_value=None))
+
+    settings = {**_provider_settings(), "streaming_response": streaming}
+    config = {
+        "agent_runner": {"runner_type": "codex", "config": {}},
+        "provider_settings": settings,
+    }
+    stage = third_party.ThirdPartyAgentSubStage()
+    await stage.initialize(_stage_ctx(config))
+    stage._resolve_persona_custom_error_message = AsyncMock(return_value=None)
+    event = MagicMock()
+    event.message_str = "hello"
+    event.unified_msg_origin = "qq:GroupMessage:g"
+    event.message_obj.message = []
+    event.platform_meta.support_streaming_message = True
+    event.get_extra.return_value = None
+    try:
+        [item async for item in stage.process(event, "")]
+    except RuntimeError:
+        pass
+    return release, keep, event
+
+
+@pytest.mark.asyncio
+async def test_a_request_stopped_by_a_plugin_gives_group_history_back(monkeypatch):
+    release, keep, event = await _process_with(monkeypatch, hook_stops=True)
+
+    release.assert_awaited_once_with(event)
+    keep.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_steered_request_keeps_group_history(monkeypatch):
+    release, keep, event = await _process_with(
+        monkeypatch, steer=AsyncMock(return_value="run-1")
+    )
+
+    keep.assert_called_once_with(event)
+    release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_steer_gives_group_history_back(monkeypatch):
+    release, _, event = await _process_with(
+        monkeypatch, steer=AsyncMock(side_effect=RuntimeError("boom"))
+    )
+
+    release.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_run_that_never_started_gives_group_history_back(
+    monkeypatch,
+):
+    release, _, event = await _process_with(
+        monkeypatch,
+        streaming=True,
+        reset=AsyncMock(side_effect=RuntimeError("bad config")),
+    )
+
+    release.assert_awaited_with(event)
