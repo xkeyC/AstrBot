@@ -27,6 +27,7 @@ from astrbot.core import astrbot_config, sp
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .audio import InboundMixer, MixerTrack, OutboundVoice
+from .icetcp import IceTcpRelay, replace_candidates, tcp_candidates
 
 VOICE_THREAD_KEY = "mumble_voice_thread"
 # Voices of realtime v1/v3, which subscription (WebRTC) sessions use.
@@ -113,6 +114,16 @@ def _patch_ice_candidates() -> None:
 
 
 _patch_ice_candidates()
+
+
+def _local_address() -> str:
+    """A host address of ours that aioice also uses, for the relay candidate."""
+    import aioice.ice as ice
+
+    addresses = list(ice.get_host_addresses(True, False))
+    return addresses[0] if addresses else "127.0.0.1"
+
+
 # aioice logs every connectivity check at INFO.
 logging.getLogger("aioice").setLevel(logging.WARNING)
 
@@ -217,6 +228,7 @@ class VoiceSession:
         self._realtime_requested = False
         self._thread_released = False
         self._pc: RTCPeerConnection | None = None
+        self._relay: IceTcpRelay | None = None
         self._tasks: list[asyncio.Task] = []
         self._start_task: asyncio.Task | None = None
         self._close_task: asyncio.Task | None = None
@@ -375,6 +387,18 @@ class VoiceSession:
         await engine.rt.realtime_start(self._thread_id, json.dumps(request))
         sdp = await self._wait_open(answer, SDP_TIMEOUT)
         self._phase("answer received")
+        if proxy := str(_runner_config().get("proxy") or "").strip():
+            # Media cannot take a proxy over UDP: go through the peer's
+            # ICE-TCP candidates, one TCP connection opened via the proxy.
+            candidates = tcp_candidates(sdp)
+            if not candidates:
+                raise RuntimeError(
+                    "proxy set, but the peer offered no ICE-TCP candidate"
+                )
+            self._relay = IceTcpRelay(proxy, candidates)
+            port = await self._wait_open(self._relay.start(), CONNECT_TIMEOUT)
+            sdp = replace_candidates(sdp, _local_address(), port)
+            self._phase("media relay through proxy ready")
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
         deadline = time.monotonic() + CONNECT_TIMEOUT
         while pc.connectionState != "connected":
@@ -499,6 +523,9 @@ class VoiceSession:
         if pc is not None:
             with contextlib.suppress(Exception):
                 await pc.close()
+        relay, self._relay = self._relay, None
+        if relay is not None:
+            relay.close()
         current = asyncio.current_task()
         for task in self._tasks:
             if task is not current:

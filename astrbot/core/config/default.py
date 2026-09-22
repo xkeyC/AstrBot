@@ -3447,6 +3447,11 @@ CONFIG_METADATA_3 = {
                         "description": "启用 Codex 联网搜索",
                         "type": "bool",
                     },
+                    "agent_runner.config.proxy": {
+                        "description": "Codex 代理",
+                        "type": "string",
+                        "hint": "Codex 的所有网络请求都走这个代理（包括模型请求、登录和实时语音），不影响 AstrBot 其他部分。支持 socks5://、socks5h://、http://，例如 socks5://127.0.0.1:7890；账号密码写在地址里（socks5://user:pass@host:port）。留空则按系统或环境变量设置直连。",
+                    },
                     "agent_runner.config.codex_home": {
                         "description": "CODEX_HOME",
                         "type": "string",

@@ -179,7 +179,8 @@ async def test_outbound_paces_bursty_input():
     gaps = np.diff(np.array(times[:-1])) * 1000  # the terminator is extra
     assert len(times) >= 55
     assert 15 <= np.median(gaps) <= 25
-    assert np.percentile(gaps, 95) < 45  # not the 200 ms bursts
+    # Windows timers tick every 15.6 ms; still far from the 200 ms bursts.
+    assert np.percentile(gaps, 95) < 70
 
 
 def test_mixer_jitter_buffer():

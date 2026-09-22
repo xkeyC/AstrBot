@@ -57,6 +57,9 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "shipyard_mode": False,
         "codex_self_exe": "",
         "web_search": False,
+        # Proxy for all of Codex's traffic, including realtime voice:
+        # socks5://, socks5h:// or http:// (credentials may be embedded).
+        "proxy": "",
         "model": "",
         "model_provider": "",
         # Custom Responses-API endpoints: [{id, name, base_url, api_key, wire_api}]

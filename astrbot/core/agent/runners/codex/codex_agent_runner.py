@@ -128,6 +128,9 @@ def engine_options(cfg: dict) -> JsonObject:
         config["model_provider"] = provider
     if effort := cfg.get("reasoning_effort"):
         config["model_reasoning_effort"] = effort
+    if proxy := str(cfg.get("proxy") or "").strip():
+        # Only Codex's own clients use it; the rest of AstrBot is unaffected.
+        config["outbound_proxy"] = proxy
     config.update(model_provider_overrides(cfg.get("model_providers")))
     config.update(dict(cfg.get("thread_config") or {}))
     # ChatGPT apps (connectors) would hand every chat the signed-in account's

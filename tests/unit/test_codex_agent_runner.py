@@ -483,3 +483,14 @@ def test_chatgpt_apps_are_always_off():
     assert engine_options({})["config"]["features.apps"] is False
     forced = engine_options({"thread_config": {"features.apps": True}})["config"]
     assert forced["features.apps"] is False
+
+
+def test_proxy_is_passed_to_codex_only():
+    """代理只交给 Codex（outbound_proxy），不写进进程环境变量。"""
+    import os
+
+    before = {k: os.environ.get(k) for k in ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY")}
+    config = engine_options({"proxy": " socks5://127.0.0.1:7890 "})["config"]
+    assert config["outbound_proxy"] == "socks5://127.0.0.1:7890"
+    assert "outbound_proxy" not in engine_options({"proxy": ""})["config"]
+    assert {k: os.environ.get(k) for k in before} == before

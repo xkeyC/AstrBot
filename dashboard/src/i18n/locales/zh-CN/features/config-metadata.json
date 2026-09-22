@@ -35,6 +35,7 @@
         "codex_self_exe": {"description": "codex 可执行文件路径", "hint": "原生执行工具与记忆沉淀需要；留空则使用绑定包内自带的版本（若安装时包含）。"},
         "web_search": {"description": "启用 Codex 联网搜索"},
         "codex_home": {"description": "CODEX_HOME", "hint": "留空使用 data/codex_home（登录状态、config.toml、会话记录与记忆）。与本机 Codex CLI 的 ~/.codex 相互独立。"},
+        "proxy": {"description": "Codex 代理", "hint": "Codex 的所有网络请求都走这个代理（模型请求、登录、实时语音），不影响 AstrBot 其他部分。支持 socks5://、socks5h://、http://，例如 socks5://127.0.0.1:7890；账号密码写在地址里（socks5://user:pass@host:port）。留空则按系统或环境变量设置直连。"},
         "model": {"description": "模型", "hint": "留空使用 Codex 默认模型。"},
         "model_provider": {"description": "模型提供商 ID", "hint": "自定义提供商在 Codex 页面管理；留空使用默认。"},
         "reasoning_effort": {"description": "推理强度"},

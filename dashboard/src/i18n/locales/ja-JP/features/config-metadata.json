@@ -35,6 +35,7 @@
         "codex_self_exe": {"description": "codex 実行ファイルのパス", "hint": "ネイティブ実行ツールと記憶の整理に必要です。空欄の場合は、インストール時に同梱されていればバインディング内のものを使用します。"},
         "web_search": {"description": "Codex のウェブ検索を有効化"},
         "codex_home": {"description": "CODEX_HOME", "hint": "空欄の場合は data/codex_home を使用します（ログイン状態、config.toml、セッション記録、記憶）。ローカルの Codex CLI の ~/.codex とは独立しています。"},
+        "proxy": {"description": "Codex プロキシ", "hint": "Codex のすべての通信（モデルへのリクエスト、ログイン、リアルタイム音声）がこのプロキシを経由します。AstrBot の他の部分には影響しません。socks5://、socks5h://、http:// に対応（例: socks5://127.0.0.1:7890）。認証情報は URL に含めます（socks5://user:pass@host:port）。空欄の場合は直接、またはシステム／環境変数の設定に従って接続します。"},
         "model": {"description": "モデル", "hint": "空欄の場合は Codex の既定モデルを使用します。"},
         "model_provider": {"description": "モデルプロバイダー ID", "hint": "カスタムプロバイダーは Codex ページで管理します。空欄の場合は既定値を使用します。"},
         "reasoning_effort": {"description": "推論の強度"},

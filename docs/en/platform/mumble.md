@@ -30,6 +30,12 @@ Requires the `Codex agent runner` signed in with a **ChatGPT plan that includes 
 - **Mute / unmute**: send `wake prefix + mute` (or `闭麦`, or with the global wake prefix) in a channel, or just `mute` in a private message, and the bot stops listening and speaking and shows as muted; `unmute` (`开麦`) restores it. Muted for over a minute, it drops its voice sessions.
 - Voice options: `Voice Wake Name` and `Voice Wake Aliases`, `Voice` (juniper, maple, spruce, ember, vale, breeze, arbor, sol, cove; default cove), `Realtime Model`, `Extra Voice Prompt`, `Voice Agent Instructions`.
 
+## Proxy
+
+Set `Codex Proxy` in the Codex agent runner settings (e.g. `socks5://127.0.0.1:7890` or `http://127.0.0.1:7890`) and all of Codex's traffic uses it: model requests, sign-in, and realtime voice signalling and control. The rest of AstrBot is unaffected.
+
+Realtime voice media normally uses UDP, which proxies cannot carry. With a proxy set, the adapter switches to the peer's ICE-TCP channel on port 443 and sends voice over one TCP connection opened through the proxy; no UDP port has to be open.
+
 ## Run a Mumble server
 
 The official image works as is:
