@@ -708,6 +708,86 @@
         "description": "Mattermost Reconnect Delay",
         "hint": "Delay in seconds before reconnecting after the WebSocket disconnects. Defaults to 5 seconds."
       },
+      "mumble_host": {
+        "description": "Mumble Server",
+        "hint": "Host name or IP of a Mumble 1.5+ server. The whole server is one group conversation, so the bot can be moved between channels at any time."
+      },
+      "mumble_port": {
+        "description": "Mumble Port",
+        "hint": "Defaults to 64738."
+      },
+      "mumble_username": {
+        "description": "Bot Username",
+        "hint": "The name the bot shows in Mumble."
+      },
+      "mumble_password": {
+        "description": "Server Password",
+        "hint": "The server password, or the password of a registered account."
+      },
+      "mumble_channel": {
+        "description": "Initial Channel",
+        "hint": "Channel name, or path from the root channel (e.g. Games/Lobby), to join after connecting. Leave empty to stay in the server's default channel."
+      },
+      "mumble_text_wake_prefix": {
+        "description": "Channel Text Wake Prefix",
+        "hint": "Mumble has no @ mentions. Channel text starting with this prefix wakes the bot (like @-ing it); private messages always do. Send prefix + mute / unmute (or 闭麦 / 开麦, or the global wake prefix) to control voice."
+      },
+      "mumble_certfile": {
+        "description": "Client Certificate",
+        "hint": "Optional PEM certificate path. When empty, one is generated under data/mumble/<platform id>/ so the server recognises the bot and an admin can register it and grant permissions."
+      },
+      "mumble_keyfile": {
+        "description": "Client Certificate Key",
+        "hint": "Optional private key path; leave empty when the certificate file includes the key."
+      },
+      "mumble_reconnect_delay": {
+        "description": "Reconnect Delay",
+        "hint": "Seconds to wait before reconnecting after a disconnect."
+      },
+      "mumble_voice_enabled": {
+        "description": "Enable Realtime Voice",
+        "hint": "Use Codex realtime voice (requires the Codex agent runner signed in with a ChatGPT plan that includes voice). Channel voice and each whisper use their own voice agent thread, which cannot access other conversations."
+      },
+      "mumble_voice_name": {
+        "description": "Voice Wake Name",
+        "hint": "The bot's name in voice chat; in channels it only answers when called by name (enforced by the prompt, so it may occasionally reply unasked). Whispers are always answered. Defaults to the bot username."
+      },
+      "mumble_voice_aliases": {
+        "description": "Voice Wake Aliases",
+        "hint": "Other names for the bot, such as a nickname or a name in another language."
+      },
+      "mumble_voice_voice": {
+        "description": "Voice",
+        "hint": "Realtime voice to speak with. Defaults to cove.",
+        "labels": [
+          "Default",
+          "juniper",
+          "maple",
+          "spruce",
+          "ember",
+          "vale",
+          "breeze",
+          "arbor",
+          "sol",
+          "cove"
+        ]
+      },
+      "mumble_voice_model": {
+        "description": "Realtime Model",
+        "hint": "Optional override of the realtime voice model."
+      },
+      "mumble_voice_prompt": {
+        "description": "Extra Voice Prompt",
+        "hint": "Extra instructions for the realtime voice model, e.g. speaking style."
+      },
+      "mumble_voice_agent_instructions": {
+        "description": "Voice Agent Instructions",
+        "hint": "Optional replacement for the system instructions of the voice agent thread, which handles tasks handed off from voice."
+      },
+      "mumble_voice_idle_timeout": {
+        "description": "Voice Standby Timeout",
+        "hint": "Seconds without recognised speech before voice goes on standby (realtime disconnected); new speech resumes it automatically. Muting for over a minute also disconnects."
+      },
       "type": {
         "description": "Adapter Type"
       },

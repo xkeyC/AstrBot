@@ -721,6 +721,86 @@
         "description": "Mattermost 重连延迟",
         "hint": "WebSocket 断开后的重连等待时间，单位为秒。默认 5 秒。"
       },
+      "mumble_host": {
+        "description": "Mumble 服务器地址",
+        "hint": "Mumble 1.5 及以上的服务器域名或 IP。整个服务器是一个群聊会话，机器人在哪个频道都不影响上下文，可随时拖动。"
+      },
+      "mumble_port": {
+        "description": "Mumble 端口",
+        "hint": "默认 64738。"
+      },
+      "mumble_username": {
+        "description": "机器人用户名",
+        "hint": "机器人在 Mumble 中显示的名字。"
+      },
+      "mumble_password": {
+        "description": "服务器密码",
+        "hint": "服务器设置了密码时填写，或已注册账号的密码。"
+      },
+      "mumble_channel": {
+        "description": "初始频道",
+        "hint": "连接后进入的频道名，或从根频道起的路径（如 游戏/闲聊）。留空则留在服务器默认频道。"
+      },
+      "mumble_text_wake_prefix": {
+        "description": "频道文字唤醒前缀",
+        "hint": "Mumble 没有 @ 功能。频道文字以此前缀开头时唤醒机器人（等同于 @ 机器人）；私聊始终唤醒。发送“前缀+闭麦 / 开麦”可控制语音（也支持 mute / unmute 和全局唤醒前缀）。"
+      },
+      "mumble_certfile": {
+        "description": "客户端证书",
+        "hint": "可选。PEM 证书路径。留空时自动生成并保存在 data/mumble/<平台 ID>/ 下，服务器据此识别机器人，便于管理员注册账号、授予权限。"
+      },
+      "mumble_keyfile": {
+        "description": "客户端证书私钥",
+        "hint": "可选。证书私钥路径；证书文件已包含私钥时留空。"
+      },
+      "mumble_reconnect_delay": {
+        "description": "重连延迟",
+        "hint": "断线后的重连等待时间，单位秒。"
+      },
+      "mumble_voice_enabled": {
+        "description": "启用实时语音",
+        "hint": "使用 Codex 实时语音（需要 Codex Agent 执行器登录含语音的 ChatGPT 订阅账号）。有人说话时接入，频道语音与私语各自使用独立的语音 Agent 线程，不会访问其他会话。"
+      },
+      "mumble_voice_name": {
+        "description": "语音唤醒名",
+        "hint": "实时语音里机器人的名字，频道里只有叫到它才会回应（由提示词约束，偶尔可能误答）；私语始终回应。留空使用机器人用户名。"
+      },
+      "mumble_voice_aliases": {
+        "description": "语音唤醒别名",
+        "hint": "名字的其他叫法，例如中文名或昵称。"
+      },
+      "mumble_voice_voice": {
+        "description": "音色",
+        "hint": "实时语音的音色。默认为 cove。",
+        "labels": [
+          "默认",
+          "juniper",
+          "maple",
+          "spruce",
+          "ember",
+          "vale",
+          "breeze",
+          "arbor",
+          "sol",
+          "cove"
+        ]
+      },
+      "mumble_voice_model": {
+        "description": "实时语音模型",
+        "hint": "可选。覆盖默认的实时语音模型。"
+      },
+      "mumble_voice_prompt": {
+        "description": "语音附加提示词",
+        "hint": "追加给实时语音模型的说明，例如说话风格。"
+      },
+      "mumble_voice_agent_instructions": {
+        "description": "语音 Agent 指令",
+        "hint": "可选。替换语音 Agent 线程（处理语音中交办的任务）的系统指令。"
+      },
+      "mumble_voice_idle_timeout": {
+        "description": "语音待机时间",
+        "hint": "连续多少秒没有识别到语音就进入待机（断开实时语音），检测到新的人声时自动恢复。闭麦超过 1 分钟也会断开。"
+      },
       "type": {
         "description": "适配器类型"
       },

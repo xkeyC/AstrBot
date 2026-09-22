@@ -198,6 +198,10 @@ class PlatformManager:
                     from .sources.mattermost.mattermost_adapter import (
                         MattermostPlatformAdapter,  # noqa: F401
                     )
+                case "mumble":
+                    from .sources.mumble.mumble_adapter import (
+                        MumblePlatformAdapter,  # noqa: F401
+                    )
         except (ImportError, ModuleNotFoundError) as e:
             logger.error(
                 f"Failed to load platform adapter {platform_config['type']}: {e}. "

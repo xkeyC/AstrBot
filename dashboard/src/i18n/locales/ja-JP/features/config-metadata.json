@@ -731,6 +731,86 @@
         "description": "Mattermost 再接続待機時間",
         "hint": "WebSocket 切断後に再接続するまでの待機時間（秒）です。デフォルトは 5 秒です。"
       },
+      "mumble_host": {
+        "description": "Mumble サーバー",
+        "hint": "Mumble 1.5 以降のサーバーのホスト名または IP。サーバー全体が 1 つのグループ会話になるため、ボットはいつでもチャンネルを移動できます。"
+      },
+      "mumble_port": {
+        "description": "Mumble ポート",
+        "hint": "デフォルトは 64738 です。"
+      },
+      "mumble_username": {
+        "description": "ボットのユーザー名",
+        "hint": "Mumble 上で表示されるボットの名前です。"
+      },
+      "mumble_password": {
+        "description": "サーバーパスワード",
+        "hint": "サーバーのパスワード、または登録済みアカウントのパスワードです。"
+      },
+      "mumble_channel": {
+        "description": "初期チャンネル",
+        "hint": "接続後に参加するチャンネル名、またはルートからのパス（例: Games/Lobby）。空欄の場合はサーバーの既定チャンネルに留まります。"
+      },
+      "mumble_text_wake_prefix": {
+        "description": "チャンネル文字の起動プレフィックス",
+        "hint": "Mumble には @ メンションがありません。このプレフィックスで始まるチャンネル文字はボットを起動します（@ と同じ）。個人メッセージは常に起動します。プレフィックス + mute / unmute（閉麦 / 開麦、グローバルの起動プレフィックスも可）で音声を制御できます。"
+      },
+      "mumble_certfile": {
+        "description": "クライアント証明書",
+        "hint": "任意の PEM 証明書パス。空欄の場合は data/mumble/<プラットフォーム ID>/ に自動生成され、サーバーがボットを識別できるため、管理者が登録や権限付与を行えます。"
+      },
+      "mumble_keyfile": {
+        "description": "クライアント証明書の秘密鍵",
+        "hint": "任意の秘密鍵パス。証明書ファイルに鍵が含まれる場合は空欄にします。"
+      },
+      "mumble_reconnect_delay": {
+        "description": "再接続待機時間",
+        "hint": "切断後に再接続するまでの待機時間（秒）です。"
+      },
+      "mumble_voice_enabled": {
+        "description": "リアルタイム音声を有効化",
+        "hint": "Codex リアルタイム音声を使います（音声を含む ChatGPT プランでログインした Codex エージェント実行器が必要）。チャンネル音声とウィスパーはそれぞれ独立した音声エージェントスレッドを使い、他の会話にはアクセスしません。"
+      },
+      "mumble_voice_name": {
+        "description": "音声の呼び名",
+        "hint": "音声チャットでのボットの名前。チャンネルでは名前を呼ばれたときだけ応答します（プロンプトで制御するため、まれに誤って応答することがあります）。ウィスパーには常に応答します。空欄の場合はボットのユーザー名です。"
+      },
+      "mumble_voice_aliases": {
+        "description": "音声の別名",
+        "hint": "ニックネームや別の言語での名前など、ボットの他の呼び方です。"
+      },
+      "mumble_voice_voice": {
+        "description": "音色",
+        "hint": "リアルタイム音声の声です。デフォルトは cove です。",
+        "labels": [
+          "デフォルト",
+          "juniper",
+          "maple",
+          "spruce",
+          "ember",
+          "vale",
+          "breeze",
+          "arbor",
+          "sol",
+          "cove"
+        ]
+      },
+      "mumble_voice_model": {
+        "description": "リアルタイムモデル",
+        "hint": "任意。リアルタイム音声モデルを上書きします。"
+      },
+      "mumble_voice_prompt": {
+        "description": "音声の追加プロンプト",
+        "hint": "リアルタイム音声モデルへの追加指示（話し方など）です。"
+      },
+      "mumble_voice_agent_instructions": {
+        "description": "音声エージェントの指示",
+        "hint": "任意。音声から渡されたタスクを処理する音声エージェントスレッドのシステム指示を置き換えます。"
+      },
+      "mumble_voice_idle_timeout": {
+        "description": "音声スタンバイまでの時間",
+        "hint": "音声が認識されない状態がこの秒数続くとスタンバイ（リアルタイム切断）になり、新しい発話を検知すると自動で再開します。1 分以上ミュートしても切断されます。"
+      },
       "type": {
         "description": "アダプターの種類"
       },
