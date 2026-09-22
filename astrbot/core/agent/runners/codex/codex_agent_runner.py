@@ -130,6 +130,10 @@ def engine_options(cfg: dict) -> JsonObject:
         config["model_reasoning_effort"] = effort
     config.update(model_provider_overrides(cfg.get("model_providers")))
     config.update(dict(cfg.get("thread_config") or {}))
+    # ChatGPT apps (connectors) would hand every chat the signed-in account's
+    # connected data (mail, drive, ...). Off for every thread, and set after
+    # thread_config so it cannot be turned back on.
+    config["features.apps"] = False
     options: JsonObject = {"codex_home": codex_home, "config": config}
     if tool_mode in CODE_MODES:
         host = find_code_mode_host(str(cfg.get("code_mode_host") or ""))

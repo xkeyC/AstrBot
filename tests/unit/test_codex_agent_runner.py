@@ -476,3 +476,10 @@ def test_generated_image_path_ignores_unfinished_and_missing(tmp_path):
     assert generated_image_path(_image_item(tmp_path / "gone.png")) is None
     # 完全无关的 item
     assert generated_image_path({"type": "AgentMessage", "status": "completed"}) is None
+
+
+def test_chatgpt_apps_are_always_off():
+    """ChatGPT 连接器会把账号里连接的数据交给所有会话，始终关闭。"""
+    assert engine_options({})["config"]["features.apps"] is False
+    forced = engine_options({"thread_config": {"features.apps": True}})["config"]
+    assert forced["features.apps"] is False
