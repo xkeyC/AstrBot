@@ -177,7 +177,9 @@ def _start_stream_watchdog(
                 timeout_sec,
             )
             try:
-                await close_runner_once()
+                # Shielded: a consumer turning up now cancels the watchdog,
+                # which must not cut short giving the group history back.
+                await asyncio.shield(close_runner_once())
             except Exception:
                 logger.warning(
                     "Exception while closing third-party runner from stream watchdog.",
@@ -432,11 +434,14 @@ class ThirdPartyAgentSubStage(Stage):
 
         def mark_stream_consumed() -> bool:
             """Marks the stream consumed; True if the runner was closed first."""
-            nonlocal stream_consumed
+            nonlocal stream_consumed, runner_closed
             stream_consumed = True
             if stream_watchdog_task and not stream_watchdog_task.done():
                 stream_watchdog_task.cancel()
-            return runner_closed
+            closed_first = runner_closed
+            # The late run is live again: closing it later must interrupt it.
+            runner_closed = False
+            return closed_first
 
         try:
             await runner.reset(

@@ -188,6 +188,7 @@ async def _process_with(
     raises=None,
     mock_history=True,
     watchdog_s=None,
+    restore_gate=None,
 ):
     """Runs the stage once.
 
@@ -259,6 +260,8 @@ async def _process_with(
     event.restored = []
 
     async def restore():
+        if restore_gate is not None:
+            await restore_gate.wait()  # e.g. waiting on the history lock
         event.restored.append(True)
 
     extras[third_party_restore_key()] = restore
@@ -347,3 +350,33 @@ async def test_an_unconsumed_stream_gives_history_back_and_a_late_run_drops_it(
     assert not any("group_history" in u for u in units)
     assert any("message_meta" in u for u in units)
     assert event.restored == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_consumer_arriving_mid_give_back_does_not_lose_the_history(
+    monkeypatch,
+):
+    gate = asyncio.Event()
+    _, _, event, runner, _ = await _process_with(
+        monkeypatch,
+        streaming=True,
+        mock_history=False,
+        watchdog_s=0,
+        restore_gate=gate,
+    )
+    await asyncio.sleep(0.05)  # the watchdog is now giving the history back
+    assert event.restored == []
+
+    # The consumer turns up and cancels the watchdog mid-way.
+    result = event.set_result.call_args_list[0].args[0]
+    [_ async for _ in result.async_stream]
+    gate.set()
+    await asyncio.sleep(0.05)
+
+    # Given back all the same, and not shown by the late run.
+    assert event.restored == [True]
+    units = [p.text for p in runner.req.persistent_user_context_parts]
+    assert not any("group_history" in u for u in units)
+    # The late run was closed again when it ended, so a live turn would be
+    # interrupted rather than left running.
+    assert runner.close.await_count == 2
