@@ -735,17 +735,23 @@ async def _ensure_persona_and_skills(
             skills = sorted(skills, key=lambda skill: (skill.name, skill.path))
             if cfg.get("_codex_skills"):
                 # Codex runner: skills are read through the astrbot_read_skill
-                # tool, independent of any shell or sandbox runtime.
+                # tool, from this host or from the sandbox (shipyard mode).
                 from astrbot.core.agent.runners.codex.skills import (
+                    SKILLS_EXTRA,
+                    SKILLS_IN_SANDBOX_EXTRA,
                     build_codex_skills_prompt,
+                    load_mentioned_skills,
                 )
 
                 in_sandbox = cfg.get("_codex_skills") == "sandbox"
-                event.set_extra("_codex_skills", "sandbox" if in_sandbox else skills)
+                event.set_extra(SKILLS_EXTRA, skills)
+                event.set_extra(SKILLS_IN_SANDBOX_EXTRA, in_sandbox)
                 req.set_context_anchor(
                     "skills",
                     build_codex_skills_prompt(skills, in_sandbox=in_sandbox),
                 )
+                # A skill the user names is loaded, not left to the model.
+                await load_mentioned_skills(event, plugin_context, req)
                 skills = []
         if skills:
             skills_prompt = build_skills_prompt(skills)

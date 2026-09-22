@@ -170,9 +170,9 @@ async def prepare_codex_request(
     ):
         req.func_tool.add_tool(tmgr.get_builtin_tool(GetGroupMessageHistoryTool))
 
-    # In shipyard mode the skills live in the sandbox, so no host reader is
-    # offered; the prompt points at the sandbox copy instead.
-    if event.get_extra("_codex_skills") not in (None, False, "sandbox"):
+    # One reader for every runtime: it opens the host copy, or the sandbox copy
+    # in shipyard mode, so the model never has to locate skill files itself.
+    if event.get_extra("_codex_skills"):
         from astrbot.core.agent.runners.codex.skills import ReadSkillTool
 
         req.func_tool.add_tool(ReadSkillTool())

@@ -223,9 +223,10 @@ def test_shipyard_mode_forces_sandbox_and_disables_native_exec(tmp_path):
     assert "approve_every_command" not in opts
 
     skills = [SkillInfo(name="demo", description="d", path="x/SKILL.md", active=True)]
-    assert "skills/<name>/SKILL.md" in build_codex_skills_prompt(
-        skills, in_sandbox=True
-    )
+    sandbox_prompt = build_codex_skills_prompt(skills, in_sandbox=True)
+    assert "/workspace/skills/demo/SKILL.md" in sandbox_prompt
+    # One reader in every runtime, sandbox included.
+    assert "astrbot__astrbot_read_skill" in sandbox_prompt
     assert "astrbot__astrbot_read_skill" in build_codex_skills_prompt(skills)
 
 
