@@ -420,3 +420,4 @@ async def test_a_consumer_right_after_the_watchdog_check_sees_the_runner_closed(
     units = [p.text for p in runner.req.persistent_user_context_parts]
     assert not any("group_history" in u for u in units)
     assert runner.close.await_count == 2
+    assert consumed_flags == [False]  # the watchdog did decide to close
