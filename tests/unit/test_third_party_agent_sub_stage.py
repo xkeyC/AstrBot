@@ -380,3 +380,43 @@ async def test_a_consumer_arriving_mid_give_back_does_not_lose_the_history(
     # The late run was closed again when it ended, so a live turn would be
     # interrupted rather than left running.
     assert runner.close.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_consumer_right_after_the_watchdog_check_sees_the_runner_closed(
+    monkeypatch,
+):
+    """No gap between the watchdog deciding to close and the runner being closed."""
+    consumed_flags = []
+    real_start = third_party._start_stream_watchdog
+
+    checked = asyncio.Event()
+
+    def start(*, timeout_sec, is_stream_consumed, claim_close):
+        def check():
+            consumed = is_stream_consumed()
+            consumed_flags.append(consumed)
+            checked.set()
+            return consumed
+
+        return real_start(
+            timeout_sec=timeout_sec,
+            is_stream_consumed=check,
+            claim_close=claim_close,
+        )
+
+    monkeypatch.setattr(third_party, "_start_stream_watchdog", start)
+    _, _, event, runner, _ = await _process_with(
+        monkeypatch, streaming=True, mock_history=False, watchdog_s=0
+    )
+    # Let the watchdog run its check, then consume in the very next step,
+    # before the shielded close has had a turn.
+    await checked.wait()
+    result = event.set_result.call_args_list[0].args[0]
+    [_ async for _ in result.async_stream]
+    await asyncio.sleep(0.05)
+
+    assert event.restored == [True]
+    units = [p.text for p in runner.req.persistent_user_context_parts]
+    assert not any("group_history" in u for u in units)
+    assert runner.close.await_count == 2

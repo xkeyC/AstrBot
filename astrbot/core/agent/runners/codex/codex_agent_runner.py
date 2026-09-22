@@ -365,13 +365,30 @@ async def release_group_history(event: T.Any) -> None:
     request refused or failed before the model saw it must return them, or
     they are lost.
     """
+    await give_back(take_group_history(event))
+
+
+def take_group_history(event: T.Any) -> T.Any:
+    """Claims the give-back of a request's group history, synchronously.
+
+    Returns the callback that gives it back, or None when there is nothing to
+    give back (none taken, already kept or already claimed). Claiming in the
+    same step as the decision leaves no gap for a run to keep it meanwhile.
+    """
     get_extra = getattr(event, "get_extra", None)
     if not callable(get_extra):
-        return
+        return None
     restore = get_extra(GROUP_HISTORY_RESTORE_KEY)
     if not callable(restore):
-        return
+        return None
     keep_group_history(event)
+    return restore
+
+
+async def give_back(restore: T.Any) -> None:
+    """Runs a callback from take_group_history; None is a no-op."""
+    if restore is None:
+        return
     try:
         await restore()
     except Exception as e:  # noqa: BLE001

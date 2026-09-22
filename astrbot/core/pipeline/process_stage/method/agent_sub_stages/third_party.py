@@ -9,8 +9,10 @@ from astrbot.core.agent.runners.codex.codex_agent_runner import (
     CodexAgentRunner,
     build_turn_input,
     drop_group_history,
+    give_back,
     keep_group_history,
     release_group_history,
+    take_group_history,
 )
 from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
 from astrbot.core.agent.runners.codex.native import try_steer
@@ -164,7 +166,7 @@ def _start_stream_watchdog(
     *,
     timeout_sec: int,
     is_stream_consumed: Callable[[], bool],
-    close_runner_once: Callable[[], Awaitable[None]],
+    claim_close: Callable[[], Callable[[], Awaitable[None]] | None],
 ) -> asyncio.Task[None]:
     async def _watchdog() -> None:
         try:
@@ -176,10 +178,15 @@ def _start_stream_watchdog(
                 "Third-party runner stream was never consumed in %ss; closing runner to avoid resource leak.",
                 timeout_sec,
             )
+            # The close is claimed in the same step as the check, so a consumer
+            # arriving next already sees the runner closed; the rest is
+            # shielded, as that consumer cancels the watchdog, which must not
+            # cut short giving the group history back.
+            finish_close = claim_close()
+            if finish_close is None:
+                return
             try:
-                # Shielded: a consumer turning up now cancels the watchdog,
-                # which must not cut short giving the group history back.
-                await asyncio.shield(close_runner_once())
+                await asyncio.shield(finish_close())
             except Exception:
                 logger.warning(
                     "Exception while closing third-party runner from stream watchdog.",
@@ -422,15 +429,26 @@ class ThirdPartyAgentSubStage(Stage):
         stream_consumed = False
         stream_watchdog_task: asyncio.Task[None] | None = None
 
-        async def close_runner_once() -> None:
+        def claim_close() -> Callable[[], Awaitable[None]] | None:
+            """Takes the one close synchronously, with the group history's
+            give-back; None if the close was already taken."""
             nonlocal runner_closed
             if runner_closed:
-                return
+                return None
             runner_closed = True
-            await _close_runner_if_supported(runner)
             # A streamed run closed before it was ever consumed never started;
-            # after a started run this is a no-op.
-            await release_group_history(event)
+            # after a started run there is nothing left to give back.
+            restore = take_group_history(event)
+
+            async def finish_close() -> None:
+                await _close_runner_if_supported(runner)
+                await give_back(restore)
+
+            return finish_close
+
+        async def close_runner_once() -> None:
+            if finish_close := claim_close():
+                await finish_close()
 
         def mark_stream_consumed() -> bool:
             """Marks the stream consumed; True if the runner was closed first."""
@@ -465,7 +483,7 @@ class ThirdPartyAgentSubStage(Stage):
                 stream_watchdog_task = _start_stream_watchdog(
                     timeout_sec=self.stream_consumption_close_timeout_sec,
                     is_stream_consumed=lambda: stream_consumed,
-                    close_runner_once=close_runner_once,
+                    claim_close=claim_close,
                 )
                 async for _ in self._handle_streaming_response(
                     runner=runner,
