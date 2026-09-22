@@ -40,6 +40,10 @@ class FakeEngine:
         self.gate = gate
         self.pumps: dict[str, FakePump] = {}
         self.forgotten: list[str] = []
+        self.locks: dict[str, asyncio.Lock] = {}
+
+    def session_lock(self, key):
+        return self.locks.setdefault(key, asyncio.Lock())
 
     async def open_thread(self, state, params):
         await self.gate.wait()
@@ -212,3 +216,29 @@ async def test_start_slower_than_close_wait_is_released_later(engine, monkeypatc
         await asyncio.sleep(0.01)
     assert engine.forgotten == ["t1"]  # released once the start returned
     assert engine.rt.calls == []
+
+
+@pytest.mark.asyncio
+async def test_late_start_cannot_unload_a_newer_sessions_thread(engine, monkeypatch):
+    monkeypatch.setattr(voice, "CLOSE_WAIT", 0.05)
+    old_closed: list = []
+    old = make_session(old_closed)
+    old.launch(lambda exc: None)
+    await asyncio.sleep(0)  # stuck opening thread t1
+    await asyncio.wait_for(old.close("muted"), 5)
+    new_closed: list = []
+    new = make_session(new_closed)  # same key, same persisted thread
+    new.launch(lambda exc: None)
+    await asyncio.sleep(0)
+    engine.gate.set()
+    for _ in range(1000):
+        if engine.rt.calls:
+            break
+        await asyncio.sleep(0.01)
+    # The old start unloaded t1 before the new one could open it; the new
+    # session then opened (resumed) it and kept it.
+    assert engine.forgotten == ["t1"]
+    assert engine.rt.calls == ["start"]
+    assert new_closed == []
+    await new.close("done")
+    assert engine.forgotten == ["t1", "t1"]

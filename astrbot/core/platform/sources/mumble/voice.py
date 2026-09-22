@@ -307,9 +307,18 @@ class VoiceSession:
             "no_environment": True,
             "config": voice_thread_config(self.memory_scope),
         }
-        info, started_new = await engine.open_thread(state or None, params)
-        self._thread_id = info["thread_id"]
-        self._phase("thread opened")
+        # Opening and unloading this key's thread are serialised: a session
+        # closed while its open was still running unloads the thread before
+        # anyone else may open it, so it can never unload a newer session's
+        # (the same thread id is resumed for the same key).
+        async with engine.session_lock(self.scope_id):
+            info, started_new = await engine.open_thread(state or None, params)
+            self._thread_id = info["thread_id"]
+            self._phase("thread opened")
+            if self._closed:
+                self._thread_released = True
+                await engine.forget_thread(self._thread_id)
+                raise _SessionClosed
         if started_new or state.get("thread_id") != self._thread_id:
             await sp.put_async(
                 scope="umo",
@@ -467,12 +476,9 @@ class VoiceSession:
                 # sent after its start.
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(asyncio.shield(start), CLOSE_WAIT)
-                if not start.done():
-                    # Still inside a slow call (opening the thread, starting
-                    # realtime): release what it creates once it returns.
-                    start.add_done_callback(
-                        lambda _task: asyncio.ensure_future(self._release())
-                    )
+                # A start still inside a slow call is covered: one opening the
+                # thread unloads it itself on return, and the realtime start
+                # is queued on the thread ahead of the stop sent below.
             logger.info("Mumble voice session %s closed: %s", self.key, reason)
             await self._release()
         finally:
@@ -506,7 +512,8 @@ class VoiceSession:
             ):
                 pump.close_turn()
             # Unload the thread; the next session resumes it from its rollout.
-            await engine.forget_thread(thread_id)
+            async with engine.session_lock(self.scope_id):
+                await engine.forget_thread(thread_id)
 
 
 def channel_prompt(options: VoiceOptions) -> str:
