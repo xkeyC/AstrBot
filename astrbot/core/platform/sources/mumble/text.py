@@ -120,8 +120,9 @@ def escape_text(text: str) -> str:
 _FENCE = re.compile(r"```[^\n]*\n(.*?)(?:```\n?|\Z)", re.S)
 # Spans that other rules must not touch, rendered first and stashed.
 _CODE = re.compile(r"`([^`\n]+)`")
-_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^()\s\"'<>]+)\)")
-_URL = re.compile(r"https?://[^\s\"'<>]+")
+# URLs stop at a stash placeholder (NUL), so none ends up inside an href.
+_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^()\s\"'<>\x00]+)\)")
+_URL = re.compile(r"https?://[^\s\"'<>\x00]+")
 _EMPHASIS = [
     (re.compile(r"\*\*([^*\n]+)\*\*"), r"<b>\1</b>"),
     (re.compile(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])"), r"<i>\1</i>"),
@@ -172,7 +173,10 @@ def _markdown_inline(text: str) -> str:
     escaped = _HEADING.sub(lambda m: f"<b>{m.group(2)}</b>", escaped)
     for pattern, replacement in _EMPHASIS:
         escaped = pattern.sub(replacement, escaped)
-    escaped = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], escaped)
+    # A stashed span can hold an earlier one (code inside link text), so
+    # restore until no placeholder is left.
+    while "\x00" in escaped:
+        escaped = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], escaped)
     return escaped.replace("\n", "<br>")
 
 

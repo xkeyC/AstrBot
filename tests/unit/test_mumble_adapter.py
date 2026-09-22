@@ -138,13 +138,20 @@ async def test_send_chain_targets(adapter):
 
 
 @pytest.mark.asyncio
-async def test_channel_reply_reaches_where_the_message_came_from(adapter):
-    adapter.client.users[2].channel_id = 7  # alice is in another channel
+async def test_channel_reply_goes_where_the_message_was_sent(adapter):
+    from astrbot.core.platform.sources.mumble.client import Channel
+
+    adapter.client.channels = {0: Channel(0), 5: Channel(5, parent=0)}
     origin = TextMessage(
-        actor=2, message="x", sessions=[], channel_ids=[0], tree_ids=[5]
+        actor=2, message="x", sessions=[], channel_ids=[0, 9], tree_ids=[5]
     )
     await adapter.send_chain(SERVER_SESSION, MessageChain([Plain("ok")]), origin=origin)
-    assert adapter.sent == [("ok", {"channel_ids": [0, 7], "tree_ids": [5]})]
+    # Channel 9 no longer exists: listing it would make the server drop all.
+    assert adapter.sent == [("ok", {"channel_ids": [0], "tree_ids": [5]})]
+    adapter.sent.clear()
+    gone = TextMessage(actor=2, message="x", sessions=[], channel_ids=[9], tree_ids=[])
+    await adapter.send_chain(SERVER_SESSION, MessageChain([Plain("ok")]), origin=gone)
+    assert adapter.sent == [("ok", {"channel_ids": [0]})]  # the bot's channel
 
 
 @pytest.mark.asyncio

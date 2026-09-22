@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
 from astrbot import logger
 from astrbot.core import astrbot_config, sp
@@ -59,8 +59,12 @@ VOICE_THREAD_CONFIG = {
 }
 SDP_TIMEOUT = 30.0
 CONNECT_TIMEOUT = 15.0
-# Pause between the model reporting it started and sending it audio.
+# Pause between WebRTC connecting and handing the model the audio kept
+# meanwhile. Core reports the conversation started before the SDP answer, so
+# there is no later signal to wait for; sent right away, the start is lost.
 READY_DELAY = 0.5
+# How long a close waits for a start in progress to reach a safe point.
+CLOSE_WAIT = 10.0
 
 VOICE_AGENT_INSTRUCTIONS = """You are the backend of {name}, a voice assistant in a Mumble voice chat.
 Requests reach you from the voice model, which reads your answers aloud.
@@ -210,9 +214,13 @@ class VoiceSession:
         self._pc: RTCPeerConnection | None = None
         self._tasks: list[asyncio.Task] = []
         self._start_task: asyncio.Task | None = None
-        self._started = asyncio.Event()
+        self._close_task: asyncio.Task | None = None
+        self._closed_event = asyncio.Event()
         self._closed = False
-        self.started_at = time.monotonic()
+        self.created_at = time.monotonic()
+        # Set once the model listens; standby only counts from then.
+        self.ready = False
+        self.started_at = 0.0
         self.last_transcript_at = 0.0
 
     @property
@@ -236,15 +244,46 @@ class VoiceSession:
                 if self._closed:
                     return
                 on_failed(exc)
-                await self.close(f"start failed: {exc}")
+                # Not awaited: the close waits for this very task to end.
+                self._request_close(f"start failed: {exc}")
 
         self._start_task = asyncio.create_task(
             run(), name=f"mumble-voice-{self.key}-start"
         )
 
+    def _phase(self, name: str) -> None:
+        logger.debug(
+            "Mumble voice %s: %s after %.1fs",
+            self.key,
+            name,
+            time.monotonic() - self.created_at,
+        )
+
     def _check_open(self) -> None:
         if self._closed:
             raise _SessionClosed
+
+    async def _wait_open(self, awaitable, timeout: float):
+        """Awaits ``awaitable``, giving up as soon as the session is closed.
+
+        Raises:
+            _SessionClosed: The session was closed first.
+            asyncio.TimeoutError: ``timeout`` passed first.
+        """
+        waiter = asyncio.ensure_future(awaitable)
+        closed = asyncio.ensure_future(self._closed_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {waiter, closed}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            closed.cancel()
+        if waiter in done:
+            return waiter.result()
+        waiter.cancel()
+        if self._closed:
+            raise _SessionClosed
+        raise asyncio.TimeoutError
 
     async def _start(self) -> None:
         engine = await _codex_engine()
@@ -267,6 +306,7 @@ class VoiceSession:
         }
         info, started_new = await engine.open_thread(state or None, params)
         self._thread_id = info["thread_id"]
+        self._phase("thread opened")
         if started_new or state.get("thread_id") != self._thread_id:
             await sp.put_async(
                 scope="umo",
@@ -283,7 +323,10 @@ class VoiceSession:
         events = engine.pump(self._thread_id).open_turn(None, None)
         self._events_queue = events
 
-        pc = RTCPeerConnection()
+        # No STUN: the far end offers public host candidates and we connect
+        # out to them. aiortc's default Google STUN server only adds a
+        # multi-second wait while gathering.
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         self._pc = pc
         pc.addTrack(MixerTrack(self.mixer))
         pc.createDataChannel("oai-events")
@@ -296,9 +339,10 @@ class VoiceSession:
         @pc.on("connectionstatechange")
         async def on_state() -> None:
             if pc.connectionState in ("failed", "closed"):
-                await self.close(f"webrtc {pc.connectionState}")
+                self._request_close(f"webrtc {pc.connectionState}")
 
         await pc.setLocalDescription(await pc.createOffer())
+        self._phase("offer ready")
         self._check_open()
         request: dict = {
             "transport": {"type": "webrtc", "sdp": pc.localDescription.sdp},
@@ -315,8 +359,8 @@ class VoiceSession:
         self._spawn(self._events(events, answer), "events")
         self._realtime_requested = True
         await engine.rt.realtime_start(self._thread_id, json.dumps(request))
-        sdp = await asyncio.wait_for(answer, SDP_TIMEOUT)
-        self._check_open()
+        sdp = await self._wait_open(answer, SDP_TIMEOUT)
+        self._phase("answer received")
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
         deadline = time.monotonic() + CONNECT_TIMEOUT
         while pc.connectionState != "connected":
@@ -327,15 +371,17 @@ class VoiceSession:
             ):
                 raise RuntimeError(f"WebRTC did not connect ({pc.connectionState})")
             await asyncio.sleep(0.1)
-        # Hand over the audio kept while connecting only once the model is
-        # listening; sent earlier, its start is lost.
+        self._phase("webrtc connected")
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._started.wait(), CONNECT_TIMEOUT)
-        await asyncio.sleep(READY_DELAY)
-        self._check_open()
+            await self._wait_open(asyncio.sleep(READY_DELAY), READY_DELAY + 1)
         self.mixer.holding = False
+        self.started_at = time.monotonic()
+        self.ready = True
         logger.info(
-            "Mumble voice session %s started (thread %s)", self.key, self._thread_id
+            "Mumble voice session %s started in %.1fs (thread %s)",
+            self.key,
+            self.started_at - self.created_at,
+            self._thread_id,
         )
 
     def _spawn(self, coro, name: str) -> None:
@@ -346,9 +392,7 @@ class VoiceSession:
         while True:
             msg = await events.get()
             kind = msg.get("type")
-            if kind == "realtime_conversation_started":
-                self._started.set()
-            elif kind == "realtime_conversation_sdp":
+            if kind == "realtime_conversation_sdp":
                 if not answer.done():
                     answer.set_result(msg["sdp"])
             elif kind == "realtime_conversation_closed":
@@ -356,7 +400,7 @@ class VoiceSession:
                 if not answer.done():
                     answer.set_exception(RuntimeError(f"realtime closed: {reason}"))
                 self._realtime_requested = False
-                self._spawn(self.close(f"realtime {reason}"), "close")
+                self._request_close(f"realtime {reason}")
                 return
             elif kind == "realtime_conversation_realtime":
                 payload = msg.get("payload")
@@ -381,46 +425,67 @@ class VoiceSession:
                 if not answer.done():
                     answer.set_exception(RuntimeError("voice thread closed"))
                 self._realtime_requested = False
-                self._spawn(self.close("voice thread closed"), "close")
+                self._request_close("voice thread closed")
                 return
 
+    def _request_close(self, reason: str) -> asyncio.Task:
+        """Starts closing (once) and returns the task doing it."""
+        if self._close_task is None:
+            self._closed = True
+            self._closed_event.set()
+            # Model audio still arriving is dropped; speech in progress gets
+            # its terminator from the outbound loop.
+            self.outbound.muted = True
+            self._close_task = asyncio.create_task(
+                self._close(reason), name=f"mumble-voice-{self.key}-close"
+            )
+        return self._close_task
+
     async def close(self, reason: str = "") -> None:
-        if self._closed:
-            return
-        self._closed = True
+        """Closes the session and waits until it is released.
+
+        The release runs in its own task, so cancelling a caller does not stop
+        it half way; every caller waits for the same release.
+        """
+        task = self._request_close(reason)
+        if task is not asyncio.current_task():
+            await asyncio.shield(task)
+
+    async def _close(self, reason: str) -> None:
         start = self._start_task
-        current = asyncio.current_task()
-        if start is not None and not start.done() and start is not current:
-            # Let the start stop at its next step, so everything it created
-            # is known here and the realtime stop is sent after its start.
+        if start is not None and not start.done():
+            # A start stops at its next step once closed; let it, so that
+            # everything it created is known here and the realtime stop is
+            # sent after its start.
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    asyncio.shield(start), SDP_TIMEOUT + CONNECT_TIMEOUT
-                )
-        logger.info("Mumble voice session %s closed: %s", self.key, reason)
-        self.outbound.finish()
-        engine, thread_id = self._engine, self._thread_id
-        if self._realtime_requested and engine is not None and thread_id is not None:
-            with contextlib.suppress(Exception):
-                await engine.rt.realtime_stop(thread_id)
-        if self._pc is not None:
-            with contextlib.suppress(Exception):
-                await self._pc.close()
-        for task in self._tasks:
-            if task is not current:
-                task.cancel()
-        if engine is not None and thread_id is not None:
-            pump = engine.pumps.get(thread_id)
-            if (
-                pump is not None
-                and pump.route is not None
-                and (pump.route.events is self._events_queue)
-            ):
-                pump.close_turn()
-            # Unload the thread; the next session resumes it from its rollout.
-            await engine.forget_thread(thread_id)
-        self.mixer.clear()
-        self._on_closed(self)
+                await asyncio.wait_for(asyncio.shield(start), CLOSE_WAIT)
+        try:
+            logger.info("Mumble voice session %s closed: %s", self.key, reason)
+            engine, thread_id = self._engine, self._thread_id
+            if self._realtime_requested and engine is not None and thread_id:
+                with contextlib.suppress(Exception):
+                    await engine.rt.realtime_stop(thread_id)
+            if self._pc is not None:
+                with contextlib.suppress(Exception):
+                    await self._pc.close()
+            current = asyncio.current_task()
+            for task in self._tasks:
+                if task is not current:
+                    task.cancel()
+            self.outbound.finish()
+            if engine is not None and thread_id is not None:
+                pump = engine.pumps.get(thread_id)
+                if (
+                    pump is not None
+                    and pump.route is not None
+                    and pump.route.events is self._events_queue
+                ):
+                    pump.close_turn()
+                # Unload the thread; the next session resumes it from its rollout.
+                await engine.forget_thread(thread_id)
+        finally:
+            self.mixer.clear()
+            self._on_closed(self)
 
 
 def channel_prompt(options: VoiceOptions) -> str:

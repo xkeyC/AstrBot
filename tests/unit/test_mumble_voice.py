@@ -70,6 +70,7 @@ def engine(monkeypatch):
 
     monkeypatch.setattr(voice, "_codex_engine", codex_engine)
     monkeypatch.setattr(voice, "sp", FakeSp())
+    monkeypatch.setattr(voice, "_runner_config", lambda: {})
     return engine
 
 
@@ -149,3 +150,45 @@ def test_voice_thread_reads_paired_and_global_memories(monkeypatch):
     assert config["memories.auto_consolidate"] is False
     assert config["features.apps"] is False
     assert config["agents.enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_close_while_waiting_for_answer_is_prompt(engine):
+    engine.gate.set()
+    closed: list = []
+    session = make_session(closed)
+    session.launch(lambda exc: None)
+    for _ in range(1000):  # wait until the realtime start was requested
+        if engine.rt.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert engine.rt.calls == ["start"]
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await asyncio.wait_for(session.close("standby"), 5)
+    assert loop.time() - began < 2  # not the 30 s answer timeout
+    assert engine.rt.calls == ["start", "stop"]
+    assert engine.forgotten == ["t1"]
+    assert closed == [session]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_still_releases(engine):
+    engine.gate.set()
+    closed: list = []
+    session = make_session(closed)
+    session.launch(lambda exc: None)
+    for _ in range(1000):
+        if engine.rt.calls:
+            break
+        await asyncio.sleep(0.01)
+    caller = asyncio.create_task(session.close("disconnected"))
+    await asyncio.sleep(0)
+    caller.cancel()
+    for _ in range(300):
+        if closed:
+            break
+        await asyncio.sleep(0.01)
+    assert closed == [session]
+    assert engine.rt.calls == ["start", "stop"]
+    await session.close("again")  # already released: returns at once

@@ -195,6 +195,8 @@ class MumblePlatformAdapter(Platform):
         self._preroll: dict[str, deque[tuple[float, int, bytes, bool]]] = {}
         self._retry_at: dict[str, float] = {}
         self._tasks: set[asyncio.Task] = set()
+        # Bumped on every connection; ids from an older one are stale.
+        self._generation = 0
         self._running = True
         self._disconnected = asyncio.Event()
 
@@ -229,6 +231,7 @@ class MumblePlatformAdapter(Platform):
 
     async def _connect_once(self) -> None:
         self._disconnected.clear()
+        self._generation += 1
         await self.client.connect()
         me = self.client.me
         logger.info(
@@ -367,18 +370,20 @@ class MumblePlatformAdapter(Platform):
             int(image_length) or UNLIMITED_LENGTH,
         )
         if session_id == SERVER_SESSION:
-            me = self.client.me
-            channels = {me.channel_id if me else 0}
-            tree_ids: list[int] = []
-            if origin is not None:
-                channels.update(origin.channel_ids)
-                tree_ids = origin.tree_ids
-                sender = self.client.users.get(origin.actor or -1)
-                if sender is not None:
-                    channels.add(sender.channel_id)
-            target: dict[str, Any] = {"channel_ids": sorted(channels)}
-            if tree_ids:
-                target["tree_ids"] = tree_ids
+            # The server drops the whole message if any target channel is
+            # gone or not writable, so reply where the message was sent (the
+            # sender chose it) while those channels exist, else to the bot's.
+            existing = self.client.channels
+            channels = [
+                c for c in (origin.channel_ids if origin else []) if c in existing
+            ]
+            trees = [c for c in (origin.tree_ids if origin else []) if c in existing]
+            if not channels and not trees:
+                me = self.client.me
+                channels = [me.channel_id if me else 0]
+            target: dict[str, Any] = {"channel_ids": channels}
+            if trees:
+                target["tree_ids"] = trees
         else:
             user = next(
                 (u for u in self.client.users.values() if user_key(u) == session_id),
@@ -390,10 +395,12 @@ class MumblePlatformAdapter(Platform):
                 )
                 return
             target = {"sessions": [user.session]}
+        generation = self._generation
         for index, html_message in enumerate(messages):
             if index >= TEXT_BURST:
                 await asyncio.sleep(TEXT_INTERVAL)
-                if not self.client.connected:
+                # After a reconnect the target ids may belong to someone else.
+                if not self.client.connected or self._generation != generation:
                     return
             self.client.send_text(html_message, **target)
             await self.client.drain()
@@ -543,6 +550,11 @@ class MumblePlatformAdapter(Platform):
             )
         for session in self.voice_sessions.values():
             session.mixer.forget(user.session)
+        # Their whisper session would keep answering a session id the server
+        # may hand to someone else.
+        whisper = self.voice_sessions.get(f"whisper:{user_key(user)}")
+        if whisper is not None:
+            self._spawn(whisper.close("whisper partner left"))
 
     def _on_user_changed(self, user: User, changed: set[str]) -> None:
         # A whisper partner who reconnected has a new session: re-aim the target.
@@ -563,5 +575,9 @@ class MumblePlatformAdapter(Platform):
                 await self._close_voice("muted")
                 continue
             for session in list(self.voice_sessions.values()):
-                if now - session.last_activity >= self.voice_idle_timeout:
+                # A session still starting has its own timeouts.
+                if (
+                    session.ready
+                    and now - session.last_activity >= self.voice_idle_timeout
+                ):
                     await session.close("standby: no speech recognised")
