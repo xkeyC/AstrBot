@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from aiortc.mediastreams import MediaStreamError
 
+from astrbot.core.platform.sources.mumble import audio
 from astrbot.core.platform.sources.mumble.audio import (
     FRAME_SAMPLES,
     InboundMixer,
@@ -135,13 +136,13 @@ async def test_outbound_sends_speech_and_terminates_on_silence():
     sent: list[tuple[bytes, bool]] = []
     outbound = OutboundVoice(lambda data, end: sent.append((data, end)))
     pcm = np.concatenate([np.zeros(FRAME_SAMPLES * 5, np.int16), tone(20)])
-    pcm = np.concatenate([pcm, np.zeros(FRAME_SAMPLES * 30, np.int16), tone(10)])
+    pcm = np.concatenate([pcm, np.zeros(FRAME_SAMPLES * 40, np.int16), tone(10)])
     await asyncio.wait_for(outbound.run(FakeTrack(pcm)), 10)
     terminators = [i for i, (_, end) in enumerate(sent) if end]
     # Leading silence is not sent; each stretch of speech ends with a terminator.
     assert len(terminators) == 2
     assert terminators[-1] == len(sent) - 1
-    assert 20 <= terminators[0] <= 20 + 15
+    assert 20 <= terminators[0] <= 20 + audio.PREROLL_FRAMES + audio.HANGOVER_FRAMES
     assert not outbound.talking
 
 
@@ -152,3 +153,47 @@ async def test_outbound_drops_audio_while_muted():
     outbound.muted = True
     await asyncio.wait_for(outbound.run(FakeTrack(tone(20))), 10)
     assert sent == []
+
+
+class BurstyTrack(FakeTrack):
+    """Delivers frames in bursts of 10 with 200 ms pauses, like WebRTC does."""
+
+    def __init__(self, pcm):
+        super().__init__(pcm)
+        self.count = 0
+
+    async def recv(self):
+        self.count += 1
+        if self.count % 10 == 0:
+            await asyncio.sleep(0.2)
+        return await super().recv()
+
+
+@pytest.mark.asyncio
+async def test_outbound_paces_bursty_input():
+    import time
+
+    times: list[float] = []
+    outbound = OutboundVoice(lambda data, end: times.append(time.monotonic()))
+    await asyncio.wait_for(outbound.run(BurstyTrack(tone(60))), 20)
+    gaps = np.diff(np.array(times[:-1])) * 1000  # the terminator is extra
+    assert len(times) >= 55
+    assert 15 <= np.median(gaps) <= 25
+    assert np.percentile(gaps, 95) < 45  # not the 200 ms bursts
+
+
+def test_mixer_jitter_buffer():
+    mixer = InboundMixer()
+    mixer.holding = False
+    packets = encode(tone(8))
+    mixer.feed(1, packets[0], False)
+    assert mixer.pull() is None  # one frame is not enough to start
+    for packet in packets[1:4]:
+        mixer.feed(1, packet, False)
+    assert mixer.pull() is not None
+    while mixer.pull() is not None:  # drains, then waits for more
+        pass
+    mixer.feed(1, packets[4], False)
+    assert mixer.pull() is None  # ran dry: buffers up again
+    mixer.feed(1, packets[5], True)  # the end of the transmission
+    assert mixer.pull() is not None  # no waiting once it ended

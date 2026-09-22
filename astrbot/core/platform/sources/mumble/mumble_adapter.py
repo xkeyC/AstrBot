@@ -57,6 +57,7 @@ WATCHDOG_INTERVAL = 5.0
 PREROLL_SECONDS = 2.0
 # A voice session that failed to start is not retried for this long.
 START_RETRY_SECONDS = 30.0
+VOICE_BITRATE = 64000
 # Servers rate-limit text messages (default burst 5, then 1 per second) and
 # silently drop the excess, so long replies are paced after the burst.
 TEXT_BURST = 4
@@ -501,6 +502,7 @@ class MumblePlatformAdapter(Platform):
             on_closed=self._voice_closed,
             # The chat the voice conversation belongs to: the server group,
             # or the whisperer's private chat.
+            bitrate=self._voice_bitrate(),
             memory_scope=(
                 f"{self.meta().id}:{MessageType.GROUP_MESSAGE.value}:{SERVER_SESSION}"
                 if key == SERVER_SESSION
@@ -516,6 +518,15 @@ class MumblePlatformAdapter(Platform):
 
         session.launch(failed)
         return session
+
+    def _voice_bitrate(self) -> int:
+        """Opus bitrate for the bot's voice: 64 kbit/s unless the server's
+        per-user bandwidth (which counts the TCP tunnel's overhead, about
+        20 kbit/s at 50 packets a second) allows less; never below 32."""
+        limit = self.client.max_bandwidth
+        if not limit:
+            return VOICE_BITRATE
+        return max(32000, min(VOICE_BITRATE, limit - 20000))
 
     def _whisper_target(self, user: User) -> int | None:
         """The voice target (1-30) aimed at ``user``, or None if all are used."""

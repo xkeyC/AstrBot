@@ -25,6 +25,8 @@ from astrbot import logger
 SAMPLE_RATE = 48000
 FRAME_SAMPLES = 960  # 20 ms
 FRAME_BYTES = FRAME_SAMPLES * 2
+# Inbound frames buffered per speaker before mixing starts (see InboundMixer).
+JITTER_FRAMES = 2  # 40 ms
 # A speaker's backlog beyond this is dropped, oldest first. It is large so
 # that what is said while a voice session is still connecting (typically the
 # very request that woke the bot) is kept; a backlog only builds up during
@@ -32,8 +34,18 @@ FRAME_BYTES = FRAME_SAMPLES * 2
 MAX_BACKLOG_SAMPLES = SAMPLE_RATE * 10
 # Outbound frames quieter than this (int16 RMS) count as silence.
 SILENCE_RMS = 120
-# Silence that ends an outbound stretch of speech.
-HANGOVER_FRAMES = 15  # 300 ms
+# Silence that ends an outbound stretch of speech; long enough not to split
+# a sentence at a short pause.
+HANGOVER_FRAMES = 25  # 500 ms
+# WebRTC hands over the model's audio in bursts (measured p95 gap ~190 ms),
+# while Mumble clients play what arrives. Each stretch of speech starts only
+# once this much is buffered, and is then sent at a steady 20 ms pace.
+PLAYOUT_FRAMES = 10  # 200 ms
+# Quiet frames kept in front of the first loud one, so onsets are not cut.
+PREROLL_FRAMES = 2
+# Buffered audio beyond this is dropped, oldest first, to bound latency.
+MAX_QUEUED_FRAMES = 150  # 3 s
+FRAME_SECONDS = FRAME_SAMPLES / SAMPLE_RATE
 
 
 class InboundMixer:
@@ -48,6 +60,11 @@ class InboundMixer:
         self._decoders: dict[int, av.CodecContext] = {}
         self._pending: dict[int, deque[np.ndarray]] = {}
         self._pending_samples: dict[int, int] = {}
+        # Jitter buffer per speaker: mixing starts once JITTER_FRAMES are
+        # queued, and resumes that way after running dry mid-speech, instead
+        # of mixing half-empty frames (heard as crackle and gaps).
+        self._playing: set[int] = set()
+        self._ended: set[int] = set()
         self.last_voice_at = 0.0
         self.holding = True
 
@@ -83,26 +100,45 @@ class InboundMixer:
                 self._pending_samples[speaker] = total
             self.last_voice_at = time.monotonic()
         if is_terminator:
-            # A new transmission starts a fresh decoder state.
+            # A new transmission starts a fresh decoder state; what is left
+            # of this one is mixed without waiting for more.
             self._decoders.pop(speaker, None)
+            self._ended.add(speaker)
+        else:
+            self._ended.discard(speaker)
 
     def forget(self, speaker: int) -> None:
         self._decoders.pop(speaker, None)
         self._pending.pop(speaker, None)
         self._pending_samples.pop(speaker, None)
+        self._playing.discard(speaker)
+        self._ended.discard(speaker)
 
     def clear(self) -> None:
         self._decoders.clear()
         self._pending.clear()
         self._pending_samples.clear()
+        self._playing.clear()
+        self._ended.clear()
 
     def pull(self) -> bytes | None:
         """One mixed 20 ms frame, or ``None`` when nobody is talking."""
         if self.holding or not self._pending:
             return None
         mix = np.zeros(FRAME_SAMPLES, dtype=np.int32)
+        mixed = False
         for speaker in list(self._pending):
             chunks = self._pending[speaker]
+            available = self._pending_samples.get(speaker, 0)
+            ended = speaker in self._ended
+            if speaker not in self._playing:
+                if available < JITTER_FRAMES * FRAME_SAMPLES and not ended:
+                    continue
+                self._playing.add(speaker)
+            elif available < FRAME_SAMPLES and not ended:
+                self._playing.discard(speaker)  # ran dry: buffer up again
+                continue
+            mixed = True
             filled = 0
             while chunks and filled < FRAME_SAMPLES:
                 chunk = chunks[0]
@@ -117,6 +153,9 @@ class InboundMixer:
             if not chunks:
                 del self._pending[speaker]
                 del self._pending_samples[speaker]
+                self._playing.discard(speaker)
+        if not mixed:
+            return None
         return np.clip(mix, -32768, 32767).astype(np.int16).tobytes()
 
 
@@ -208,9 +247,15 @@ class MixerTrack(MediaStreamTrack):
 
 
 class OutboundVoice:
-    """Forwards a peer's audio track to Mumble as Opus while it has sound."""
+    """Forwards a peer's audio track to Mumble as Opus while it has sound.
 
-    def __init__(self, send: Callable[[bytes, bool], None], bitrate: int = 40000):
+    Receiving and sending are decoupled: ``run`` queues 20 ms frames as the
+    track delivers them, and a player sends them at a steady pace after a
+    short playout buffer, so bursty WebRTC delivery does not reach listeners
+    as stutter.
+    """
+
+    def __init__(self, send: Callable[[bytes, bool], None], bitrate: int = 64000):
         """
         Args:
             send: Called with ``(opus_frame, is_terminator)`` for every frame.
@@ -220,6 +265,8 @@ class OutboundVoice:
         self._bitrate = bitrate
         self.muted = False
         self.talking = False
+        self._queue: deque[tuple[bytes, bool]] = deque()
+        self._track_ended = False
 
     def _encoder(self) -> av.CodecContext:
         encoder = av.CodecContext.create("libopus", "w")
@@ -227,54 +274,105 @@ class OutboundVoice:
         encoder.layout = "mono"
         encoder.format = "s16"
         encoder.bit_rate = self._bitrate
-        encoder.options = {"application": "voip", "frame_duration": "20"}
+        # As the official client at its default quality: "audio" (high
+        # quality speech) and constant bitrate; "voip" narrows the band,
+        # which re-encoded synthetic speech suffers from most.
+        encoder.options = {"application": "audio", "frame_duration": "20", "vbr": "off"}
         encoder.open()
         return encoder
 
     async def run(self, track: MediaStreamTrack) -> None:
-        """Consumes ``track`` until it ends."""
+        """Consumes ``track`` until it ends, then plays out what is queued."""
+        player = asyncio.create_task(self._play())
         resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
-        encoder = self._encoder()
         buffer = bytearray()
-        quiet = 0
-        pts = 0
-        while True:
-            try:
-                frame = await track.recv()
-            except MediaStreamError:
-                break
-            for resampled in resampler.resample(frame):
-                buffer += bytes(resampled.planes[0])[: resampled.samples * 2]
-            while len(buffer) >= FRAME_BYTES:
-                chunk = bytes(buffer[:FRAME_BYTES])
-                del buffer[:FRAME_BYTES]
-                if self.muted:
-                    if self.talking:
-                        self._end(encoder, pts)
-                    continue
-                samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
-                loud = float(np.sqrt(np.mean(samples * samples))) >= SILENCE_RMS
-                if loud:
-                    quiet = 0
-                    self.talking = True
-                elif not self.talking:
-                    continue
-                else:
-                    quiet += 1
-                    if quiet >= HANGOVER_FRAMES:
-                        quiet = 0
-                        self._end(encoder, pts)
+        try:
+            while True:
+                try:
+                    frame = await track.recv()
+                except MediaStreamError:
+                    break
+                for resampled in resampler.resample(frame):
+                    buffer += bytes(resampled.planes[0])[: resampled.samples * 2]
+                while len(buffer) >= FRAME_BYTES:
+                    chunk = bytes(buffer[:FRAME_BYTES])
+                    del buffer[:FRAME_BYTES]
+                    if self.muted:
+                        self._queue.clear()
                         continue
-                out = av.AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
-                out.planes[0].update(chunk)
-                out.sample_rate = SAMPLE_RATE
-                out.pts = pts
-                out.time_base = fractions.Fraction(1, SAMPLE_RATE)
-                pts += FRAME_SAMPLES
-                for packet in encoder.encode(out):
-                    self._send(bytes(packet), False)
-        if self.talking:
-            self._end(encoder, pts)
+                    samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+                    loud = float(np.sqrt(np.mean(samples * samples))) >= SILENCE_RMS
+                    self._queue.append((chunk, loud))
+                    while len(self._queue) > MAX_QUEUED_FRAMES:
+                        self._queue.popleft()
+            self._track_ended = True
+            await player
+        finally:
+            player.cancel()
+            self.finish()
+
+    async def _play(self) -> None:
+        loop = asyncio.get_running_loop()
+        encoder = self._encoder()
+        queue = self._queue
+        pts = 0
+        quiet = 0
+        next_at = 0.0
+        while True:
+            if not self.talking:
+                if self.muted:
+                    queue.clear()
+                first_loud = next(
+                    (i for i, (_, loud) in enumerate(queue) if loud), None
+                )
+                if first_loud is None:
+                    if self._track_ended:
+                        return
+                    while len(queue) > PREROLL_FRAMES:
+                        queue.popleft()
+                    await asyncio.sleep(FRAME_SECONDS)
+                    continue
+                for _ in range(max(0, first_loud - PREROLL_FRAMES)):
+                    queue.popleft()
+                if (
+                    len(queue) < PLAYOUT_FRAMES + PREROLL_FRAMES
+                    and not self._track_ended
+                ):
+                    await asyncio.sleep(FRAME_SECONDS / 2)
+                    continue
+                self.talking = True
+                quiet = 0
+                next_at = loop.time()
+            wait = next_at - loop.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            elif wait < -0.2:
+                next_at = loop.time()  # the loop stalled: resync, don't burst
+            next_at += FRAME_SECONDS
+            if self.muted:
+                self._end(encoder, pts)
+                continue
+            if not queue:
+                # Underrun: send nothing now; a long one ends the stretch.
+                quiet += 1
+                if quiet >= HANGOVER_FRAMES or self._track_ended:
+                    self._end(encoder, pts)
+                    if self._track_ended:
+                        return
+                continue
+            chunk, loud = queue.popleft()
+            quiet = 0 if loud else quiet + 1
+            if quiet >= HANGOVER_FRAMES:
+                self._end(encoder, pts)
+                continue
+            out = av.AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
+            out.planes[0].update(chunk)
+            out.sample_rate = SAMPLE_RATE
+            out.pts = pts
+            out.time_base = fractions.Fraction(1, SAMPLE_RATE)
+            pts += FRAME_SAMPLES
+            for packet in encoder.encode(out):
+                self._send(bytes(packet), False)
 
     def finish(self) -> None:
         """Ends a stretch of speech cut off mid-way, so Mumble clients do not
@@ -285,6 +383,8 @@ class OutboundVoice:
 
     def _end(self, encoder: av.CodecContext, pts: int) -> None:
         """Closes the current stretch of speech with a terminator frame."""
+        if not self.talking:
+            return
         self.talking = False
         silence = av.AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
         silence.planes[0].update(bytes(FRAME_BYTES))

@@ -190,6 +190,7 @@ class MumbleClient:
         self._tasks: list[asyncio.Task] = []
         self._synced: asyncio.Future[None] | None = None
         self._frame_number = 0
+        self._audio_epoch: float | None = None
         self._closing = False
         self._last_received = 0.0
 
@@ -317,9 +318,20 @@ class MumbleClient:
         target: int = AudioTarget.NORMAL,
         is_terminator: bool = False,
     ) -> None:
-        """Sends one Opus frame. End each transmission with ``is_terminator``."""
+        """Sends one 20 ms Opus frame. End each transmission with ``is_terminator``.
+
+        ``frame_number`` counts 10 ms of wall-clock time, as the official
+        client's counter does (it keeps running through silence): receivers
+        schedule playback by it, so after a pause it must jump ahead, or the
+        new frames look late and get dropped.
+        """
+        now = time.monotonic()
+        if self._audio_epoch is None:
+            self._audio_epoch = now
+        elapsed = int((now - self._audio_epoch) * 100)
+        # Never backwards, and 2 per frame when frames are sent back to back.
+        self._frame_number = max(self._frame_number, elapsed)
         packet = encode_audio(opus_data, self._frame_number, target, is_terminator)
-        # frame_number counts 10 ms units; the codec layer passes 20 ms frames.
         self._frame_number += 2
         self._send_raw(MessageType.UDPTunnel, packet)
 

@@ -189,6 +189,7 @@ class VoiceSession:
         send_audio: Callable[[bytes, bool], None],
         on_closed: Callable[[VoiceSession], None],
         memory_scope: str | None = None,
+        bitrate: int = 64000,
     ) -> None:
         """
         Args:
@@ -196,6 +197,7 @@ class VoiceSession:
             scope_id: Storage scope of the persisted voice thread.
             memory_scope: UMO of the paired chat, whose memories (with the
                 global ones) the voice agent may read.
+            bitrate: Opus bitrate of the bot's voice in Mumble.
             prompt: Instructions for the realtime model.
             options: Voice settings of the platform.
             send_audio: Sends one Opus frame to Mumble: ``(frame, terminator)``.
@@ -207,7 +209,7 @@ class VoiceSession:
         self.options = options
         self.memory_scope = memory_scope
         self.mixer = InboundMixer()
-        self.outbound = OutboundVoice(send_audio)
+        self.outbound = OutboundVoice(send_audio, bitrate)
         self._on_closed = on_closed
         self._engine = None
         self._thread_id: str | None = None
