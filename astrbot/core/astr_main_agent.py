@@ -1081,12 +1081,14 @@ def _append_message_meta(
     is_group = bool(message_obj.group_id)
     sender = getattr(message_obj, "sender", None)
     # A group conversation is shared by every member, so its messages always
-    # name the sender. The platform user id is exposed only when the
+    # name the sender, with the id: nicknames repeat and change, and the id is
+    # what keeps two people apart. In private chats it is shown only when the
     # identifier setting is on.
-    if sender is not None and cfg.get("identifier"):
-        meta.append(f"Sender: {sender.nickname} (ID: {sender.user_id})")
-    elif sender is not None and is_group:
-        meta.append(f"Sender: {sender.nickname}")
+    if sender is not None and (cfg.get("identifier") or is_group):
+        if sender.user_id:
+            meta.append(f"Sender: {sender.nickname} (ID: {sender.user_id})")
+        else:
+            meta.append(f"Sender: {sender.nickname}")
 
     if cfg.get("group_name_display") and is_group:
         if not message_obj.group:

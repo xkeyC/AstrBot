@@ -191,7 +191,9 @@ class FakePersonas:
         return None
 
 
-def make_event(user_id: str, nickname: str, text: str) -> AstrMessageEvent:
+def make_event(
+    user_id: str, nickname: str, text: str, trigger: bool = True
+) -> AstrMessageEvent:
     """Build a group message event with working extras."""
     platform_meta = PlatformMetadata(id="fake", name="fake", description="fake")
     platform_meta.support_proactive_message = False
@@ -213,7 +215,8 @@ def make_event(user_id: str, nickname: str, text: str) -> AstrMessageEvent:
     event.session_id = "group-1"
     event.role = "member"
     event.plugins_name = None
-    event.is_at_or_wake_command = True
+    # Chatter does not wake the bot; only the message being answered does.
+    event.is_at_or_wake_command = trigger
     event.trace = MagicMock()
     event.get_extra.side_effect = lambda key, default=None: extras.get(key, default)
     event.set_extra.side_effect = extras.__setitem__
@@ -338,7 +341,9 @@ async def run_scenario() -> list[dict[str, Any]]:
         if turn.persona is not None:
             personas.persona = turn.persona
         for user_id, nickname, text in turn.chatter:
-            await group_context.handle_message(make_event(user_id, nickname, text))
+            await group_context.handle_message(
+                make_event(user_id, nickname, text, trigger=False)
+            )
         user_id, nickname, text = turn.sender
         event = make_event(user_id, nickname, text)
         await group_context.handle_message(event)
@@ -387,7 +392,7 @@ async def run_scenario() -> list[dict[str, Any]]:
         reports.append(
             {
                 "turn": number,
-                "sender": nickname,
+                "sender": f"{nickname} (ID: {user_id})",
                 "payload": payload,
                 "anchors": dict(request.context_anchors),
                 "anchor_changes": _anchor_changes(persisted),
@@ -442,8 +447,8 @@ def check(reports: list[dict[str, Any]]) -> None:
         # Every stored turn keeps its sender; temporary context is never stored.
         history_text = json.dumps(report["history"], ensure_ascii=False)
         assert f"Sender: {report['sender']}" in history_text, turn
-        # identifier is off: no platform user id is sent or stored.
-        assert "(ID: " not in history_text, turn
+        # Group senders are named with their id even with identifier off:
+        # nicknames repeat, and the id keeps two people apart.
         assert "<request_context" not in history_text, turn
         # Apart from the truncating turn, each request extends the previous one.
         if turn > 1 and not report["truncated"]:

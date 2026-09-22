@@ -3223,16 +3223,15 @@ class TestRelocatePluginInjectedContext:
         assert all(part._no_save for part in req.dynamic_user_context_parts)
 
 
-def test_message_meta_names_group_sender_without_exposing_id(mock_event):
+def test_message_meta_names_group_sender_with_id(mock_event):
+    # In a group the id is what tells two people with one nickname apart.
     mock_event.message_obj.group_id = "group-1"
     mock_event.message_obj.group = None
     req = ProviderRequest(prompt="Hello")
 
     ama._append_message_meta(mock_event, req, {"identifier": False}, None)
 
-    text = _dynamic_context_text(req)
-    assert "Sender: TestUser" in text
-    assert "(ID:" not in text
+    assert "Sender: TestUser (ID: user123)" in _dynamic_context_text(req)
 
 
 def test_message_meta_exposes_sender_id_when_identifier_enabled(mock_event):

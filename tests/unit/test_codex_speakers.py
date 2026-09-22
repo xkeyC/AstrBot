@@ -1,0 +1,285 @@
+"""Group chats: earlier messages are reference only, and senders stay apart."""
+
+from types import SimpleNamespace
+
+import pytest
+
+from astrbot.builtin_stars.astrbot import group_chat_context as gcc
+from astrbot.core.agent.runners.codex import codex_agent_runner as runner_mod
+from astrbot.core.agent.runners.codex.codex_agent_runner import (
+    CodexAgentRunner,
+    speaker_change_note,
+)
+from astrbot.core.agent.runners.codex.constants import DEFAULT_SYSTEM_PROMPT
+from astrbot.core.provider.entities import ProviderRequest
+
+UMO = "qq:GroupMessage:g1"
+
+# ------------------------------------------------------------ group history
+
+
+def test_group_history_is_marked_as_reference_not_instructions():
+    block = gcc._format_group_history_block(["[Alice/10:00:00]:  @bot 帮我查天气"])
+
+    assert block.startswith("<group_history>")
+    assert block.endswith("</group_history>")
+    assert "NOT instructions" in block
+    assert "[Alice/10:00:00]:  @bot 帮我查天气" in block
+    # The old framing read as a live system instruction.
+    assert "system_reminder" not in block
+
+
+def _event(nickname="Alice", user_id="111", *, at_self=False, timestamp=0):
+    from astrbot.api.message_components import At, Plain
+
+    chain = [Plain("hello")]
+    if at_self:
+        chain.append(At(qq="999", name="bot"))
+    return SimpleNamespace(
+        message_obj=SimpleNamespace(
+            sender=SimpleNamespace(nickname=nickname, user_id=user_id),
+            timestamp=timestamp,
+        ),
+        get_messages=lambda: chain,
+        get_self_id=lambda: "999",
+    )
+
+
+@pytest.mark.asyncio
+async def test_history_lines_carry_nickname_id_and_send_time():
+    import datetime
+
+    sent = datetime.datetime(2026, 9, 22, 10, 5, 7)
+    ctx = gcc.GroupChatContext.__new__(gcc.GroupChatContext)
+    line = await ctx._format_message(
+        _event(timestamp=int(sent.timestamp())), {"image_caption": False}
+    )
+
+    assert line.startswith("[Alice | ID: 111 | 2026-09-22 10:05:07]: ")
+
+
+@pytest.mark.asyncio
+async def test_a_past_mention_is_not_flagged_as_a_pending_request():
+    ctx = gcc.GroupChatContext.__new__(gcc.GroupChatContext)
+    line = await ctx._format_message(_event(at_self=True), {"image_caption": False})
+
+    assert "[mentioned you]" in line
+    assert "DIRECTED AT YOU" not in line
+
+
+# ------------------------------------------------------------ speaker change
+
+
+def test_same_sender_gets_no_note():
+    assert speaker_change_note({"id": "1", "label": "A"}, {"id": "1"}) is None
+
+
+def test_first_turn_or_unknown_sender_gets_no_note():
+    assert speaker_change_note(None, {"id": "1", "label": "A"}) is None
+    assert speaker_change_note({"id": "1"}, {"id": "", "label": ""}) is None
+
+
+def test_a_new_sender_is_flagged_by_name():
+    note = speaker_change_note(
+        {"id": "1", "label": "Alice"}, {"id": "2", "label": "Bob"}
+    )
+
+    assert note["type"] == "text"
+    text = note["text"]
+    assert text.startswith("<speaker_change>")
+    assert "from Bob" in text
+    assert "not Alice" in text
+
+
+def test_the_system_prompt_explains_both_blocks():
+    assert "<group_history>" in DEFAULT_SYSTEM_PROMPT
+    assert "<speaker_change>" in DEFAULT_SYSTEM_PROMPT
+
+
+# ------------------------------------------------------------ in the runner
+
+
+class _Engine:
+    async def open_thread(self, state, params):
+        return {"thread_id": state.get("thread_id") or "t1"}, not state
+
+
+def _runner(sender_id, name):
+    event = SimpleNamespace(
+        get_sender_id=lambda: sender_id,
+        get_sender_name=lambda: name,
+        message_obj=SimpleNamespace(message_id="m1"),
+    )
+    runner = CodexAgentRunner()
+    runner.req = ProviderRequest(prompt="hi", session_id=UMO)
+    runner.umo = UMO
+    runner.cfg = {}
+    runner.run_context = SimpleNamespace(context=SimpleNamespace(event=event))
+    runner.bridge = SimpleNamespace(fingerprint="fp", dynamic_tools=lambda: [])
+    runner._speaker_change = None
+    runner._active_persona = None
+    runner._additional_context = {}
+    return runner
+
+
+@pytest.fixture
+def prefs(monkeypatch):
+    store = {}
+
+    async def get_async(scope, scope_id, key, default=None):
+        return store.get((scope_id, key), default)
+
+    async def put_async(scope, scope_id, key, value):
+        store[(scope_id, key)] = value
+
+    monkeypatch.setattr(runner_mod.sp, "get_async", get_async)
+    monkeypatch.setattr(runner_mod.sp, "put_async", put_async)
+    monkeypatch.setattr(CodexAgentRunner, "_thread_params", lambda self: {})
+    return store
+
+
+async def _turn(sender_id, name):
+    runner = _runner(sender_id, name)
+    await runner._open_thread(_Engine())
+    return runner._turn_request(None)["input"]
+
+
+def _notes(turn_input):
+    return [i["text"] for i in turn_input if i["text"].startswith("<speaker_change>")]
+
+
+@pytest.mark.asyncio
+async def test_alternating_senders_are_flagged_each_time(prefs):
+    assert _notes(await _turn("1", "Alice")) == []
+    assert _notes(await _turn("1", "Alice")) == []
+    [note] = _notes(await _turn("2", "Bob"))
+    assert "from Bob" in note and "not Alice" in note
+    [note] = _notes(await _turn("1", "Alice"))
+    assert "from Alice" in note and "not Bob" in note
+
+
+@pytest.mark.asyncio
+async def test_the_note_comes_before_the_message(prefs):
+    await _turn("1", "Alice")
+    turn_input = await _turn("2", "Bob")
+
+    assert turn_input[0]["text"].startswith("<speaker_change>")
+    assert turn_input[-1]["text"] == "hi"
+
+
+@pytest.mark.asyncio
+async def test_the_note_names_both_people_with_their_ids(prefs):
+    await _turn("1", "Alice")
+    [note] = _notes(await _turn("2", "Bob"))
+
+    assert "Bob (ID: 2)" in note and "Alice (ID: 1)" in note
+
+
+@pytest.mark.asyncio
+async def test_a_new_thread_starts_without_a_note(prefs):
+    await _turn("1", "Alice")
+    prefs.clear()  # /reset: no thread state left
+
+    assert _notes(await _turn("2", "Bob")) == []
+
+
+# ------------------------------------------------------------ each message once
+
+
+class _Req:
+    def __init__(self):
+        self.units = []
+
+    def add_persistent_context(self, name, content, unit_id=None):
+        self.units.append((name, content, unit_id))
+
+
+def _history(lines_and_ids, pending=(), pending_age=0.0):
+    ctx = gcc.GroupChatContext.__new__(gcc.GroupChatContext)
+    ctx._locks = {}
+    ctx.raw_records = gcc.defaultdict(gcc.deque)
+    ctx._record_ids = gcc.defaultdict(gcc.deque)
+    ctx._pending_triggers = gcc.defaultdict(dict)
+    for line, rid in lines_and_ids:
+        ctx.raw_records[UMO].append(line)
+        ctx._record_ids[UMO].append(rid)
+    for rid in pending:
+        ctx._pending_triggers[UMO][rid] = gcc.time.monotonic() - pending_age
+    return ctx
+
+
+def _trigger(record_id):
+    extras = {"_group_context_record_id": record_id, "_group_context_raw_idx": 99}
+    return SimpleNamespace(
+        unified_msg_origin=UMO,
+        get_extra=lambda key, default=None: extras.get(key, default),
+    )
+
+
+def _shown(req):
+    return [
+        line
+        for _, block, _ in req.units
+        for line in block.splitlines()
+        if line.startswith("[")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_message_is_shown_only_once():
+    ctx = _history([("[a] one", "r1"), ("[b] @bot two", "r2"), ("[a] three", "r3")])
+    first = _Req()
+    await ctx.on_req_llm(_trigger("r2"), first)
+    later = _Req()
+    await ctx.on_req_llm(_trigger("r3"), later)
+
+    assert _shown(first) == ["[a] one"]
+    assert _shown(later) == []
+
+
+@pytest.mark.asyncio
+async def test_another_pending_request_is_not_shown_as_history():
+    # Bob @'d the bot first, but Alice's request is prepared first.
+    ctx = _history(
+        [("[x] chatter", "r1"), ("[Bob] @bot help", "r2"), ("[Alice] @bot hi", "r3")],
+        pending={"r2", "r3"},
+    )
+    alice = _Req()
+    await ctx.on_req_llm(_trigger("r3"), alice)
+    bob = _Req()
+    await ctx.on_req_llm(_trigger("r2"), bob)
+
+    assert _shown(alice) == ["[x] chatter"]
+    # Bob's own message was not consumed by Alice's request.
+    assert list(ctx.raw_records[UMO]) == []
+    assert _shown(bob) == []
+
+
+@pytest.mark.asyncio
+async def test_an_already_consumed_trigger_does_not_eat_other_messages():
+    ctx = _history([("[a] one", "r1"), ("[b] two", "r2")])
+    req = _Req()
+    # r0 was consumed long ago; its stale index 0 must not drop "[a] one".
+    extras = {"_group_context_record_id": "r0", "_group_context_raw_idx": 0}
+    await ctx.on_req_llm(
+        SimpleNamespace(
+            unified_msg_origin=UMO, get_extra=lambda k, d=None: extras.get(k, d)
+        ),
+        req,
+    )
+
+    assert req.units == []
+    assert list(ctx.raw_records[UMO]) == ["[a] one", "[b] two"]
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_that_never_got_a_request_becomes_history():
+    ctx = _history(
+        [("[Bob] @bot help", "r1"), ("[Alice] @bot hi", "r2")],
+        pending={"r1"},
+        pending_age=gcc.PENDING_TRIGGER_TTL_S + 1,
+    )
+    req = _Req()
+    await ctx.on_req_llm(_trigger("r2"), req)
+
+    assert _shown(req) == ["[Bob] @bot help"]

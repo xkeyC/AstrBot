@@ -353,6 +353,32 @@ def build_additional_context(req: ProviderRequest) -> dict[str, JsonObject]:
     return ctx
 
 
+def speaker_change_note(
+    previous: JsonObject | None, current: JsonObject
+) -> JsonObject | None:
+    """Input item flagging that this turn comes from a different person.
+
+    One thread serves the whole group, so consecutive turns can come from
+    different senders; the model otherwise tends to answer them as one person
+    and carry one sender's request over into the other's reply.
+    """
+    prev_id = str((previous or {}).get("id") or "")
+    cur_id = str(current.get("id") or "")
+    if not prev_id or not cur_id or prev_id == cur_id:
+        return None
+    prev_label = str((previous or {}).get("label") or prev_id)
+    cur_label = str(current.get("label") or cur_id)
+    text = (
+        "<speaker_change>\n"
+        f"The person talking to you changed: this message is from {cur_label}, "
+        f"not {prev_label} who sent the previous request. Treat it as a new "
+        "request from a different person; do not merge it with the previous "
+        "sender's requests or attribute either person's words to the other.\n"
+        "</speaker_change>"
+    )
+    return {"type": "text", "text": text, "text_elements": []}
+
+
 PERSONA_ANCHORS = ("persona", "persona_examples", "default_persona")
 
 
@@ -432,6 +458,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         )
         self._engine: CodexEngine | None = None
         self._thread_id: str | None = None
+        self._speaker_change: JsonObject | None = None
         self._turn_running = False
         self._aborted = False
         self._active: ActiveTurn | None = None
@@ -508,6 +535,18 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         except Exception:  # noqa: BLE001
             return ""
 
+    def _sender(self) -> JsonObject:
+        """Who triggered this turn: id (for comparing) and a display label."""
+        event = getattr(getattr(self.run_context, "context", None), "event", None)
+        sender_id = self._sender_id()
+        try:
+            name = str(event.get_sender_name() or "") if event is not None else ""
+        except Exception:  # noqa: BLE001
+            name = ""
+        # With the id, as group metadata and history show it: nicknames repeat.
+        label = f"{name} (ID: {sender_id})" if name and sender_id else name or sender_id
+        return {"id": sender_id, "label": label}
+
     # ---------------------------------------------------------------- threads
 
     def _thread_params(self) -> JsonObject:
@@ -532,6 +571,11 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         )
         state = state if isinstance(state, dict) else {}
         info, started_new = await engine.open_thread(state, self._thread_params())
+        sender = self._sender()
+        previous = None if started_new else state.get("last_sender")
+        self._speaker_change = speaker_change_note(
+            previous if isinstance(previous, dict) else None, sender
+        )
         catalog = {} if started_new else state.get("personas") or {}
         catalog, self._additional_context, self._active_persona = persona_context(
             self.req, catalog if isinstance(catalog, dict) else {}
@@ -552,6 +596,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 "rollout_path": info.get("rollout_path") or state.get("rollout_path"),
                 "tools_fp": self.bridge.fingerprint,
                 "personas": catalog,
+                # Who triggered the latest turn, to flag the next one from
+                # someone else.
+                "last_sender": sender if sender["id"] else previous,
             },
         )
         return info["thread_id"], tools_update
@@ -577,6 +624,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
     def _turn_request(self, tools_update: list | None) -> JsonObject:
         turn_input = build_turn_input(self.req)
+        if self._speaker_change is not None:
+            turn_input.insert(0, self._speaker_change)
         if self._active_persona is not None:
             turn_input.insert(0, self._active_persona)
         request: JsonObject = {
