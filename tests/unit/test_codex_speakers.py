@@ -104,10 +104,11 @@ class _Engine:
         return {"thread_id": state.get("thread_id") or "t1"}, not state
 
 
-def _runner(sender_id, name):
+def _runner(sender_id, name, platform="aiocqhttp"):
     event = SimpleNamespace(
         get_sender_id=lambda: sender_id,
         get_sender_name=lambda: name,
+        get_platform_name=lambda: platform,
         message_obj=SimpleNamespace(message_id="m1"),
     )
     runner = CodexAgentRunner()
@@ -138,10 +139,15 @@ def prefs(monkeypatch):
     return store
 
 
-async def _turn(sender_id, name):
-    runner = _runner(sender_id, name)
-    await runner._open_thread(_Engine())
-    return runner._turn_request(None)["input"]
+async def _turn(sender_id, name, *, accepted=True, platform="aiocqhttp", req=None):
+    runner = _runner(sender_id, name, platform)
+    if req is not None:
+        runner.req = req
+    thread_id, _ = await runner._open_thread(_Engine())
+    turn_input = runner._turn_request(None)["input"]
+    if accepted:
+        await runner._remember_sender(thread_id)
+    return turn_input
 
 
 def _notes(turn_input):
@@ -213,6 +219,8 @@ def _trigger(record_id):
     return SimpleNamespace(
         unified_msg_origin=UMO,
         get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=extras.__setitem__,
+        extras=extras,
     )
 
 
@@ -260,13 +268,9 @@ async def test_an_already_consumed_trigger_does_not_eat_other_messages():
     ctx = _history([("[a] one", "r1"), ("[b] two", "r2")])
     req = _Req()
     # r0 was consumed long ago; its stale index 0 must not drop "[a] one".
-    extras = {"_group_context_record_id": "r0", "_group_context_raw_idx": 0}
-    await ctx.on_req_llm(
-        SimpleNamespace(
-            unified_msg_origin=UMO, get_extra=lambda k, d=None: extras.get(k, d)
-        ),
-        req,
-    )
+    event = _trigger("r0")
+    event.extras["_group_context_raw_idx"] = 0
+    await ctx.on_req_llm(event, req)
 
     assert req.units == []
     assert list(ctx.raw_records[UMO]) == ["[a] one", "[b] two"]
@@ -283,3 +287,76 @@ async def test_a_trigger_that_never_got_a_request_becomes_history():
     await ctx.on_req_llm(_trigger("r2"), req)
 
     assert _shown(req) == ["[Bob] @bot help"]
+    # An expired trigger shown as history is no longer tracked as pending.
+    assert ctx._pending_triggers[UMO] == {}
+
+
+@pytest.mark.asyncio
+async def test_history_of_a_request_that_never_ran_is_given_back():
+    ctx = _history([("[a] one", "r1"), ("[b] two", "r2"), ("[c] @bot hi", "r3")])
+    event = _trigger("r3")
+    await ctx.on_req_llm(event, _Req())
+    assert list(ctx.raw_records[UMO]) == []
+
+    # e.g. the chat was busy: the request never reached the model.
+    await runner_mod.release_group_history(event)
+
+    assert list(ctx.raw_records[UMO]) == ["[a] one", "[b] two"]
+    later = _Req()
+    ctx.raw_records[UMO].append("[d] @bot again")
+    ctx._record_ids[UMO].append("r4")
+    await ctx.on_req_llm(_trigger("r4"), later)
+    assert _shown(later) == ["[a] one", "[b] two"]
+
+
+@pytest.mark.asyncio
+async def test_history_the_model_saw_is_not_given_back():
+    ctx = _history([("[a] one", "r1"), ("[c] @bot hi", "r2")])
+    event = _trigger("r2")
+    await ctx.on_req_llm(event, _Req())
+
+    runner_mod.keep_group_history(event)
+    await runner_mod.release_group_history(event)
+
+    assert list(ctx.raw_records[UMO]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_was_not_accepted_does_not_become_the_last_sender(prefs):
+    await _turn("1", "Alice")
+    await _turn("2", "Bob", accepted=False)  # e.g. the submit failed
+
+    # The model never saw Bob, so Alice is not flagged as a change.
+    assert _notes(await _turn("1", "Alice")) == []
+
+
+@pytest.mark.asyncio
+async def test_scheduled_turns_are_not_a_change_of_person(prefs):
+    await _turn("1", "Alice")
+    assert _notes(await _turn("1", "Scheduler", platform="cron")) == []
+    # Nor do they replace the last person who talked.
+    assert _notes(await _turn("1", "Alice")) == []
+
+
+@pytest.mark.asyncio
+async def test_the_note_sits_between_the_chatter_and_the_message(prefs):
+    await _turn("1", "Alice")
+    req = ProviderRequest(prompt="hi", session_id=UMO)
+    req.add_persistent_context("group_history", "<group_history>x</group_history>")
+    req.add_persistent_context("message_meta", "Sender: Bob (ID: 2)")
+    texts = [i["text"] for i in await _turn("2", "Bob", req=req)]
+
+    assert [t.split(">")[0] for t in texts] == [
+        '<context_unit name="group_history"',
+        "<speaker_change",
+        '<context_unit name="message_meta"',
+        "hi",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_mention_names_who_was_mentioned():
+    ctx = gcc.GroupChatContext.__new__(gcc.GroupChatContext)
+    line = await ctx._format_message(_event(at_self=True), {"image_caption": False})
+
+    assert "[At: bot (ID: 999)]" in line

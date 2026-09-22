@@ -8,6 +8,8 @@ from astrbot.core import logger
 from astrbot.core.agent.runners.codex.codex_agent_runner import (
     CodexAgentRunner,
     build_turn_input,
+    keep_group_history,
+    release_group_history,
 )
 from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
 from astrbot.core.agent.runners.codex.native import try_steer
@@ -366,6 +368,8 @@ class ThirdPartyAgentSubStage(Stage):
 
         # call event hook
         if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
+            # Stopped before the model: give back the group history it took.
+            await release_group_history(event)
             return
 
         # Same sender while a Codex turn runs: steer into that turn (after the
@@ -378,6 +382,7 @@ class ThirdPartyAgentSubStage(Stage):
             prompt=req.prompt or "",
         )
         if target is not None:
+            keep_group_history(event)
             event.set_extra("_follow_up_captured", {"target_run_id": target})
             return
 

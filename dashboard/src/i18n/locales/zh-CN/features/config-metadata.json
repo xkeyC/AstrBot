@@ -358,7 +358,7 @@
         },
         "identifier": {
           "description": "用户识别",
-          "hint": "启用后,会在提示词前包含用户 ID 信息。"
+          "hint": "启用后，私聊消息也会带上用户 ID。群聊消息始终带发言人 ID，用来区分同名的人。"
         },
         "group_name_display": {
           "description": "显示群名称",

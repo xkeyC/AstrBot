@@ -353,6 +353,50 @@ def build_additional_context(req: ProviderRequest) -> dict[str, JsonObject]:
     return ctx
 
 
+GROUP_HISTORY_RESTORE_KEY = "_group_context_restore"
+_META_PREFIX = '<context_unit name="message_meta"'
+
+
+async def release_group_history(event: T.Any) -> None:
+    """Gives back the group history a request took, when it never ran.
+
+    Group chat context hands each earlier message to exactly one request; a
+    request refused or failed before the model saw it must return them, or
+    they are lost.
+    """
+    get_extra = getattr(event, "get_extra", None)
+    if not callable(get_extra):
+        return
+    restore = get_extra(GROUP_HISTORY_RESTORE_KEY)
+    if not callable(restore):
+        return
+    keep_group_history(event)
+    try:
+        await restore()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not give back group history: %s", e)
+
+
+def keep_group_history(event: T.Any) -> None:
+    """The model has the history now; it must not be given back later."""
+    set_extra = getattr(event, "set_extra", None)
+    if callable(set_extra):
+        set_extra(GROUP_HISTORY_RESTORE_KEY, None)
+
+
+def _message_start(turn_input: list[JsonObject]) -> int:
+    """Index where the message being answered starts: its metadata, or the
+    first item after the leading context units."""
+    for index, item in enumerate(turn_input):
+        if str(item.get("text") or "").startswith(_META_PREFIX):
+            return index
+    for index, item in enumerate(turn_input):
+        text = str(item.get("text") or "")
+        if not text.startswith(("<context_unit", "<request_context")):
+            return index
+    return len(turn_input)
+
+
 def speaker_change_note(
     previous: JsonObject | None, current: JsonObject
 ) -> JsonObject | None:
@@ -522,6 +566,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         if self._turn_running and self._engine and self._thread_id:
             await self._engine.interrupt(self._thread_id)
 
+    def _event(self) -> T.Any:
+        return getattr(getattr(self.run_context, "context", None), "event", None)
+
     def _message_id(self) -> str | None:
         event = getattr(getattr(self.run_context, "context", None), "event", None)
         message_obj = getattr(event, "message_obj", None)
@@ -536,8 +583,17 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             return ""
 
     def _sender(self) -> JsonObject:
-        """Who triggered this turn: id (for comparing) and a display label."""
+        """Who triggered this turn: id (for comparing) and a display label.
+
+        Empty for scheduled and background-completion turns: those are the
+        system reporting back, not a person talking.
+        """
         event = getattr(getattr(self.run_context, "context", None), "event", None)
+        try:
+            if event is not None and event.get_platform_name() == "cron":
+                return {"id": "", "label": ""}
+        except Exception:  # noqa: BLE001
+            pass
         sender_id = self._sender_id()
         try:
             name = str(event.get_sender_name() or "") if event is not None else ""
@@ -571,11 +627,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         )
         state = state if isinstance(state, dict) else {}
         info, started_new = await engine.open_thread(state, self._thread_params())
-        sender = self._sender()
+        self._turn_sender = self._sender()
         previous = None if started_new else state.get("last_sender")
-        self._speaker_change = speaker_change_note(
-            previous if isinstance(previous, dict) else None, sender
-        )
+        previous = previous if isinstance(previous, dict) else None
+        self._speaker_change = speaker_change_note(previous, self._turn_sender)
         catalog = {} if started_new else state.get("personas") or {}
         catalog, self._additional_context, self._active_persona = persona_context(
             self.req, catalog if isinstance(catalog, dict) else {}
@@ -596,12 +651,32 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 "rollout_path": info.get("rollout_path") or state.get("rollout_path"),
                 "tools_fp": self.bridge.fingerprint,
                 "personas": catalog,
-                # Who triggered the latest turn, to flag the next one from
-                # someone else.
-                "last_sender": sender if sender["id"] else previous,
+                # Who triggered the latest turn the model saw; updated once
+                # this turn is accepted (_remember_sender).
+                "last_sender": previous,
             },
         )
         return info["thread_id"], tools_update
+
+    async def _remember_sender(self, thread_id: str) -> None:
+        """Records this turn's sender once Codex accepted the turn."""
+        sender = getattr(self, "_turn_sender", None)
+        if not sender or not sender.get("id"):
+            return
+        try:
+            state = await sp.get_async(
+                scope="umo", scope_id=self.umo, key=CODEX_THREAD_STATE_KEY, default={}
+            )
+            if not isinstance(state, dict) or state.get("thread_id") != thread_id:
+                return
+            await sp.put_async(
+                scope="umo",
+                scope_id=self.umo,
+                key=CODEX_THREAD_STATE_KEY,
+                value={**state, "last_sender": sender},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not record the turn's sender: %s", e)
 
     # ------------------------------------------------------------------- turn
 
@@ -625,7 +700,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
     def _turn_request(self, tools_update: list | None) -> JsonObject:
         turn_input = build_turn_input(self.req)
         if self._speaker_change is not None:
-            turn_input.insert(0, self._speaker_change)
+            # Right before the message it describes: after the earlier group
+            # chatter, in front of the sender metadata.
+            turn_input.insert(_message_start(turn_input), self._speaker_change)
         if self._active_persona is not None:
             turn_input.insert(0, self._active_persona)
         request: JsonObject = {
@@ -790,11 +867,15 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         active.turn_id = str(sub.get("turn_id") or "")
                     except BaseException:
                         active.aborted = True
+                        await release_group_history(self._event())
                         raise
                     finally:
                         # Release a follow-up waiting on the turn id, including
                         # when the submit failed.
                         active.ready.set()
+                    # The model has this turn's input now, group history too.
+                    keep_group_history(self._event())
+                    await self._remember_sender(thread_id)
                     self._turn_running = True
                     while True:
                         remaining = timeout - (time.monotonic() - started)
@@ -972,6 +1053,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         )
 
         except SessionBusy as busy:
+            await release_group_history(self._event())
             logger.info(
                 "Codex session %s is busy; %d turns already queued.",
                 self.umo,

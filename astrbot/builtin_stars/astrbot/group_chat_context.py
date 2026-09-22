@@ -45,6 +45,9 @@ GROUP_HISTORY_HEADER = (
 )
 GROUP_HISTORY_FOOTER = "\n</group_history>"
 DEFAULT_GROUP_MESSAGE_MAX_CNT = 1000
+# Event extra holding a coroutine function that puts the group history a
+# request took back, for a request that never reached the model.
+GROUP_HISTORY_RESTORE_KEY = "_group_context_restore"
 # A message that triggered the bot but has had no request prepared after this
 # long never will (filtered, rate limited, ...): it becomes plain history.
 PENDING_TRIGGER_TTL_S = 120.0
@@ -235,8 +238,26 @@ class GroupChatContext:
                 record_ids = self._record_ids[umo]
                 record_ids.clear()
                 record_ids.extend(remaining_ids)
+            # Triggers shown here (expired) or gone are no longer pending.
+            still_there = set(remaining_ids)
+            for rid in [rid for rid in triggers if rid not in still_there]:
+                del triggers[rid]
 
         if records_to_inject:
+            # Given back if the request never reaches the model (a plugin
+            # stopped it, the chat was busy, the submit failed), so the next
+            # request shows these messages instead of losing them.
+            taken = list(zip(records_to_inject, injected_ids))
+
+            async def restore() -> None:
+                async with self._get_lock(umo):
+                    records = self.raw_records[umo]
+                    record_ids = self._record_ids[umo]
+                    records.extendleft(text for text, _ in reversed(taken))
+                    if id_list:
+                        record_ids.extendleft(rid for _, rid in reversed(taken))
+
+            event.set_extra(GROUP_HISTORY_RESTORE_KEY, restore)
             # Stored with this turn in front of the triggering message, so later
             # requests reuse the delta from the cached history; the unit id keeps
             # a replayed delta from being stored twice.
@@ -318,7 +339,8 @@ class GroupChatContext:
                 if is_at_self:
                     # Past, not pending: the header says not to act on it.
                     parts.insert(1, "[mentioned you] ")
-                parts.append(f" [At: {comp.name}]")
+                target = f"{comp.name} (ID: {comp.qq})" if comp.qq else comp.name
+                parts.append(f" [At: {target}]")
             elif isinstance(comp, Reply):
                 if comp.message_str:
                     parts.append(

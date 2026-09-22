@@ -345,7 +345,7 @@
         },
         "identifier": {
           "description": "User Identification",
-          "hint": "When enabled, user ID information will be included in the prompt."
+          "hint": "When enabled, private messages also carry the user ID. Group messages always name the sender with their ID, to tell apart people with the same nickname."
         },
         "group_name_display": {
           "description": "Display Group Name",
