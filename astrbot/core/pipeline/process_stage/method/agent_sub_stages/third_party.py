@@ -8,6 +8,7 @@ from astrbot.core import logger
 from astrbot.core.agent.runners.codex.codex_agent_runner import (
     CodexAgentRunner,
     build_turn_input,
+    drop_group_history,
     keep_group_history,
     release_group_history,
 )
@@ -253,12 +254,16 @@ class ThirdPartyAgentSubStage(Stage):
         event: AstrMessageEvent,
         custom_error_message: str | None,
         close_runner_once: Callable[[], Awaitable[None]],
-        mark_stream_consumed: Callable[[], None],
+        mark_stream_consumed: Callable[[], bool],
     ) -> AsyncGenerator[None, None]:
         aggregator = _RunnerResultAggregator()
 
         async def _stream_runner_chain() -> AsyncGenerator[MessageChain, None]:
-            mark_stream_consumed()
+            if mark_stream_consumed():
+                # The watchdog closed the runner first and gave the group
+                # history back; the late run goes ahead without it, so the
+                # next request is the one that shows it.
+                drop_group_history(getattr(runner, "req", None))
             try:
                 async for chain, is_error in run_third_party_agent(
                     runner,
@@ -425,11 +430,13 @@ class ThirdPartyAgentSubStage(Stage):
             # after a started run this is a no-op.
             await release_group_history(event)
 
-        def mark_stream_consumed() -> None:
+        def mark_stream_consumed() -> bool:
+            """Marks the stream consumed; True if the runner was closed first."""
             nonlocal stream_consumed
             stream_consumed = True
             if stream_watchdog_task and not stream_watchdog_task.done():
                 stream_watchdog_task.cancel()
+            return runner_closed
 
         try:
             await runner.reset(

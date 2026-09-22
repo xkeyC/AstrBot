@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -168,11 +169,33 @@ async def test_a_failed_stats_send_does_not_cost_the_reply():
     assert results == [(runner.reply, False)]
 
 
+def _group_request():
+    from astrbot.core.provider.entities import ProviderRequest
+
+    req = ProviderRequest(prompt="hi")
+    req.add_persistent_context("group_history", "<group_history>x</group_history>")
+    req.add_persistent_context("message_meta", "Sender: Bob (ID: 2)")
+    return req
+
+
 async def _process_with(
-    monkeypatch, *, hook_stops=False, steer=None, reset=None, streaming=False
+    monkeypatch,
+    *,
+    hook_stops=False,
+    steer=None,
+    reset=None,
+    streaming=False,
+    raises=None,
+    mock_history=True,
+    watchdog_s=None,
 ):
-    """Runs the stage once; returns the (release, keep) mocks for group history."""
+    """Runs the stage once.
+
+    Returns (release, keep, event, runner, stage). With mock_history off the
+    real release/keep run, against a restore callback recorded on the event.
+    """
     runner = MagicMock()
+    runner.req = _group_request()
     runner.reset = reset or AsyncMock()
     runner.get_final_llm_resp.return_value = LLMResponse(
         role="assistant", result_chain=MessageChain().message("done")
@@ -180,6 +203,8 @@ async def _process_with(
     runner.close = AsyncMock()
 
     async def step_until_done(max_step: int = 30):
+        # An accepted turn keeps its history, as the Codex runner does.
+        third_party.keep_group_history(event)
         if False:
             yield None
 
@@ -194,8 +219,9 @@ async def _process_with(
             return runner
 
     release, keep = AsyncMock(), MagicMock()
-    monkeypatch.setattr(third_party, "release_group_history", release)
-    monkeypatch.setattr(third_party, "keep_group_history", keep)
+    if mock_history:
+        monkeypatch.setattr(third_party, "release_group_history", release)
+        monkeypatch.setattr(third_party, "keep_group_history", keep)
     monkeypatch.setattr(third_party, "CodexAgentRunner", RunnerFactory)
     monkeypatch.setattr(third_party, "prepare_codex_request", AsyncMock())
     monkeypatch.setattr(third_party, "try_steer", steer or AsyncMock(return_value=None))
@@ -219,23 +245,42 @@ async def _process_with(
     }
     stage = third_party.ThirdPartyAgentSubStage()
     await stage.initialize(_stage_ctx(config))
+    if watchdog_s is not None:
+        stage.stream_consumption_close_timeout_sec = watchdog_s
     stage._resolve_persona_custom_error_message = AsyncMock(return_value=None)
+    extras = {}
     event = MagicMock()
     event.message_str = "hello"
     event.unified_msg_origin = "qq:GroupMessage:g"
     event.message_obj.message = []
     event.platform_meta.support_streaming_message = True
-    event.get_extra.return_value = None
-    try:
+    event.get_extra.side_effect = lambda key, default=None: extras.get(key, default)
+    event.set_extra.side_effect = extras.__setitem__
+    event.restored = []
+
+    async def restore():
+        event.restored.append(True)
+
+    extras[third_party_restore_key()] = restore
+    if raises is not None:
+        with pytest.raises(raises):
+            [item async for item in stage.process(event, "")]
+    else:
         [item async for item in stage.process(event, "")]
-    except RuntimeError:
-        pass
-    return release, keep, event
+    return release, keep, event, runner, stage
+
+
+def third_party_restore_key():
+    from astrbot.core.agent.runners.codex.codex_agent_runner import (
+        GROUP_HISTORY_RESTORE_KEY,
+    )
+
+    return GROUP_HISTORY_RESTORE_KEY
 
 
 @pytest.mark.asyncio
 async def test_a_request_stopped_by_a_plugin_gives_group_history_back(monkeypatch):
-    release, keep, event = await _process_with(monkeypatch, hook_stops=True)
+    release, keep, event, *_ = await _process_with(monkeypatch, hook_stops=True)
 
     release.assert_awaited_once_with(event)
     keep.assert_not_called()
@@ -243,7 +288,7 @@ async def test_a_request_stopped_by_a_plugin_gives_group_history_back(monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_steered_request_keeps_group_history(monkeypatch):
-    release, keep, event = await _process_with(
+    release, keep, event, *_ = await _process_with(
         monkeypatch, steer=AsyncMock(return_value="run-1")
     )
 
@@ -252,9 +297,11 @@ async def test_a_steered_request_keeps_group_history(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_steer_gives_group_history_back(monkeypatch):
-    release, _, event = await _process_with(
-        monkeypatch, steer=AsyncMock(side_effect=RuntimeError("boom"))
+async def test_a_failed_steer_gives_group_history_back_and_still_fails(monkeypatch):
+    release, _, event, *_ = await _process_with(
+        monkeypatch,
+        steer=AsyncMock(side_effect=RuntimeError("boom")),
+        raises=RuntimeError,
     )
 
     release.assert_awaited_once_with(event)
@@ -264,10 +311,39 @@ async def test_a_failed_steer_gives_group_history_back(monkeypatch):
 async def test_a_streamed_run_that_never_started_gives_group_history_back(
     monkeypatch,
 ):
-    release, _, event = await _process_with(
+    release, _, event, *_ = await _process_with(
         monkeypatch,
         streaming=True,
         reset=AsyncMock(side_effect=RuntimeError("bad config")),
+        raises=RuntimeError,
     )
 
-    release.assert_awaited_with(event)
+    release.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_run_does_not_give_history_back(monkeypatch):
+    # Real release/keep: the finally's release must be a no-op after keep.
+    _, _, event, *_ = await _process_with(monkeypatch, mock_history=False)
+
+    assert event.restored == []
+
+
+@pytest.mark.asyncio
+async def test_an_unconsumed_stream_gives_history_back_and_a_late_run_drops_it(
+    monkeypatch,
+):
+    _, _, event, runner, _ = await _process_with(
+        monkeypatch, streaming=True, mock_history=False, watchdog_s=0
+    )
+    await asyncio.sleep(0.05)  # the watchdog fires: nobody consumed the stream
+
+    assert event.restored == [True]
+    # The respond stage turns up late after all: the run goes ahead, without
+    # the history it gave back.
+    result = event.set_result.call_args_list[0].args[0]
+    [_ async for _ in result.async_stream]
+    units = [p.text for p in runner.req.persistent_user_context_parts]
+    assert not any("group_history" in u for u in units)
+    assert any("message_meta" in u for u in units)
+    assert event.restored == [True]

@@ -355,6 +355,7 @@ def build_additional_context(req: ProviderRequest) -> dict[str, JsonObject]:
 
 GROUP_HISTORY_RESTORE_KEY = "_group_context_restore"
 _META_PREFIX = '<context_unit name="message_meta"'
+_GROUP_HISTORY_PREFIX = '<context_unit name="group_history"'
 
 
 async def release_group_history(event: T.Any) -> None:
@@ -382,6 +383,17 @@ def keep_group_history(event: T.Any) -> None:
     set_extra = getattr(event, "set_extra", None)
     if callable(set_extra):
         set_extra(GROUP_HISTORY_RESTORE_KEY, None)
+
+
+def drop_group_history(req: ProviderRequest | None) -> None:
+    """Removes the group history a request carries, after it was given back."""
+    if req is None:
+        return
+    req.persistent_user_context_parts = [
+        part
+        for part in req.persistent_user_context_parts
+        if not str(getattr(part, "text", "")).startswith(_GROUP_HISTORY_PREFIX)
+    ]
 
 
 def _message_start(turn_input: list[JsonObject]) -> int:
