@@ -1,0 +1,41 @@
+# Connect Mumble
+
+The Mumble adapter connects to a Mumble server (1.5 or later) as a bot, sending and receiving text in channels and private messages. With realtime voice on, it also talks in channels by voice (full duplex), powered by Codex realtime voice.
+
+## Create the Mumble platform adapter
+
+Open the `Bots` page, click `+ Create Bot`, choose `Mumble`, turn on `Enable` and fill in:
+
+- `Mumble Server` and `Mumble Port` (default `64738`)
+- `Bot Username`: the name the bot shows in Mumble
+- `Server Password`: if the server has one, or the password of the bot's registered account
+- `Initial Channel`: channel name or path from the root (e.g. `Games/Lobby`) to join; empty stays in the default channel
+- `Channel Text Wake Prefix`: `!` by default, see below
+
+On first connect a client certificate is generated under `data/mumble/<platform id>/`, so the server recognises the bot and an admin can register it and grant permissions in the Mumble client. You can also point `Client Certificate` at your own.
+
+## Conversations and waking
+
+- **The whole server is one group conversation** (session id `server`), whichever channel the bot is in, so an admin can move the bot at any time; replies go to the channel the message came from.
+- **Private messages** are one conversation per user. The user id is the client certificate hash (official clients always have one); use it when configuring admins. Users with neither a certificate nor a registration only keep their id for the current connection.
+- Mumble has no @ mentions. **Channel text starting with the wake prefix** (e.g. `!what's the weather`) wakes the bot, like @-ing it; private messages always do. The global wake prefix (e.g. `/` commands) still works.
+
+## Realtime voice
+
+Requires the `Codex agent runner` signed in with a **ChatGPT plan that includes voice**. Voice uses Codex realtime over WebRTC; no API key is needed.
+
+- It joins in when someone speaks in the bot's channel. In channels it **only answers when called by name** (enforced by the prompt, so it may occasionally chime in). **Whispers** to the bot are always answered, and answered by whisper.
+- Tasks asked by voice run on a separate **voice agent thread**: one for channel voice and one per whisper partner, persisted and reused. It has no AstrBot tools and no execution environment, so it cannot reach other conversations. It follows the runner's limits (model, reasoning effort, web search, sandbox), with sub-agents and ChatGPT connectors off. With memories enabled on the runner it reads the global memories and those of its paired conversation (the server group for channel voice, the user's private chat for whispers), but never writes or deletes global memories. (With `unique_session` on, group chats are split per user, while channel voice still pairs with the single server-wide group conversation.)
+- **Standby**: after `Voice Standby Timeout` (default 300 s) without recognised speech, realtime voice disconnects; new speech resumes it automatically, including the words that woke it.
+- **Mute / unmute**: send `wake prefix + mute` (or `闭麦`, or with the global wake prefix) in a channel, or just `mute` in a private message, and the bot stops listening and speaking and shows as muted; `unmute` (`开麦`) restores it. Muted for over a minute, it drops its voice sessions.
+- Voice options: `Voice Wake Name` and `Voice Wake Aliases`, `Voice` (juniper, maple, spruce, ember, vale, breeze, arbor, sol, cove; default cove), `Realtime Model`, `Extra Voice Prompt`, `Voice Agent Instructions`.
+
+## Run a Mumble server
+
+The official image works as is:
+
+```bash
+docker run -d --name mumble-server -p 64738:64738/tcp -p 64738:64738/udp mumblevoip/mumble-server
+```
+
+The first start logs the `SuperUser` password. The bot only uses TCP (voice is tunnelled over it), so no extra ports are needed.
