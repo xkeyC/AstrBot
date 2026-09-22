@@ -54,8 +54,10 @@ VOICE_THREAD_CONFIG = {
     "features.memories": False,
     # Nothing could deliver a generated image from a voice conversation.
     "features.image_generation": False,
-    # No sub-agents, whatever thread_config says.
+    # No sub-agents, whatever thread_config says (multi_agent_v2 would take
+    # precedence over agents.enabled).
     "agents.enabled": False,
+    "features.multi_agent_v2": False,
 }
 SDP_TIMEOUT = 30.0
 CONNECT_TIMEOUT = 15.0
@@ -211,6 +213,7 @@ class VoiceSession:
         self._thread_id: str | None = None
         self._events_queue: asyncio.Queue | None = None
         self._realtime_requested = False
+        self._thread_released = False
         self._pc: RTCPeerConnection | None = None
         self._tasks: list[asyncio.Task] = []
         self._start_task: asyncio.Task | None = None
@@ -428,6 +431,10 @@ class VoiceSession:
                 self._request_close("voice thread closed")
                 return
 
+    @property
+    def closing(self) -> bool:
+        return self._closed
+
     def _request_close(self, reason: str) -> asyncio.Task:
         """Starts closing (once) and returns the task doing it."""
         if self._close_task is None:
@@ -452,40 +459,54 @@ class VoiceSession:
             await asyncio.shield(task)
 
     async def _close(self, reason: str) -> None:
-        start = self._start_task
-        if start is not None and not start.done():
-            # A start stops at its next step once closed; let it, so that
-            # everything it created is known here and the realtime stop is
-            # sent after its start.
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(asyncio.shield(start), CLOSE_WAIT)
         try:
+            start = self._start_task
+            if start is not None and not start.done():
+                # A start stops at its next step once closed; let it, so that
+                # everything it created is known here and the realtime stop is
+                # sent after its start.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(start), CLOSE_WAIT)
+                if not start.done():
+                    # Still inside a slow call (opening the thread, starting
+                    # realtime): release what it creates once it returns.
+                    start.add_done_callback(
+                        lambda _task: asyncio.ensure_future(self._release())
+                    )
             logger.info("Mumble voice session %s closed: %s", self.key, reason)
-            engine, thread_id = self._engine, self._thread_id
-            if self._realtime_requested and engine is not None and thread_id:
-                with contextlib.suppress(Exception):
-                    await engine.rt.realtime_stop(thread_id)
-            if self._pc is not None:
-                with contextlib.suppress(Exception):
-                    await self._pc.close()
-            current = asyncio.current_task()
-            for task in self._tasks:
-                if task is not current:
-                    task.cancel()
-            self.outbound.finish()
-            if engine is not None and thread_id is not None:
-                pump = engine.pumps.get(thread_id)
-                if (
-                    pump is not None
-                    and pump.route is not None
-                    and pump.route.events is self._events_queue
-                ):
-                    pump.close_turn()
-                # Unload the thread; the next session resumes it from its rollout.
-                await engine.forget_thread(thread_id)
+            await self._release()
         finally:
             self.mixer.clear()
             self._on_closed(self)
+
+    async def _release(self) -> None:
+        """Releases what exists now; each resource only once, so it can run
+        again for what a late start created afterwards."""
+        engine, thread_id = self._engine, self._thread_id
+        if self._realtime_requested and engine is not None and thread_id:
+            self._realtime_requested = False
+            with contextlib.suppress(Exception):
+                await engine.rt.realtime_stop(thread_id)
+        pc, self._pc = self._pc, None
+        if pc is not None:
+            with contextlib.suppress(Exception):
+                await pc.close()
+        current = asyncio.current_task()
+        for task in self._tasks:
+            if task is not current:
+                task.cancel()
+        self.outbound.finish()
+        if engine is not None and thread_id is not None and not self._thread_released:
+            self._thread_released = True
+            pump = engine.pumps.get(thread_id)
+            if (
+                pump is not None
+                and pump.route is not None
+                and pump.route.events is self._events_queue
+            ):
+                pump.close_turn()
+            # Unload the thread; the next session resumes it from its rollout.
+            await engine.forget_thread(thread_id)
 
 
 def channel_prompt(options: VoiceOptions) -> str:

@@ -132,6 +132,7 @@ def test_voice_thread_config_follows_runner_limits(monkeypatch):
         "features.memories": False,
         "features.image_generation": False,
         "agents.enabled": False,
+        "features.multi_agent_v2": False,
     }
 
 
@@ -192,3 +193,22 @@ async def test_cancelled_close_still_releases(engine):
     assert closed == [session]
     assert engine.rt.calls == ["start", "stop"]
     await session.close("again")  # already released: returns at once
+
+
+@pytest.mark.asyncio
+async def test_start_slower_than_close_wait_is_released_later(engine, monkeypatch):
+    monkeypatch.setattr(voice, "CLOSE_WAIT", 0.05)
+    closed: list = []
+    session = make_session(closed)
+    session.launch(lambda exc: None)
+    await asyncio.sleep(0)  # the start is stuck opening the thread
+    await asyncio.wait_for(session.close("standby"), 5)
+    assert closed == [session]
+    assert engine.forgotten == []  # no thread yet
+    engine.gate.set()  # the thread opens after the close gave up waiting
+    for _ in range(100):
+        if engine.forgotten:
+            break
+        await asyncio.sleep(0.01)
+    assert engine.forgotten == ["t1"]  # released once the start returned
+    assert engine.rt.calls == []

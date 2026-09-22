@@ -415,6 +415,8 @@ class MumblePlatformAdapter(Platform):
         self.muted = muted
         self.muted_at = time.monotonic()
         for session in self.voice_sessions.values():
+            if session.closing:
+                continue  # stays muted until released
             session.outbound.muted = muted
             if muted:
                 session.mixer.clear()
