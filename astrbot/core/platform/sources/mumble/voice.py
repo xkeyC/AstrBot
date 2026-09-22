@@ -41,6 +41,22 @@ REALTIME_VOICES = (
     "sol",
     "cove",
 )
+# Per-thread overrides of the voice agent, on top of the runner's engine
+# config (model, provider, effort, web search, sandbox, approvals and
+# agents.enabled=false all come from there, as for chat threads). These keep
+# the voice thread from reaching anything beyond its own conversation.
+VOICE_THREAD_CONFIG = {
+    # No tools to orchestrate, so no code mode (and no host needed).
+    "model_tool_mode": "direct",
+    # ChatGPT apps (connectors) would expose the account's connected data.
+    "features.apps": False,
+    # Memories: off unless the runner enables them; see VoiceSession._start.
+    "features.memories": False,
+    # Nothing could deliver a generated image from a voice conversation.
+    "features.image_generation": False,
+    # No sub-agents, whatever thread_config says.
+    "agents.enabled": False,
+}
 SDP_TIMEOUT = 30.0
 CONNECT_TIMEOUT = 15.0
 # Pause between the model reporting it started and sending it audio.
@@ -105,19 +121,43 @@ class VoiceOptions:
     agent_instructions: str = ""
 
 
+def _runner_config() -> dict:
+    from astrbot.core.config.agent_runner import normalize_agent_runner
+
+    return normalize_agent_runner(astrbot_config.get("agent_runner"))["config"]
+
+
 async def _codex_engine():
     """The Codex engine the chat runner uses: same runtime, same account."""
     from astrbot.core.agent.runners.codex.codex_agent_runner import engine_options
     from astrbot.core.agent.runners.codex.native import CodexEngine
-    from astrbot.core.config.agent_runner import normalize_agent_runner
 
-    cfg = normalize_agent_runner(astrbot_config.get("agent_runner"))["config"]
-    engine = await CodexEngine.get(engine_options(cfg))
+    engine = await CodexEngine.get(engine_options(_runner_config()))
     if not hasattr(engine.rt, "realtime_start"):
         raise RuntimeError(
             "codex_astrbot binding has no realtime support; update codex-astrbot"
         )
     return engine
+
+
+def voice_thread_config(memory_scope: str | None) -> dict:
+    """Thread overrides for a voice agent whose paired chat is ``memory_scope``.
+
+    With memories enabled on the runner, the voice agent reads the global
+    memories and those of its paired chat (the UMO of the server group or of
+    the whisperer's private chat), like that chat's own thread does, but may
+    never write global memories or delete any.
+    """
+    from astrbot.core.agent.runners.codex.codex_agent_runner import (
+        memory_thread_config,
+    )
+
+    config = dict(VOICE_THREAD_CONFIG)
+    cfg = _runner_config()
+    if cfg.get("memory_enabled") and memory_scope:
+        # No event: no permission policy, so nothing global is writable.
+        config.update(memory_thread_config(cfg, memory_scope, None))
+    return config
 
 
 class _SessionClosed(Exception):
@@ -142,11 +182,14 @@ class VoiceSession:
         options: VoiceOptions,
         send_audio: Callable[[bytes, bool], None],
         on_closed: Callable[[VoiceSession], None],
+        memory_scope: str | None = None,
     ) -> None:
         """
         Args:
             key: Conversation key within the platform, e.g. ``server``.
             scope_id: Storage scope of the persisted voice thread.
+            memory_scope: UMO of the paired chat, whose memories (with the
+                global ones) the voice agent may read.
             prompt: Instructions for the realtime model.
             options: Voice settings of the platform.
             send_audio: Sends one Opus frame to Mumble: ``(frame, terminator)``.
@@ -156,6 +199,7 @@ class VoiceSession:
         self.scope_id = scope_id
         self.prompt = prompt
         self.options = options
+        self.memory_scope = memory_scope
         self.mixer = InboundMixer()
         self.outbound = OutboundVoice(send_audio)
         self._on_closed = on_closed
@@ -219,8 +263,7 @@ class VoiceSession:
                 or VOICE_AGENT_INSTRUCTIONS.format(name=self.options.name)
             ),
             "no_environment": True,
-            # No tools to orchestrate, so no code mode (and no host needed).
-            "config": {"model_tool_mode": "direct"},
+            "config": voice_thread_config(self.memory_scope),
         }
         info, started_new = await engine.open_thread(state or None, params)
         self._thread_id = info["thread_id"]

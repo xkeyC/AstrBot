@@ -490,6 +490,13 @@ class MumblePlatformAdapter(Platform):
             options=self.voice_options,
             send_audio=send,
             on_closed=self._voice_closed,
+            # The chat the voice conversation belongs to: the server group,
+            # or the whisperer's private chat.
+            memory_scope=(
+                f"{self.meta().id}:{MessageType.GROUP_MESSAGE.value}:{SERVER_SESSION}"
+                if key == SERVER_SESSION
+                else f"{self.meta().id}:{MessageType.FRIEND_MESSAGE.value}:{user_key(user)}"
+            ),
         )
         self.voice_sessions[key] = session
         session.mixer.holding = True

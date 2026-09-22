@@ -120,3 +120,32 @@ async def test_start_failure_is_reported_once(engine, monkeypatch):
         await asyncio.sleep(0)
     assert [str(e) for e in failures] == ["binding has no realtime support"]
     assert closed == [session]
+
+
+def test_voice_thread_config_follows_runner_limits(monkeypatch):
+    monkeypatch.setattr(voice, "_runner_config", lambda: {"memory_enabled": False})
+    config = voice.voice_thread_config("mumble:GroupMessage:server")
+    assert config == {
+        "model_tool_mode": "direct",
+        "features.apps": False,
+        "features.memories": False,
+        "features.image_generation": False,
+        "agents.enabled": False,
+    }
+
+
+def test_voice_thread_reads_paired_and_global_memories(monkeypatch):
+    monkeypatch.setattr(
+        voice,
+        "_runner_config",
+        lambda: {"memory_enabled": True, "memory_auto_consolidate": False},
+    )
+    config = voice.voice_thread_config("mumble:FriendMessage:abc")
+    assert config["features.memories"] is True
+    assert config["memories.scope_key"] == "mumble:FriendMessage:abc"
+    # Reads global memories, never writes or deletes them.
+    assert config["memories.may_write_global"] is False
+    assert config["memories.may_delete"] is False
+    assert config["memories.auto_consolidate"] is False
+    assert config["features.apps"] is False
+    assert config["agents.enabled"] is False
