@@ -360,3 +360,67 @@ async def test_a_mention_names_who_was_mentioned():
     line = await ctx._format_message(_event(at_self=True), {"image_caption": False})
 
     assert "[At: bot (ID: 999)]" in line
+
+
+@pytest.mark.asyncio
+async def test_history_is_not_given_back_into_a_reset_chat():
+    ctx = _history([("[a] one", "r1"), ("[c] @bot hi", "r2")])
+    event = _trigger("r2")
+    await ctx.on_req_llm(event, _Req())
+    ctx.raw_records.pop(UMO)  # /reset while the request was in flight
+    ctx._record_ids.pop(UMO)
+
+    await runner_mod.release_group_history(event)
+
+    assert list(ctx.raw_records.get(UMO, [])) == []
+
+
+@pytest.mark.asyncio
+async def test_given_back_history_respects_the_cap(monkeypatch):
+    ctx = _history([("[a] one", "r1"), ("[b] two", "r2"), ("[c] @bot hi", "r3")])
+    monkeypatch.setattr(
+        gcc.GroupChatContext, "cfg", lambda self, event: {"group_message_max_cnt": 2}
+    )
+    event = _trigger("r3")
+    await ctx.on_req_llm(event, _Req())
+    for i in range(2):
+        ctx.raw_records[UMO].append(f"[n] new {i}")
+        ctx._record_ids[UMO].append(f"n{i}")
+
+    await runner_mod.release_group_history(event)
+
+    # The oldest go first, as when new messages push past the cap.
+    assert list(ctx.raw_records[UMO]) == ["[n] new 0", "[n] new 1"]
+    assert list(ctx._record_ids[UMO]) == ["n0", "n1"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_fails_before_codex_gives_the_history_back(monkeypatch):
+    from astrbot.core.agent.hooks import BaseAgentRunHooks
+
+    given_back = []
+
+    async def restore():
+        given_back.append(True)
+
+    extras = {runner_mod.GROUP_HISTORY_RESTORE_KEY: restore}
+    event = SimpleNamespace(
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=extras.__setitem__,
+    )
+
+    async def broken_engine(options):
+        raise RuntimeError("app-server did not start")
+
+    monkeypatch.setattr(runner_mod.CodexEngine, "get", staticmethod(broken_engine))
+    runner = CodexAgentRunner()
+    await runner.reset(
+        request=ProviderRequest(prompt="hi", session_id=UMO),
+        run_context=SimpleNamespace(context=SimpleNamespace(event=event)),
+        agent_hooks=BaseAgentRunHooks(),
+        provider_config={},
+    )
+    responses = [r async for r in runner.step_until_done()]
+
+    assert [r.type for r in responses] == ["err"]
+    assert given_back == [True]

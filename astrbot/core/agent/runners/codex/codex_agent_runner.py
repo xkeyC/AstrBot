@@ -535,6 +535,12 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             yield AgentResponse(
                 type="err", data=AgentResponseData(chain=MessageChain().message(msg))
             )
+        finally:
+            # Anything that ended the run before Codex accepted the turn (a
+            # busy chat, an engine or thread failure, a failed submit,
+            # cancellation) gives the group history back; an accepted turn
+            # has already kept it, which makes this a no-op.
+            await release_group_history(self._event())
 
     @override
     async def step_until_done(
@@ -867,7 +873,6 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         active.turn_id = str(sub.get("turn_id") or "")
                     except BaseException:
                         active.aborted = True
-                        await release_group_history(self._event())
                         raise
                     finally:
                         # Release a follow-up waiting on the turn id, including
@@ -1053,7 +1058,6 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         )
 
         except SessionBusy as busy:
-            await release_group_history(self._event())
             logger.info(
                 "Codex session %s is busy; %d turns already queued.",
                 self.umo,

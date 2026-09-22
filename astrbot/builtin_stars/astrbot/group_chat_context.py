@@ -249,13 +249,23 @@ class GroupChatContext:
             # request shows these messages instead of losing them.
             taken = list(zip(records_to_inject, injected_ids))
 
+            taken_from = records
+
             async def restore() -> None:
+                try:
+                    cap = self.cfg(event)["group_message_max_cnt"]
+                except Exception:  # noqa: BLE001 - keep the default cap
+                    cap = DEFAULT_GROUP_MESSAGE_MAX_CNT
                 async with self._get_lock(umo):
-                    records = self.raw_records[umo]
+                    records = self.raw_records.get(umo)
+                    # Reset meanwhile (/reset): the old chatter stays gone.
+                    if records is not taken_from:
+                        return
                     record_ids = self._record_ids[umo]
                     records.extendleft(text for text, _ in reversed(taken))
                     if id_list:
                         record_ids.extendleft(rid for _, rid in reversed(taken))
+                    _trim_left(records, cap, record_ids if id_list else None)
 
             event.set_extra(GROUP_HISTORY_RESTORE_KEY, restore)
             # Stored with this turn in front of the triggering message, so later
