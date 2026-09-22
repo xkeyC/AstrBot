@@ -43,6 +43,8 @@ REALTIME_VOICES = (
 )
 SDP_TIMEOUT = 30.0
 CONNECT_TIMEOUT = 15.0
+# Pause between the model reporting it started and sending it audio.
+READY_DELAY = 0.5
 
 VOICE_AGENT_INSTRUCTIONS = """You are the backend of {name}, a voice assistant in a Mumble voice chat.
 Requests reach you from the voice model, which reads your answers aloud.
@@ -118,8 +120,19 @@ async def _codex_engine():
     return engine
 
 
+class _SessionClosed(Exception):
+    """The session was closed while it was still starting."""
+
+
 class VoiceSession:
-    """One realtime conversation bound to its own voice agent thread."""
+    """One realtime conversation bound to its own voice agent thread.
+
+    Lifecycle: ``launch()`` starts it in the background; ``close()`` may be
+    called at any time, from any path (standby, mute, disconnect, a failure),
+    and runs once. A close during start lets the start stop at its next step
+    and then releases whatever it had created, so nothing outlives the
+    session (in particular no realtime call keeps running unowned).
+    """
 
     def __init__(
         self,
@@ -148,8 +161,12 @@ class VoiceSession:
         self._on_closed = on_closed
         self._engine = None
         self._thread_id: str | None = None
+        self._events_queue: asyncio.Queue | None = None
+        self._realtime_requested = False
         self._pc: RTCPeerConnection | None = None
         self._tasks: list[asyncio.Task] = []
+        self._start_task: asyncio.Task | None = None
+        self._started = asyncio.Event()
         self._closed = False
         self.started_at = time.monotonic()
         self.last_transcript_at = 0.0
@@ -159,12 +176,40 @@ class VoiceSession:
         """Start or latest speech recognised by the model, for standby."""
         return max(self.started_at, self.last_transcript_at)
 
-    async def start(self) -> None:
+    def launch(self, on_failed: Callable[[Exception], None]) -> None:
+        """Starts the session in the background.
+
+        Args:
+            on_failed: Called when starting fails (not when it is closed).
+        """
+
+        async def run() -> None:
+            try:
+                await self._start()
+            except _SessionClosed:
+                return
+            except Exception as exc:  # noqa: BLE001 - reported to the owner
+                if self._closed:
+                    return
+                on_failed(exc)
+                await self.close(f"start failed: {exc}")
+
+        self._start_task = asyncio.create_task(
+            run(), name=f"mumble-voice-{self.key}-start"
+        )
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise _SessionClosed
+
+    async def _start(self) -> None:
         engine = await _codex_engine()
+        self._check_open()
         self._engine = engine
         state = await sp.get_async(
             scope="umo", scope_id=self.scope_id, key=VOICE_THREAD_KEY, default={}
         )
+        self._check_open()
         workspace = Path(get_astrbot_data_path()) / "mumble_voice"
         workspace.mkdir(parents=True, exist_ok=True)
         params = {
@@ -189,9 +234,11 @@ class VoiceSession:
                     "rollout_path": info.get("rollout_path"),
                 },
             )
+        self._check_open()
         # This thread only ever carries the voice conversation, so its pump
         # route stays open for the whole session and sees every event.
         events = engine.pump(self._thread_id).open_turn(None, None)
+        self._events_queue = events
 
         pc = RTCPeerConnection()
         self._pc = pc
@@ -209,6 +256,7 @@ class VoiceSession:
                 await self.close(f"webrtc {pc.connectionState}")
 
         await pc.setLocalDescription(await pc.createOffer())
+        self._check_open()
         request: dict = {
             "transport": {"type": "webrtc", "sdp": pc.localDescription.sdp},
             # Subscription (AVAS) calls only accept the frameless protocol.
@@ -222,17 +270,27 @@ class VoiceSession:
             request["model"] = self.options.model
         answer: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(self._events(events, answer), "events")
+        self._realtime_requested = True
         await engine.rt.realtime_start(self._thread_id, json.dumps(request))
         sdp = await asyncio.wait_for(answer, SDP_TIMEOUT)
+        self._check_open()
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
         deadline = time.monotonic() + CONNECT_TIMEOUT
         while pc.connectionState != "connected":
+            self._check_open()
             if time.monotonic() > deadline or pc.connectionState in (
                 "failed",
                 "closed",
             ):
                 raise RuntimeError(f"WebRTC did not connect ({pc.connectionState})")
             await asyncio.sleep(0.1)
+        # Hand over the audio kept while connecting only once the model is
+        # listening; sent earlier, its start is lost.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._started.wait(), CONNECT_TIMEOUT)
+        await asyncio.sleep(READY_DELAY)
+        self._check_open()
+        self.mixer.holding = False
         logger.info(
             "Mumble voice session %s started (thread %s)", self.key, self._thread_id
         )
@@ -245,14 +303,17 @@ class VoiceSession:
         while True:
             msg = await events.get()
             kind = msg.get("type")
-            if kind == "realtime_conversation_sdp":
+            if kind == "realtime_conversation_started":
+                self._started.set()
+            elif kind == "realtime_conversation_sdp":
                 if not answer.done():
                     answer.set_result(msg["sdp"])
             elif kind == "realtime_conversation_closed":
                 reason = msg.get("reason") or "closed"
                 if not answer.done():
                     answer.set_exception(RuntimeError(f"realtime closed: {reason}"))
-                asyncio.create_task(self.close(reason, stop_realtime=False))
+                self._realtime_requested = False
+                self._spawn(self.close(f"realtime {reason}"), "close")
                 return
             elif kind == "realtime_conversation_realtime":
                 payload = msg.get("payload")
@@ -276,29 +337,45 @@ class VoiceSession:
             elif kind == "_pump_closed":
                 if not answer.done():
                     answer.set_exception(RuntimeError("voice thread closed"))
-                asyncio.create_task(self.close("thread closed", stop_realtime=False))
+                self._realtime_requested = False
+                self._spawn(self.close("voice thread closed"), "close")
                 return
 
-    async def close(self, reason: str = "", *, stop_realtime: bool = True) -> None:
+    async def close(self, reason: str = "") -> None:
         if self._closed:
             return
         self._closed = True
+        start = self._start_task
+        current = asyncio.current_task()
+        if start is not None and not start.done() and start is not current:
+            # Let the start stop at its next step, so everything it created
+            # is known here and the realtime stop is sent after its start.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    asyncio.shield(start), SDP_TIMEOUT + CONNECT_TIMEOUT
+                )
         logger.info("Mumble voice session %s closed: %s", self.key, reason)
+        self.outbound.finish()
         engine, thread_id = self._engine, self._thread_id
-        if stop_realtime and engine is not None and thread_id is not None:
+        if self._realtime_requested and engine is not None and thread_id is not None:
             with contextlib.suppress(Exception):
                 await engine.rt.realtime_stop(thread_id)
         if self._pc is not None:
             with contextlib.suppress(Exception):
                 await self._pc.close()
-        current = asyncio.current_task()
         for task in self._tasks:
             if task is not current:
                 task.cancel()
         if engine is not None and thread_id is not None:
             pump = engine.pumps.get(thread_id)
-            if pump is not None:
+            if (
+                pump is not None
+                and pump.route is not None
+                and (pump.route.events is self._events_queue)
+            ):
                 pump.close_turn()
+            # Unload the thread; the next session resumes it from its rollout.
+            await engine.forget_thread(thread_id)
         self.mixer.clear()
         self._on_closed(self)
 

@@ -35,6 +35,9 @@ from .messages import (
 PROTOCOL_VERSION = (1, 5, 0)
 CLIENT_TYPE_BOT = 1
 PING_INTERVAL = 15.0
+# No message at all from the server for this long means the connection is
+# dead even if TCP has not noticed (NAT timeout, server host gone).
+RECEIVE_TIMEOUT = 60.0
 # The server's hard cap on a control message is 8 MiB; images in text
 # messages are the only large ones.
 MAX_MESSAGE_SIZE = 8 * 1024 * 1024
@@ -188,6 +191,7 @@ class MumbleClient:
         self._synced: asyncio.Future[None] | None = None
         self._frame_number = 0
         self._closing = False
+        self._last_received = 0.0
 
     # -- connection -------------------------------------------------------
 
@@ -206,6 +210,13 @@ class MumbleClient:
         loop = asyncio.get_running_loop()
         self._closing = False
         self._synced = loop.create_future()
+        # The server resends all state after connecting; what is left from a
+        # previous connection is stale (and session ids get reused).
+        self.session = None
+        self.users.clear()
+        self.channels.clear()
+        self.server_config.clear()
+        self._last_received = time.monotonic()
         self._reader, self._writer = await asyncio.wait_for(
             asyncio.open_connection(
                 self.host,
@@ -394,6 +405,7 @@ class MumbleClient:
                 if length > MAX_MESSAGE_SIZE:
                     raise MumbleError(f"message of {length} bytes is too large")
                 payload = await self._reader.readexactly(length)
+                self._last_received = time.monotonic()
                 self._dispatch(message_type, payload)
         except asyncio.CancelledError:
             raise
@@ -410,30 +422,33 @@ class MumbleClient:
                 self.on_disconnected(error)
 
     def _dispatch(self, raw_type: int, payload: bytes) -> None:
+        """Handles one message; a bad message or a failing callback is logged
+        and skipped rather than taking the connection down."""
         try:
             message_type = MessageType(raw_type)
         except ValueError:
             return
-        if message_type is MessageType.UDPTunnel:
-            # The tunnel carries the raw voice packet, not a protobuf message.
-            self._handle_voice(payload)
-            return
-        schema = SCHEMAS.get(message_type)
-        if schema is None:
-            return
-        message = protobuf.decode(schema, payload)
-        handler = getattr(self, f"_on_{message_type.name}", None)
-        if handler is not None:
-            handler(message)
+        try:
+            if message_type is MessageType.UDPTunnel:
+                # The tunnel carries the raw voice packet, not a protobuf message.
+                self._handle_voice(payload)
+                return
+            schema = SCHEMAS.get(message_type)
+            if schema is None:
+                return
+            message = protobuf.decode(schema, payload)
+            handler = getattr(self, f"_on_{message_type.name}", None)
+            if handler is not None:
+                handler(message)
+        except protobuf.DecodeError as exc:
+            logger.debug("Mumble: dropping malformed %s: %s", message_type.name, exc)
+        except Exception:  # noqa: BLE001 - a callback bug must not disconnect
+            logger.exception("Mumble: handling %s failed", message_type.name)
 
     def _handle_voice(self, packet: bytes) -> None:
         if not packet or packet[0] == UDP_PING:
             return
-        try:
-            voice = decode_audio(packet)
-        except protobuf.DecodeError as exc:
-            logger.debug("Mumble: dropping malformed voice packet: %s", exc)
-            return
+        voice = decode_audio(packet)
         if voice is not None and self.on_voice is not None:
             self.on_voice(voice)
 
@@ -522,6 +537,15 @@ class MumbleClient:
     async def _ping_loop(self) -> None:
         while True:
             await asyncio.sleep(PING_INTERVAL)
+            if time.monotonic() - self._last_received > RECEIVE_TIMEOUT:
+                logger.warning(
+                    "Mumble: server silent for %.0fs, reconnecting", RECEIVE_TIMEOUT
+                )
+                if self._writer is not None:
+                    # Aborting fails the pending read, which reports the
+                    # disconnect through the normal path.
+                    self._writer.transport.abort()
+                return
             try:
                 self.send(MessageType.Ping, {"timestamp": time.monotonic_ns() // 1000})
                 await self.drain()

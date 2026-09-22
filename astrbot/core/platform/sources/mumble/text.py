@@ -55,6 +55,12 @@ class _TextExtractor(HTMLParser):
             self._newline()
             if tag == "li":
                 self.parts.append("- ")
+        elif (
+            tag in ("td", "th")
+            and self.parts
+            and not self.parts[-1].endswith(("\n", "\t"))
+        ):
+            self.parts.append("\t")
         elif tag == "img":
             self._image(attributes.get("src") or "")
         elif tag == "a":
@@ -112,13 +118,14 @@ def escape_text(text: str) -> str:
 
 
 _FENCE = re.compile(r"```[^\n]*\n(.*?)(?:```\n?|\Z)", re.S)
-_INLINE = [
-    (re.compile(r"`([^`\n]+)`"), r"<code>\1</code>"),
+# Spans that other rules must not touch, rendered first and stashed.
+_CODE = re.compile(r"`([^`\n]+)`")
+_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^()\s\"'<>]+)\)")
+_URL = re.compile(r"https?://[^\s\"'<>]+")
+_EMPHASIS = [
     (re.compile(r"\*\*([^*\n]+)\*\*"), r"<b>\1</b>"),
     (re.compile(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])"), r"<i>\1</i>"),
     (re.compile(r"~~([^~\n]+)~~"), r"<s>\1</s>"),
-    (re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)"), r'<a href="\2">\1</a>'),
-    (re.compile(r"(?<![\"'>=])(https?://[^\s<]+)"), r'<a href="\1">\1</a>'),
 ]
 _HEADING = re.compile(r"^(#{1,6}) +(.*)$", re.M)
 
@@ -129,7 +136,7 @@ def markdown_to_html(text: str) -> str:
     pos = 0
     for match in _FENCE.finditer(text):
         out.append(_markdown_inline(text[pos : match.start()]))
-        code = html.escape(match.group(1).rstrip("\n"), quote=False)
+        code = html.escape(match.group(1).rstrip("\n"))
         out.append(f"<pre>{code}</pre>")
         pos = match.end()
     out.append(_markdown_inline(text[pos:]))
@@ -139,19 +146,33 @@ def markdown_to_html(text: str) -> str:
 def _markdown_inline(text: str) -> str:
     if not text:
         return ""
-    escaped = html.escape(text.replace("\r\n", "\n"), quote=False)
+    stash: list[str] = []
+
+    def keep(rendered: str) -> str:
+        stash.append(rendered)
+        return f"\x00{len(stash) - 1}\x00"
+
+    # On the raw text: code, links and URLs are rendered (escaped) and stashed
+    # before escaping and emphasis, so neither can break or nest into them.
+    text = text.replace("\r\n", "\n").replace("\x00", "")
+    text = _CODE.sub(lambda m: keep(f"<code>{html.escape(m.group(1))}</code>"), text)
+    text = _LINK.sub(
+        lambda m: keep(
+            f'<a href="{html.escape(m.group(2))}">{html.escape(m.group(1))}</a>'
+        ),
+        text,
+    )
+    text = _URL.sub(
+        lambda m: keep(
+            f'<a href="{html.escape(m.group())}">{html.escape(m.group())}</a>'
+        ),
+        text,
+    )
+    escaped = html.escape(text)
     escaped = _HEADING.sub(lambda m: f"<b>{m.group(2)}</b>", escaped)
-    # Protect inline code from the other rules.
-    codes: list[str] = []
-
-    def stash(m: re.Match[str]) -> str:
-        codes.append(f"<code>{m.group(1)}</code>")
-        return f"\x00{len(codes) - 1}\x00"
-
-    escaped = _INLINE[0][0].sub(stash, escaped)
-    for pattern, replacement in _INLINE[1:]:
+    for pattern, replacement in _EMPHASIS:
         escaped = pattern.sub(replacement, escaped)
-    escaped = re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], escaped)
+    escaped = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], escaped)
     return escaped.replace("\n", "<br>")
 
 

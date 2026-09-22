@@ -169,6 +169,8 @@ def _unpack(field: Field, chunk: memoryview) -> list[Any]:
     pos = 0
     while pos < len(chunk):
         if _WIRE[field.kind] == FIXED32:
+            if pos + 4 > len(chunk):
+                raise DecodeError("truncated packed fixed32")
             values.append(bytes(chunk[pos : pos + 4]))
             pos += 4
         else:

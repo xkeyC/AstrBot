@@ -202,3 +202,40 @@ def test_header_layout():
         "channel_id": [0],
         "message": "hi",
     }
+
+
+def test_bad_messages_and_failing_callbacks_do_not_escape_dispatch():
+    client = MumbleClient("localhost")
+
+    def boom(_message):
+        raise RuntimeError("callback bug")
+
+    client.on_text = boom
+    client._dispatch(*frame(MessageType.TextMessage, {"actor": 2, "message": "x"}))
+    # Wire type mismatch in a control message.
+    client._dispatch(int(MessageType.UserState), b"\x0a\x01x")
+    # Packed floats whose length is not a multiple of 4.
+    client._dispatch(int(MessageType.UDPTunnel), bytes([0, 0x32, 5, 1, 2, 3, 4, 5]))
+
+
+def test_reconnect_state_is_reset():
+    client = MumbleClient("localhost")
+    client._dispatch(
+        *frame(MessageType.UserState, {"session": 5, "name": "old", "hash": "h"})
+    )
+    client._dispatch(*frame(MessageType.ServerConfig, {"message_length": 10}))
+    assert client.users and client.server_config
+
+    async def refused(*_args, **_kwargs):
+        raise ConnectionRefusedError
+
+    import asyncio
+
+    original = asyncio.open_connection
+    asyncio.open_connection = refused
+    try:
+        with pytest.raises(ConnectionRefusedError):
+            asyncio.run(client.connect(timeout=1))
+    finally:
+        asyncio.open_connection = original
+    assert client.users == {} and client.server_config == {} and client.session is None

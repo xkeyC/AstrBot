@@ -39,6 +39,7 @@ from .messages import AudioContext, AudioTarget
 from .mumble_event import (
     DEFAULT_IMAGE_MESSAGE_LENGTH,
     DEFAULT_MESSAGE_LENGTH,
+    UNLIMITED_LENGTH,
     MumbleMessageEvent,
     chain_to_html,
 )
@@ -56,11 +57,25 @@ WATCHDOG_INTERVAL = 5.0
 PREROLL_SECONDS = 2.0
 # A voice session that failed to start is not retried for this long.
 START_RETRY_SECONDS = 30.0
+# Servers rate-limit text messages (default burst 5, then 1 per second) and
+# silently drop the excess, so long replies are paced after the burst.
+TEXT_BURST = 4
+TEXT_INTERVAL = 1.1
 
 
 def user_key(user: User) -> str:
-    """Stable id of a Mumble user: certificate hash, else the name."""
-    return user.hash or f"name:{user.name}"
+    """Stable id of a Mumble user.
+
+    The certificate hash when there is one (official clients always have
+    one), else the registered user id. A user with neither is known only by
+    a name anyone can take once they leave, so their id is scoped to the
+    current session and no conversation carries over to an impostor.
+    """
+    if user.hash:
+        return user.hash
+    if user.user_id is not None:
+        return f"uid:{user.user_id}"
+    return f"session:{user.session}:{user.name}"
 
 
 def ensure_certificate(directory: Path, name: str) -> tuple[str, str]:
@@ -151,6 +166,7 @@ class MumblePlatformAdapter(Platform):
         self.client.on_text = self._on_text
         self.client.on_voice = self._on_voice
         self.client.on_user_changed = self._on_user_changed
+        self.client.on_user_removed = self._on_user_removed
         self.client.on_disconnected = self._on_disconnected
         self.metadata = PlatformMetadata(
             name="mumble",
@@ -178,6 +194,7 @@ class MumblePlatformAdapter(Platform):
         self._detector = SpeechDetector()
         self._preroll: dict[str, deque[tuple[float, int, bytes, bool]]] = {}
         self._retry_at: dict[str, float] = {}
+        self._tasks: set[asyncio.Task] = set()
         self._running = True
         self._disconnected = asyncio.Event()
 
@@ -229,7 +246,11 @@ class MumblePlatformAdapter(Platform):
                 self.client.join_channel(channel.channel_id)
         if self.muted:
             self.client.set_self_state(self_mute=True, self_deaf=True)
+        # Sessions ids from before the reconnect may now belong to others.
         self.whisper_targets.clear()
+        self._detector.clear()
+        self._preroll.clear()
+        self._retry_at.clear()
 
     def _on_disconnected(self, error: Exception | None) -> None:
         logger.warning("Mumble disconnected: %s", error or "connection closed")
@@ -270,7 +291,7 @@ class MumblePlatformAdapter(Platform):
         if (private or woken or command != text.strip()) and command.lower() in (
             MUTE_COMMANDS | UNMUTE_COMMANDS
         ):
-            asyncio.create_task(
+            self._spawn(
                 self._set_muted(command.lower() in MUTE_COMMANDS, sender, private)
             )
             return
@@ -313,20 +334,51 @@ class MumblePlatformAdapter(Platform):
         root = self.client.channels.get(0)
         return root.name if root and root.name else self.host
 
-    async def send_chain(self, session_id: str, chain: MessageChain) -> None:
-        """Sends a chain to the server conversation or a user's private one."""
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def send_chain(
+        self,
+        session_id: str,
+        chain: MessageChain,
+        origin: TextMessage | None = None,
+    ) -> None:
+        """Sends a chain to the server conversation or a user's private one.
+
+        Args:
+            session_id: ``server`` or a user key.
+            chain: What to send.
+            origin: The message being answered. A channel reply goes where it
+                was sent (and to the sender's channel), not just to the
+                channel the bot is in.
+        """
         if not self.client.connected:
             logger.warning("Mumble: not connected, dropping outgoing message")
             return
         config = self.client.server_config
+        # 0 means no limit on the server.
+        message_length = config.get("message_length", DEFAULT_MESSAGE_LENGTH)
+        image_length = config.get("image_message_length", DEFAULT_IMAGE_MESSAGE_LENGTH)
         messages = await chain_to_html(
             chain,
-            int(config.get("message_length") or DEFAULT_MESSAGE_LENGTH),
-            int(config.get("image_message_length") or DEFAULT_IMAGE_MESSAGE_LENGTH),
+            int(message_length) or UNLIMITED_LENGTH,
+            int(image_length) or UNLIMITED_LENGTH,
         )
         if session_id == SERVER_SESSION:
             me = self.client.me
-            target = {"channel_ids": [me.channel_id if me else 0]}
+            channels = {me.channel_id if me else 0}
+            tree_ids: list[int] = []
+            if origin is not None:
+                channels.update(origin.channel_ids)
+                tree_ids = origin.tree_ids
+                sender = self.client.users.get(origin.actor or -1)
+                if sender is not None:
+                    channels.add(sender.channel_id)
+            target: dict[str, Any] = {"channel_ids": sorted(channels)}
+            if tree_ids:
+                target["tree_ids"] = tree_ids
         else:
             user = next(
                 (u for u in self.client.users.values() if user_key(u) == session_id),
@@ -338,9 +390,13 @@ class MumblePlatformAdapter(Platform):
                 )
                 return
             target = {"sessions": [user.session]}
-        for html_message in messages:
+        for index, html_message in enumerate(messages):
+            if index >= TEXT_BURST:
+                await asyncio.sleep(TEXT_INTERVAL)
+                if not self.client.connected:
+                    return
             self.client.send_text(html_message, **target)
-        await self.client.drain()
+            await self.client.drain()
 
     async def send_by_session(
         self, session: MessageSesion, message_chain: MessageChain
@@ -421,6 +477,8 @@ class MumblePlatformAdapter(Platform):
                 return None
             prompt = whisper_prompt(self.voice_options, user.name)
             target = self._whisper_target(user)
+            if target is None:
+                return None
 
             def send(frame: bytes, terminator: bool) -> None:
                 self._send_voice(frame, target, terminator)
@@ -434,24 +492,24 @@ class MumblePlatformAdapter(Platform):
             on_closed=self._voice_closed,
         )
         self.voice_sessions[key] = session
+        session.mixer.holding = True
 
-        async def start() -> None:
-            try:
-                await session.start()
-            except Exception as exc:  # noqa: BLE001 - reported, retried later
-                logger.error("Mumble voice session %s failed to start: %s", key, exc)
-                self._retry_at[key] = time.monotonic() + START_RETRY_SECONDS
-                await session.close(f"start failed: {exc}")
+        def failed(exc: Exception) -> None:
+            logger.error("Mumble voice session %s failed to start: %s", key, exc)
+            self._retry_at[key] = time.monotonic() + START_RETRY_SECONDS
 
-        asyncio.create_task(start(), name=f"mumble-voice-start-{key}")
+        session.launch(failed)
         return session
 
-    def _whisper_target(self, user: User) -> int:
+    def _whisper_target(self, user: User) -> int | None:
+        """The voice target (1-30) aimed at ``user``, or None if all are used."""
         key = user_key(user)
         target = self.whisper_targets.get(key)
         if target is None:
             used = set(self.whisper_targets.values())
-            target = next(i for i in range(1, 31) if i not in used)
+            target = next((i for i in range(1, 31) if i not in used), None)
+            if target is None:
+                return None
             self.whisper_targets[key] = target
         self.client.set_voice_target(target, sessions=[user.session])
         return target
@@ -464,6 +522,20 @@ class MumblePlatformAdapter(Platform):
     def _voice_closed(self, session) -> None:
         if self.voice_sessions.get(session.key) is session:
             del self.voice_sessions[session.key]
+        if session.key.startswith("whisper:"):
+            self.whisper_targets.pop(session.key.removeprefix("whisper:"), None)
+
+    def _on_user_removed(self, user: User, _message: dict) -> None:
+        """Drops a departed speaker's audio state; their session id is reused."""
+        self._detector.forget(user.session)
+        self._preroll.pop(f"whisper:{user_key(user)}", None)
+        channel = self._preroll.get(SERVER_SESSION)
+        if channel:
+            self._preroll[SERVER_SESSION] = deque(
+                item for item in channel if item[1] != user.session
+            )
+        for session in self.voice_sessions.values():
+            session.mixer.forget(user.session)
 
     def _on_user_changed(self, user: User, changed: set[str]) -> None:
         # A whisper partner who reconnected has a new session: re-aim the target.

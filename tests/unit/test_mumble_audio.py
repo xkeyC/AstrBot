@@ -39,8 +39,32 @@ def encode(pcm: np.ndarray) -> list[bytes]:
     return packets
 
 
+def test_mixer_holds_until_released():
+    mixer = InboundMixer()
+    for packet in encode(tone(5)):
+        mixer.feed(1, packet, False)
+    assert mixer.pull() is None  # kept while the session connects
+    mixer.holding = False
+    assert mixer.pull() is not None
+
+
+def test_mixer_backlog_is_bounded():
+    from astrbot.core.platform.sources.mumble import audio
+
+    mixer = InboundMixer()
+    mixer.holding = False
+    packet = encode(tone(2))[0]
+    for _ in range(audio.MAX_BACKLOG_SAMPLES // FRAME_SAMPLES + 100):
+        mixer.feed(1, packet, False)
+    frames = 0
+    while mixer.pull() is not None:
+        frames += 1
+    assert frames <= audio.MAX_BACKLOG_SAMPLES // FRAME_SAMPLES + 1
+
+
 def test_mixer_mixes_speakers_and_drains():
     mixer = InboundMixer()
+    mixer.holding = False
     assert mixer.pull() is None
     for packet in encode(tone(5)):
         mixer.feed(1, packet, False)
@@ -70,6 +94,7 @@ def test_speech_detector_needs_sustained_sound():
 @pytest.mark.asyncio
 async def test_mixer_track_serves_silence_then_audio():
     mixer = InboundMixer()
+    mixer.holding = False
     track = MixerTrack(mixer)
     silent = await track.recv()
     assert silent.samples == FRAME_SAMPLES

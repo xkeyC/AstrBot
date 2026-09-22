@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import ssl
+from collections import deque
 
 import pytest
 
@@ -73,8 +74,10 @@ def test_certificate_is_created_once_and_loads(tmp_path):
 
 
 def test_user_key_prefers_certificate_hash():
-    assert user_key(User(2, name="alice", hash="abc")) == "abc"
-    assert user_key(User(3, name="guest")) == "name:guest"
+    assert user_key(User(2, name="alice", hash="abc", user_id=4)) == "abc"
+    assert user_key(User(2, name="alice", user_id=4)) == "uid:4"
+    # Without a certificate or registration a name is not an identity.
+    assert user_key(User(3, name="guest")) == "session:3:guest"
 
 
 @pytest.mark.asyncio
@@ -103,7 +106,7 @@ async def test_private_text_and_inline_images(adapter):
     )
     event = adapter.queue.get_nowait()
     assert event.message_obj.type.name == "FRIEND_MESSAGE"
-    assert event.session_id == "name:guest"
+    assert event.session_id == "session:3:guest"
     kinds = [type(c) for c in event.message_obj.message]
     assert kinds == [Plain, Image]
 
@@ -132,6 +135,39 @@ async def test_send_chain_targets(adapter):
         ("<b>hi</b>", {"channel_ids": [0]}),
         ("psst", {"sessions": [2]}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_channel_reply_reaches_where_the_message_came_from(adapter):
+    adapter.client.users[2].channel_id = 7  # alice is in another channel
+    origin = TextMessage(
+        actor=2, message="x", sessions=[], channel_ids=[0], tree_ids=[5]
+    )
+    await adapter.send_chain(SERVER_SESSION, MessageChain([Plain("ok")]), origin=origin)
+    assert adapter.sent == [("ok", {"channel_ids": [0, 7], "tree_ids": [5]})]
+
+
+@pytest.mark.asyncio
+async def test_long_replies_are_paced_after_the_burst(adapter, monkeypatch):
+    from astrbot.core.platform.sources.mumble import mumble_adapter
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(mumble_adapter.asyncio, "sleep", fake_sleep)
+    adapter.client.server_config["message_length"] = 20
+    await adapter.send_chain(SERVER_SESSION, MessageChain([Plain("0123456789\n" * 8)]))
+    assert len(adapter.sent) == 8
+    assert sleeps == [mumble_adapter.TEXT_INTERVAL] * (8 - mumble_adapter.TEXT_BURST)
+
+
+@pytest.mark.asyncio
+async def test_zero_length_limit_means_unlimited(adapter):
+    adapter.client.server_config["message_length"] = 0
+    await adapter.send_chain(SERVER_SESSION, MessageChain([Plain("x" * 9000)]))
+    assert len(adapter.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -198,3 +234,28 @@ def test_voice_routing_in_standby(adapter, monkeypatch):
     adapter.muted = True
     adapter._on_voice(packet(AudioContext.NORMAL, 6))
     assert len(adapter.voice_sessions[SERVER_SESSION].fed) == 4
+
+
+def test_whisper_targets_are_released_and_bounded(adapter, monkeypatch):
+    targets: list[tuple[int, list[int]]] = []
+    adapter.client.set_voice_target = lambda t, sessions: targets.append((t, sessions))
+    users = [User(100 + i, name=f"u{i}", hash=f"h{i}") for i in range(31)]
+    got = [adapter._whisper_target(u) for u in users]
+    assert got[:30] == list(range(1, 31))
+    assert got[30] is None  # all 30 in use: no whisper session, no crash
+
+    class Closed:
+        key = "whisper:h0"
+
+    adapter._voice_closed(Closed())
+    assert adapter._whisper_target(users[30]) == 1
+
+
+def test_departed_speaker_state_is_dropped(adapter):
+    adapter._preroll[SERVER_SESSION] = deque(
+        [(0.0, 2, b"a", False), (0.0, 3, b"b", False)]
+    )
+    adapter._preroll["whisper:abc123"] = deque([(0.0, 2, b"a", False)])
+    adapter._on_user_removed(adapter.client.users[2], {})
+    assert list(adapter._preroll[SERVER_SESSION]) == [(0.0, 3, b"b", False)]
+    assert "whisper:abc123" not in adapter._preroll

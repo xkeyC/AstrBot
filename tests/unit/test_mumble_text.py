@@ -60,7 +60,26 @@ def test_markdown_subset():
         "<b>Title</b><br><b>bold</b> and <i>it</i> and <code>a&lt;b</code> and <s>no</s><br>"
         'see <a href="https://example.com/d">docs</a> or '
         '<a href="https://example.com">https://example.com</a><br>'
-        "<pre>print('&lt;x&gt;')</pre>done"
+        "<pre>print(&#x27;&lt;x&gt;&#x27;)</pre>done"
     )
     assert markdown_to_html("`**not bold**`") == "<code>**not bold**</code>"
     assert markdown_to_html("a*b*c 2*3*4") == "a*b*c 2*3*4"
+
+
+def test_markdown_links_cannot_inject_or_nest():
+    # A quote in a URL must not end the href attribute.
+    assert markdown_to_html('https://a.com/"style="color:red') == (
+        '<a href="https://a.com/">https://a.com/</a>&quot;style=&quot;color:red'
+    )
+    assert markdown_to_html("[a https://b.c](https://d.e)") == (
+        '<a href="https://d.e">a https://b.c</a>'
+    )
+    # Emphasis rules do not reach into URLs or code.
+    assert markdown_to_html("https://a.com/*x*/y and *it*") == (
+        '<a href="https://a.com/*x*/y">https://a.com/*x*/y</a> and <i>it</i>'
+    )
+
+
+def test_table_cells_stay_apart():
+    table = "<table><tr><td>1</td><td>2</td></tr><tr><td>3</td></tr></table>"
+    assert html_to_text(table).text == "1\t2\n3"

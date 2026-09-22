@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import fractions
 import time
+from collections import deque
 from collections.abc import Callable
 
 import av
@@ -36,12 +37,19 @@ HANGOVER_FRAMES = 15  # 300 ms
 
 
 class InboundMixer:
-    """Per-speaker Opus decoding and mixing into 20 ms frames."""
+    """Per-speaker Opus decoding and mixing into 20 ms frames.
+
+    While ``holding`` is set, audio is decoded and kept but not handed out:
+    a new realtime session is not ready to listen the moment WebRTC
+    connects, and the words that woke it must not be sent into the void.
+    """
 
     def __init__(self) -> None:
         self._decoders: dict[int, av.CodecContext] = {}
-        self._pending: dict[int, np.ndarray] = {}
+        self._pending: dict[int, deque[np.ndarray]] = {}
+        self._pending_samples: dict[int, int] = {}
         self.last_voice_at = 0.0
+        self.holding = True
 
     def feed(self, speaker: int, opus_data: bytes, is_terminator: bool) -> None:
         """Decodes one frame from ``speaker`` into its pending samples.
@@ -63,15 +71,16 @@ class InboundMixer:
             except av.error.FFmpegError as exc:
                 logger.debug("Mumble: undecodable Opus frame from %s: %s", speaker, exc)
                 frames = []
+            chunks = self._pending.setdefault(speaker, deque())
             for frame in frames:
                 samples = frame.to_ndarray().reshape(-1)
                 if samples.dtype != np.int16:
                     samples = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
-                previous = self._pending.get(speaker)
-                pending = (
-                    samples if previous is None else np.concatenate([previous, samples])
-                )
-                self._pending[speaker] = pending[-MAX_BACKLOG_SAMPLES:]
+                chunks.append(samples)
+                total = self._pending_samples.get(speaker, 0) + len(samples)
+                while total > MAX_BACKLOG_SAMPLES and len(chunks) > 1:
+                    total -= len(chunks.popleft())
+                self._pending_samples[speaker] = total
             self.last_voice_at = time.monotonic()
         if is_terminator:
             # A new transmission starts a fresh decoder state.
@@ -80,25 +89,34 @@ class InboundMixer:
     def forget(self, speaker: int) -> None:
         self._decoders.pop(speaker, None)
         self._pending.pop(speaker, None)
+        self._pending_samples.pop(speaker, None)
 
     def clear(self) -> None:
         self._decoders.clear()
         self._pending.clear()
+        self._pending_samples.clear()
 
     def pull(self) -> bytes | None:
         """One mixed 20 ms frame, or ``None`` when nobody is talking."""
-        if not self._pending:
+        if self.holding or not self._pending:
             return None
         mix = np.zeros(FRAME_SAMPLES, dtype=np.int32)
         for speaker in list(self._pending):
-            pending = self._pending[speaker]
-            chunk = pending[:FRAME_SAMPLES]
-            mix[: len(chunk)] += chunk
-            rest = pending[FRAME_SAMPLES:]
-            if len(rest):
-                self._pending[speaker] = rest
-            else:
+            chunks = self._pending[speaker]
+            filled = 0
+            while chunks and filled < FRAME_SAMPLES:
+                chunk = chunks[0]
+                take = min(FRAME_SAMPLES - filled, len(chunk))
+                mix[filled : filled + take] += chunk[:take]
+                filled += take
+                if take == len(chunk):
+                    chunks.popleft()
+                else:
+                    chunks[0] = chunk[take:]
+            self._pending_samples[speaker] -= filled
+            if not chunks:
                 del self._pending[speaker]
+                del self._pending_samples[speaker]
         return np.clip(mix, -32768, 32767).astype(np.int16).tobytes()
 
 
@@ -146,6 +164,10 @@ class SpeechDetector:
             self._decoders.pop(speaker, None)
             self._recent.pop(speaker, None)
         return speaking
+
+    def forget(self, speaker: int) -> None:
+        self._decoders.pop(speaker, None)
+        self._recent.pop(speaker, None)
 
     def clear(self) -> None:
         self._decoders.clear()
@@ -253,6 +275,13 @@ class OutboundVoice:
                     self._send(bytes(packet), False)
         if self.talking:
             self._end(encoder, pts)
+
+    def finish(self) -> None:
+        """Ends a stretch of speech cut off mid-way, so Mumble clients do not
+        keep showing the bot as talking."""
+        if self.talking:
+            self.talking = False
+            self._send(b"", True)
 
     def _end(self, encoder: av.CodecContext, pts: int) -> None:
         """Closes the current stretch of speech with a terminator frame."""
