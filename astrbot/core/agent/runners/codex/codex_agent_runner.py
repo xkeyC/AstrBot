@@ -743,6 +743,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         )
         state = state if isinstance(state, dict) else {}
         info, started_new = await engine.open_thread(state, self._thread_params())
+        old_thread = state.get("thread_id")
+        if started_new and old_thread and old_thread != info["thread_id"]:
+            engine.drop_additional_context(str(old_thread))
         self._turn_sender = self._sender()
         previous = None if started_new else state.get("last_sender")
         previous = previous if isinstance(previous, dict) else None

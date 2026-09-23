@@ -513,7 +513,11 @@ class CodexEngine:
         with contextlib.suppress(Exception):
             await self.rt.interrupt(thread_id)
 
-    async def forget_thread(self, thread_id: str) -> None:
+    def drop_additional_context(self, thread_id: str) -> None:
+        """Forget the context a replaced thread's inputs carried."""
         self._additional_context.pop(thread_id, None)
+
+    async def forget_thread(self, thread_id: str) -> None:
+        self.drop_additional_context(thread_id)
         with contextlib.suppress(Exception):
             await self.rt.shutdown_thread(thread_id)

@@ -631,3 +631,27 @@ def test_inputs_without_additional_context_keep_the_threads_last_one():
         {},
         {},  # an explicit empty context is kept too
     ]
+
+
+def test_a_replaced_thread_forgets_its_additional_context():
+    import json
+
+    from astrbot.core.agent.runners.codex.native import CodexEngine
+
+    sent = []
+
+    class FakeRuntime:
+        async def submit_turn(self, thread_id, request_json):
+            sent.append(json.loads(request_json))
+            return json.dumps({"status": "started"})
+
+    engine = CodexEngine(FakeRuntime())
+    persona = {"astrbot_persona": {"value": "be a cat", "kind": "application"}}
+
+    async def run():
+        await engine.submit_turn("old", {"input": [], "additional_context": persona})
+        engine.drop_additional_context("old")
+        await engine.submit_turn("old", {"input": [], "mode": "steer"})
+
+    asyncio.run(run())
+    assert "additional_context" not in sent[-1]
