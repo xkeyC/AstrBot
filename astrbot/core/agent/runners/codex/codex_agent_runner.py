@@ -121,9 +121,11 @@ def engine_options(cfg: dict) -> JsonObject:
         "features.code_mode.tool_catalog": True,
         # The persona and other standing context are sent once and then kept
         # by history; compaction drops them, so Codex puts them back. A long
-        # persona must not lose its middle either.
+        # persona must not lose its middle either. The budget counts 4 bytes
+        # a token, so Chinese text runs about 1.2x over it; 6000 keeps one
+        # value under Codex's 10K-token limit for a single context item.
         "additional_context.reinject_after_compaction": True,
-        "additional_context.max_value_tokens": 8000,
+        "additional_context.max_value_tokens": 6000,
         "features.code_mode.exec_as_function_tool": bool(
             cfg.get("exec_as_function_tool")
         ),
