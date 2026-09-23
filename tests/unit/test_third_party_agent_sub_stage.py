@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.permission_rate_limit import keep_rate_limit_use
 from astrbot.core.pipeline.process_stage.method.agent_sub_stages import third_party
 from astrbot.core.provider.entities import LLMResponse
 
@@ -204,8 +205,10 @@ async def _process_with(
     runner.close = AsyncMock()
 
     async def step_until_done(max_step: int = 30):
-        # An accepted turn keeps its history, as the Codex runner does.
+        # An accepted turn keeps its history and its rate-limit use, as the
+        # Codex runner does.
         third_party.keep_group_history(event)
+        keep_rate_limit_use(event)
         if False:
             yield None
 
@@ -421,3 +424,160 @@ async def test_a_consumer_right_after_the_watchdog_check_sees_the_runner_closed(
     assert not any("group_history" in u for u in units)
     assert runner.close.await_count == 2
     assert consumed_flags == [False]  # the watchdog did decide to close
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("refusal", "replied"), [("too fast", True), ("", False)])
+async def test_a_rate_limited_request_never_reaches_the_agent(
+    monkeypatch, refusal, replied
+):
+    prepare = AsyncMock()
+    forget = AsyncMock()
+    monkeypatch.setattr(
+        third_party, "check_rate_limit", AsyncMock(return_value=refusal)
+    )
+    monkeypatch.setattr(third_party, "forget_group_message", forget)
+    monkeypatch.setattr(third_party, "prepare_codex_request", prepare)
+    config = {
+        "agent_runner": {"runner_type": "codex", "config": {}},
+        "provider_settings": _provider_settings(),
+    }
+    stage = third_party.ThirdPartyAgentSubStage()
+    await stage.initialize(_stage_ctx(config))
+    event = MagicMock()
+    event.message_str = "hello"
+    event.message_obj.message = []
+
+    [item async for item in stage.process(event, "")]
+
+    prepare.assert_not_awaited()
+    forget.assert_awaited_once_with(event)
+    assert event.set_result.called is replied
+    if replied:
+        [result] = event.set_result.call_args.args
+        assert result.get_plain_text() == "too fast"
+
+
+@pytest.mark.asyncio
+async def test_an_allowed_request_goes_on(monkeypatch):
+    monkeypatch.setattr(third_party, "check_rate_limit", AsyncMock(return_value=None))
+    forget = AsyncMock()
+    monkeypatch.setattr(third_party, "forget_group_message", forget)
+
+    *_, runner, _stage = await _process_with(monkeypatch)
+
+    forget.assert_not_awaited()
+    runner.reset.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_request_a_plugin_stops_gives_its_use_back(monkeypatch):
+    refund = AsyncMock()
+    monkeypatch.setattr(third_party, "refund_rate_limit", refund)
+
+    *_, event, _runner, _stage = await _process_with(monkeypatch, hook_stops=True)
+
+    refund.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_steer_gives_its_use_back(monkeypatch):
+    refund = AsyncMock()
+    monkeypatch.setattr(third_party, "refund_rate_limit", refund)
+
+    await _process_with(
+        monkeypatch, steer=AsyncMock(side_effect=RuntimeError("x")), raises=RuntimeError
+    )
+
+    refund.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reset", "given_back"),
+    [(None, False), (AsyncMock(side_effect=RuntimeError("bad config")), True)],
+)
+async def test_only_a_run_codex_never_accepted_gives_its_use_back(
+    monkeypatch, reset, given_back
+):
+    from astrbot.core.permission_rate_limit import USE_EXTRA_KEY
+
+    limiter = MagicMock()
+    limiter.refund = AsyncMock()
+    real_check = AsyncMock(return_value=None)
+
+    async def check(event, conf):
+        event.set_extra(USE_EXTRA_KEY, (limiter, 7))
+        return await real_check()
+
+    monkeypatch.setattr(third_party, "check_rate_limit", check)
+
+    await _process_with(
+        monkeypatch, reset=reset, raises=RuntimeError if reset else None
+    )
+
+    assert limiter.refund.await_count == (1 if given_back else 0)
+
+
+@pytest.mark.asyncio
+async def test_an_unconsumed_stream_keeps_its_use_for_a_late_run(monkeypatch):
+    refund = AsyncMock()
+    monkeypatch.setattr(third_party, "refund_rate_limit", refund)
+    _, _, event, _runner, _ = await _process_with(
+        monkeypatch, streaming=True, mock_history=False, watchdog_s=0
+    )
+    await asyncio.sleep(0.05)  # the watchdog closes the unconsumed stream
+
+    # A late consumer may still run it: nothing is given back yet.
+    refund.assert_not_awaited()
+    result = event.set_result.call_args_list[0].args[0]
+    [_ async for _ in result.async_stream]
+    # The late run's own close settles it (a no-op once Codex accepted it).
+    refund.assert_awaited_with(event)
+
+
+@pytest.mark.asyncio
+async def test_a_consumer_arriving_mid_close_keeps_the_accepted_use(monkeypatch):
+    from astrbot.core.permission_rate_limit import USE_EXTRA_KEY
+
+    limiter = MagicMock()
+    limiter.refund = AsyncMock()
+
+    async def check(event, conf):
+        event.set_extra(USE_EXTRA_KEY, (limiter, 7))
+
+    monkeypatch.setattr(third_party, "check_rate_limit", check)
+    gate = asyncio.Event()
+    _, _, event, _runner, _ = await _process_with(
+        monkeypatch,
+        streaming=True,
+        mock_history=False,
+        watchdog_s=0,
+        restore_gate=gate,
+    )
+    await asyncio.sleep(0.05)  # the watchdog's close waits on the history
+
+    # A consumer turns up meanwhile; Codex accepts the late run only after
+    # the watchdog's close has finished.
+    accepted = asyncio.Event()
+
+    async def step_until_done(max_step: int = 30):
+        await accepted.wait()
+        keep_rate_limit_use(event)
+        if False:
+            yield None
+
+    _runner.step_until_done = step_until_done
+    result = event.set_result.call_args_list[0].args[0]
+    consumer = asyncio.create_task(_drain(result.async_stream))
+    await asyncio.sleep(0.05)
+    gate.set()
+    await asyncio.sleep(0.05)
+    accepted.set()
+    await consumer
+
+    limiter.refund.assert_not_awaited()
+
+
+async def _drain(stream):
+    return [_ async for _ in stream]

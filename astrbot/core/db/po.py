@@ -64,6 +64,22 @@ class ProviderStat(TimestampMixin, SQLModel, table=True):
     time_to_first_token: float = Field(default=0.0, nullable=False)
 
 
+class PermissionUsage(SQLModel, table=True):
+    """One request an account sent to the agent, for permission-rule rate limits."""
+
+    __tablename__: str = "permission_usage"
+
+    id: int | None = Field(
+        default=None,
+        primary_key=True,
+        sa_column_kwargs={"autoincrement": True},
+    )
+    account: str = Field(nullable=False)
+    used_at: float = Field(nullable=False, index=True)
+
+    __table_args__ = (Index("ix_permission_usage_account_time", "account", "used_at"),)
+
+
 class ConversationV2(TimestampMixin, SQLModel, table=True):
     __tablename__: str = "conversations"
 

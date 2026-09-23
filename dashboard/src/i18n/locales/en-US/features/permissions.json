@@ -1,7 +1,7 @@
 {
   "page": {
     "title": "Permission Rules",
-    "subtitle": "Per-user rules that restrict tools and MCP servers or override persona, model, native execution and global memory (default config profile)."
+    "subtitle": "Restrict tools, MCP servers and usage rate per user, or override persona, model, local command execution and global memory (default config profile)."
   },
   "actions": {
     "refresh": "Refresh",
@@ -10,7 +10,7 @@
   },
   "rules": {
     "title": "Rules",
-    "subtitle": "Rules are evaluated top to bottom; the first enabled rule whose conditions match the sender wins. Senders matched by no rule get the default (unrestricted) policy.",
+    "subtitle": "Each rule is a permission group. Rules match top to bottom; the first enabled rule whose conditions match the sender applies, and whatever it leaves unset comes from the rule it inherits. Senders matching no rule get the default (unrestricted) policy.",
     "add": "Add rule",
     "empty": "No rules yet. Everyone uses the default policy.",
     "name": "Name",
@@ -39,7 +39,8 @@
     "errorRole": "\"{condition}\": role must be admin or member",
     "errorEmptyId": "\"{condition}\": the ID part is empty",
     "errorSyntax": "\"{condition}\" is not a valid condition and will never match",
-    "errorNone": "This rule has no conditions and will never match"
+    "errorNone": "This rule has no conditions and no rule inherits it, so it never applies",
+    "template": "No conditions (a template other rules inherit)"
   },
   "fields": {
     "toolsTitle": "Tools",
@@ -62,7 +63,11 @@
     "nativeExec": "Native command execution",
     "nativeExecHint": "Only matters when native Codex exec tools are enabled.",
     "globalMemory": "Write global memory",
-    "globalMemoryHint": "Whether this sender's private chats may write to the global memory store (only when Codex memories are enabled)."
+    "globalMemoryHint": "Whether this sender's private chats may write to the global memory store (only when Codex memories are enabled).",
+    "inherits": "Inherits from",
+    "inheritsHint": "Unset fields (empty lists, no override, inherit) come from the selected rule, over several levels. Match conditions and the enabled switch are not inherited.",
+    "noParent": "(none)",
+    "parentMissing": "{id} (missing)"
   },
   "triState": {
     "inherit": "Inherit",
@@ -71,7 +76,7 @@
   },
   "tester": {
     "title": "Test a sender",
-    "subtitle": "Check which rule applies to a sender using the rules as currently edited (unsaved changes included).",
+    "subtitle": "Check which rule a sender matches with the rules being edited (including unsaved changes), and the effective policy after inheritance.",
     "senderId": "Sender ID",
     "groupId": "Group ID",
     "groupIdPlaceholder": "Empty for a private chat",
@@ -86,7 +91,9 @@
       "shadowed": "shadowed",
       "noMatch": "no match",
       "disabled": "disabled"
-    }
+    },
+    "chain": "Inheritance",
+    "inheritedFrom": "(from \"{name}\")"
   },
   "messages": {
     "unsavedChangesNotice": "You have unsaved changes.",
@@ -96,6 +103,32 @@
     "saveSuccess": "Saved",
     "saveFailed": "Failed to save",
     "deleteConfirm": "Delete rule \"{name}\"?",
-    "invalidConditionsConfirm": "Some enabled rules have conditions that will never match. Save anyway?"
+    "invalidConditionsConfirm": "Some enabled rules have problems. Save anyway?",
+    "deleteParentConfirm": "Delete rule \"{name}\"? {count} rule(s) inherit it and will inherit its parent instead."
+  },
+  "rateLimit": {
+    "title": "Rate limit",
+    "mode": "Rate limit",
+    "modeHint": "Counts requests sent to the agent per account (scheduled tasks and background-task wake-ups excluded); one account shares its count across all chats.",
+    "inherit": "Inherit",
+    "unlimited": "Unlimited",
+    "limit": "Custom",
+    "count": "Count",
+    "per": "per",
+    "window": "Window",
+    "add": "Add limit",
+    "reply": "Rate-limited reply",
+    "replyPlaceholder": "请求太频繁了，请 {wait} 后再试（限制：{limit}）。",
+    "replyHint": "Use {wait} (time left) and {limit} (the limit hit). Sent once per refusal period; leave empty to inherit or use the default, which is in Chinese.",
+    "slidingHint": "Sliding window: each use frees up one window after it happened, rather than the whole count resetting. Every limit must hold.",
+    "item": "{count} per {amount} {unit}",
+    "errorRow": "invalid rate limit (count must be a positive integer, window 1 second to 30 days)",
+    "units": {
+      "s": "s",
+      "m": "min",
+      "h": "h",
+      "d": "d"
+    },
+    "errorEmpty": "custom rate limit has no valid limits; it saves as \"Unlimited\" (overriding inherited limits)"
   }
 }

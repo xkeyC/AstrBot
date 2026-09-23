@@ -139,7 +139,9 @@
               >
                 {{ cond }}
               </v-chip>
-              <span v-if="rule.match.length === 0" class="setting-subtitle mt-0">{{ tm('match.none') }}</span>
+              <span v-if="rule.match.length === 0" class="setting-subtitle mt-0">
+                {{ isParent(rule) ? tm('match.template') : tm('match.none') }}
+              </span>
               <span v-if="ruleSummary(rule)" class="setting-subtitle mt-0">· {{ ruleSummary(rule) }}</span>
             </div>
 
@@ -169,6 +171,17 @@
                   </v-chip>
                 </template>
               </v-combobox>
+
+              <v-select
+                v-model="rule.inherits"
+                :items="parentItems(rule)"
+                :label="tm('fields.inherits')"
+                :hint="tm('fields.inheritsHint')"
+                persistent-hint
+                variant="outlined"
+                density="comfortable"
+                class="mt-4"
+              />
 
               <div class="section-label">{{ tm('fields.toolsTitle') }}</div>
               <div class="dashboard-form-grid">
@@ -257,6 +270,84 @@
               <div v-if="rule.model" class="model-warning">
                 <v-icon size="16" color="warning">mdi-alert-outline</v-icon>
                 <span>{{ tm('fields.modelCacheWarning') }}</span>
+              </div>
+
+              <div class="section-label">{{ tm('rateLimit.title') }}</div>
+              <div class="dashboard-form-grid">
+                <v-select
+                  v-model="rule.rate_mode"
+                  :items="rateModeItems"
+                  :label="tm('rateLimit.mode')"
+                  :hint="tm('rateLimit.modeHint')"
+                  persistent-hint
+                  variant="outlined"
+                  density="comfortable"
+                />
+                <v-text-field
+                  v-model="rule.rate_limit_reply"
+                  :label="tm('rateLimit.reply')"
+                  :placeholder="tm('rateLimit.replyPlaceholder')"
+                  :hint="tm('rateLimit.replyHint')"
+                  persistent-hint
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </div>
+              <div v-if="rule.rate_mode === 'limit'" class="rate-list mt-3">
+                <div v-for="(limit, li) in rule.rate_limits" :key="li" class="rate-row">
+                  <v-text-field
+                    v-model.number="limit.count"
+                    type="number"
+                    min="1"
+                    :label="tm('rateLimit.count')"
+                    :error="!rateRowValid(limit)"
+                    variant="outlined"
+                    density="compact"
+                    hide-details
+                  />
+                  <span class="rate-per">{{ tm('rateLimit.per') }}</span>
+                  <v-text-field
+                    v-model.number="limit.amount"
+                    type="number"
+                    min="1"
+                    :label="tm('rateLimit.window')"
+                    :error="!rateRowValid(limit)"
+                    variant="outlined"
+                    density="compact"
+                    hide-details
+                  />
+                  <v-select
+                    v-model="limit.unit"
+                    :items="unitItems"
+                    variant="outlined"
+                    density="compact"
+                    hide-details
+                  />
+                  <v-btn
+                    icon="mdi-close"
+                    size="small"
+                    variant="text"
+                    density="comfortable"
+                    :title="tm('rules.delete')"
+                    @click="rule.rate_limits.splice(li, 1)"
+                  />
+                </div>
+                <div>
+                  <v-btn
+                    prepend-icon="mdi-plus"
+                    variant="text"
+                    color="primary"
+                    size="small"
+                    @click="rule.rate_limits.push({ count: 10, amount: 1, unit: 'm' })"
+                  >
+                    {{ tm('rateLimit.add') }}
+                  </v-btn>
+                </div>
+                <div v-if="!rule.rate_limits.some(rateRowValid)" class="model-warning">
+                  <v-icon size="16" color="warning">mdi-alert-outline</v-icon>
+                  <span>{{ tm('rateLimit.errorEmpty') }}</span>
+                </div>
+                <div class="setting-subtitle">{{ tm('rateLimit.slidingHint') }}</div>
               </div>
             </div>
           </div>
@@ -350,6 +441,9 @@ import { useModuleI18n } from '@/i18n/composables'
 import { askForConfirmation, useConfirmDialog } from '@/utils/confirmDialog'
 
 type TriState = 'inherit' | 'allow' | 'deny'
+type RateMode = 'inherit' | 'unlimited' | 'limit'
+type Unit = 's' | 'm' | 'h' | 'd'
+type RateRow = { count: number; amount: number; unit: Unit }
 type PatternKey = 'tools_allow' | 'tools_deny' | 'mcp_allow' | 'mcp_deny'
 
 type RuleRow = {
@@ -357,6 +451,8 @@ type RuleRow = {
   __expanded: boolean
   // Keys this page does not know about, preserved on save.
   __extra: Record<string, unknown>
+  id: string
+  inherits: string
   name: string
   enabled: boolean
   match: string[]
@@ -368,6 +464,9 @@ type RuleRow = {
   model: string
   native_exec: TriState
   global_memory: TriState
+  rate_mode: RateMode
+  rate_limits: RateRow[]
+  rate_limit_reply: string
 }
 
 type Facts = { sender_id: string; group_id: string; role: string }
@@ -376,6 +475,10 @@ type TraceStatus = 'matched' | 'shadowed' | 'noMatch' | 'disabled'
 const CONFIG_ID = 'default'
 const CONFIG_KEY = 'permission_rules'
 const KNOWN_KEYS = [
+  'id',
+  'inherits',
+  'rate_limit',
+  'rate_limit_reply',
   'name',
   'enabled',
   'match',
@@ -410,6 +513,11 @@ const personasLoading = ref(false)
 const models = ref<{ model?: string; id?: string; display_name?: string }[]>([])
 const modelsLoading = ref(false)
 
+// Mirrors MAX_INHERIT_DEPTH / MAX_WINDOW_S in astrbot/core/permission_rules.py.
+const MAX_INHERIT_DEPTH = 16
+const MAX_WINDOW_S = 30 * 24 * 3600
+const UNIT_S: Record<Unit, number> = { s: 1, m: 60, h: 3600, d: 86400 }
+
 const tester = ref<Facts>({ sender_id: '', group_id: '', role: 'member' })
 
 const patternFields: { key: PatternKey; kind: 'tool' | 'mcp'; label: string; hint: string }[] = [
@@ -424,6 +532,16 @@ const triStateItems = computed(() => [
   { title: tm('triState.allow'), value: 'allow' },
   { title: tm('triState.deny'), value: 'deny' }
 ])
+
+const rateModeItems = computed(() => [
+  { title: tm('rateLimit.inherit'), value: 'inherit' },
+  { title: tm('rateLimit.unlimited'), value: 'unlimited' },
+  { title: tm('rateLimit.limit'), value: 'limit' }
+])
+
+const unitItems = computed(() =>
+  (Object.keys(UNIT_S) as Unit[]).map((u) => ({ title: tm(`rateLimit.units.${u}`), value: u }))
+)
 
 const roleItems = computed(() => [
   { title: tm('tester.roleMember'), value: 'member' },
@@ -441,6 +559,10 @@ function errorMessage(e: any, fallback: string): string {
 
 function newKey(): string {
   return `${Date.now()}_${Math.random().toString(16).slice(2)}`
+}
+
+function newRuleId(): string {
+  return `r_${Math.random().toString(16).slice(2, 10)}`
 }
 
 function str(value: unknown): string {
@@ -523,8 +645,64 @@ function conditionError(condition: string): string {
 
 function matchErrors(rule: RuleRow): string[] {
   const errs = rule.match.map(conditionError).filter((e) => !!e)
-  if (rule.enabled && rule.match.length === 0) errs.unshift(tm('match.errorNone'))
+  // A rule without conditions is fine as a template other rules inherit.
+  if (rule.enabled && rule.match.length === 0 && !isParent(rule)) errs.unshift(tm('match.errorNone'))
   return errs
+}
+
+// ---------- inheritance (mirrors inheritance_chain / policy_from_rule) ----------
+
+function isParent(rule: RuleRow): boolean {
+  return rules.value.some((r) => r !== rule && r.inherits === rule.id)
+}
+
+/** The rule followed by its ancestors; the first rule with an id owns it. */
+function chainOf(rule: RuleRow): RuleRow[] {
+  const chain = [rule]
+  let current = rule
+  while (chain.length < MAX_INHERIT_DEPTH) {
+    const parent = rules.value.find((r) => r.id === current.inherits)
+    if (!current.inherits || !parent || chain.includes(parent)) break
+    chain.push(parent)
+    current = parent
+  }
+  return chain
+}
+
+function parentItems(rule: RuleRow) {
+  const items = [{ title: tm('fields.noParent'), value: '' }]
+  rules.value.forEach((r, idx) => {
+    // Leave out the rule itself and any rule that already inherits from it.
+    if (r === rule || chainOf(r).includes(rule)) return
+    items.push({ title: `#${idx + 1} ${ruleLabel(r, idx)}`, value: r.id })
+  })
+  if (rule.inherits && !rules.value.some((r) => r.id === rule.inherits)) {
+    items.push({ title: tm('fields.parentMissing', { id: rule.inherits }), value: rule.inherits })
+  }
+  return items
+}
+
+// ---------- rate limits ----------
+
+function rateRowValid(row: RateRow): boolean {
+  const count = Number(row.count)
+  const window = Number(row.amount) * UNIT_S[row.unit]
+  return Number.isInteger(count) && count >= 1 && Number.isInteger(window) && window >= 1 && window <= MAX_WINDOW_S
+}
+
+function toRateRow(window: number, count: number): RateRow {
+  const unit = (['d', 'h', 'm'] as Unit[]).find((u) => window % UNIT_S[u] === 0) || 's'
+  return { count, amount: window / UNIT_S[unit], unit }
+}
+
+/** '' when the rule inherits its rate limits, else a readable description. */
+function rateText(rule: RuleRow): string {
+  if (rule.rate_mode === 'inherit') return ''
+  const rows = rule.rate_mode === 'limit' ? rule.rate_limits.filter(rateRowValid) : []
+  if (!rows.length) return tm('rateLimit.unlimited')
+  return rows
+    .map((r) => tm('rateLimit.item', { count: r.count, amount: r.amount, unit: tm(`rateLimit.units.${r.unit}`) }))
+    .join(', ')
 }
 
 const normalizedFacts = computed<Facts>(() => ({
@@ -566,29 +744,54 @@ function triLabel(value: TriState): string {
   return tm(`triState.${value}`)
 }
 
+/** The effective policy: each field from the nearest rule in the chain that sets it. */
 function policyLines(rule: RuleRow | undefined): { label: string; value: string }[] {
   if (!rule) return []
-  const list = (v: string[]) => (v.length ? v.join(', ') : '—')
+  const chain = chainOf(rule)
+  const nearest = (pick: (r: RuleRow) => string, unset: string) => {
+    for (const r of chain) {
+      const value = pick(r)
+      if (!value) continue
+      if (r === rule) return value
+      return `${value} ${tm('tester.inheritedFrom', { name: ruleLabel(r, rules.value.indexOf(r)) })}`
+    }
+    return unset
+  }
+  const list = (key: PatternKey) => nearest((r) => r[key].join(', '), '—')
+  const tri = (key: 'native_exec' | 'global_memory') =>
+    nearest((r) => (r[key] === 'inherit' ? '' : triLabel(r[key])), triLabel('inherit'))
   return [
-    { label: tm('fields.toolsAllow'), value: list(rule.tools_allow) },
-    { label: tm('fields.toolsDeny'), value: list(rule.tools_deny) },
-    { label: tm('fields.mcpAllow'), value: list(rule.mcp_allow) },
-    { label: tm('fields.mcpDeny'), value: list(rule.mcp_deny) },
-    { label: tm('fields.persona'), value: rule.persona_id || tm('fields.noOverride') },
-    { label: tm('fields.model'), value: rule.model || tm('fields.noOverride') },
-    { label: tm('fields.nativeExec'), value: triLabel(rule.native_exec) },
-    { label: tm('fields.globalMemory'), value: triLabel(rule.global_memory) }
+    { label: tm('tester.chain'), value: chain.map((r) => ruleLabel(r, rules.value.indexOf(r))).join(' → ') },
+    { label: tm('fields.toolsAllow'), value: list('tools_allow') },
+    { label: tm('fields.toolsDeny'), value: list('tools_deny') },
+    { label: tm('fields.mcpAllow'), value: list('mcp_allow') },
+    { label: tm('fields.mcpDeny'), value: list('mcp_deny') },
+    { label: tm('fields.persona'), value: nearest((r) => r.persona_id, tm('fields.noOverride')) },
+    { label: tm('fields.model'), value: nearest((r) => r.model, tm('fields.noOverride')) },
+    { label: tm('fields.nativeExec'), value: tri('native_exec') },
+    { label: tm('fields.globalMemory'), value: tri('global_memory') },
+    { label: tm('rateLimit.title'), value: nearest(rateText, tm('rateLimit.unlimited')) },
+    {
+      label: tm('rateLimit.reply'),
+      value: nearest((r) => r.rate_limit_reply.trim(), tm('rateLimit.replyPlaceholder'))
+    }
   ]
 }
 
 function ruleSummary(rule: RuleRow): string {
   const parts: string[] = []
+  if (rule.inherits) {
+    const parent = rules.value.findIndex((r) => r.id === rule.inherits)
+    const name = parent >= 0 ? ruleLabel(rules.value[parent], parent) : rule.inherits
+    parts.push(`${tm('fields.inherits')}: ${name}`)
+  }
   if (rule.tools_allow.length || rule.tools_deny.length) parts.push(tm('fields.toolsTitle'))
   if (rule.mcp_allow.length || rule.mcp_deny.length) parts.push('MCP')
   if (rule.persona_id) parts.push(`${tm('fields.persona')}: ${rule.persona_id}`)
   if (rule.model) parts.push(`${tm('fields.model')}: ${rule.model}`)
   if (rule.native_exec !== 'inherit') parts.push(`${tm('fields.nativeExec')}: ${triLabel(rule.native_exec)}`)
   if (rule.global_memory !== 'inherit') parts.push(`${tm('fields.globalMemory')}: ${triLabel(rule.global_memory)}`)
+  if (rateText(rule)) parts.push(`${tm('rateLimit.title')}: ${rateText(rule)}`)
   return parts.join(' · ')
 }
 
@@ -599,6 +802,8 @@ function emptyRule(): RuleRow {
     __key: newKey(),
     __expanded: true,
     __extra: {},
+    id: newRuleId(),
+    inherits: '',
     name: '',
     enabled: true,
     match: [],
@@ -609,7 +814,10 @@ function emptyRule(): RuleRow {
     persona_id: '',
     model: '',
     native_exec: 'inherit',
-    global_memory: 'inherit'
+    global_memory: 'inherit',
+    rate_mode: 'inherit',
+    rate_limits: [],
+    rate_limit_reply: ''
   }
 }
 
@@ -630,17 +838,25 @@ function duplicateRule(idx: number) {
     ...JSON.parse(JSON.stringify(src)),
     __key: newKey(),
     __expanded: true,
+    id: newRuleId(),
     name: src.name ? tm('rules.copyName', { name: src.name }) : ''
   }
   rules.value.splice(idx + 1, 0, copy)
 }
 
 async function deleteRule(idx: number) {
+  const rule = rules.value[idx]
+  const name = ruleLabel(rule, idx)
+  const children = rules.value.filter((r) => r !== rule && r.inherits === rule.id)
   const confirmed = await askForConfirmation(
-    tm('messages.deleteConfirm', { name: ruleLabel(rules.value[idx], idx) }),
+    children.length
+      ? tm('messages.deleteParentConfirm', { name, count: children.length })
+      : tm('messages.deleteConfirm', { name }),
     confirmDialog
   )
   if (!confirmed) return
+  // Its children now inherit from its own parent.
+  for (const child of children) child.inherits = rule.inherits
   rules.value.splice(idx, 1)
 }
 
@@ -720,10 +936,21 @@ function normalizeRule(raw: Record<string, unknown>): RuleRow {
   for (const [k, v] of Object.entries(raw)) {
     if (!KNOWN_KEYS.includes(k)) extra[k] = v
   }
+  // Like parse_rate_limits: a list sets limits (one left empty means none).
+  const limits = Array.isArray(raw.rate_limit)
+    ? raw.rate_limit
+        .map((l: any) => ({ window: Math.trunc(Number(l?.window)), count: Math.trunc(Number(l?.count)) }))
+        .filter((l) => l.window > 0 && l.window <= MAX_WINDOW_S && l.count > 0)
+    : []
+  let rateMode: RateMode = 'unlimited'
+  if (raw.rate_limit == null || raw.rate_limit === 'inherit') rateMode = 'inherit'
+  else if (limits.length) rateMode = 'limit'
   return {
     __key: newKey(),
     __expanded: false,
     __extra: extra,
+    id: str(raw.id).trim(),
+    inherits: str(raw.inherits).trim(),
     name: str(raw.name),
     // Only an explicit false (or "false") disables a rule, like the backend.
     enabled: asOptBool(raw.enabled === undefined ? true : raw.enabled) !== false,
@@ -735,20 +962,33 @@ function normalizeRule(raw: Record<string, unknown>): RuleRow {
     persona_id: str(raw.persona_id),
     model: str(raw.model),
     native_exec: toTriState(raw.native_exec),
-    global_memory: toTriState(raw.global_memory)
+    global_memory: toTriState(raw.global_memory),
+    rate_mode: rateMode,
+    rate_limits: limits.map((l) => toRateRow(l.window, l.count)),
+    rate_limit_reply: str(raw.rate_limit_reply)
   }
 }
 
 function normalizeRules(value: unknown): RuleRow[] {
   if (!Array.isArray(value)) return []
-  return value
+  const rows = value
     .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && !Array.isArray(r))
     .map(normalizeRule)
+  // Every rule gets an id to be inherited by; a later duplicate gets a new one
+  // (the first rule with an id owns it, as in the backend).
+  const seen = new Set<string>()
+  for (const row of rows) {
+    if (!row.id || seen.has(row.id)) row.id = newRuleId()
+    seen.add(row.id)
+  }
+  return rows
 }
 
 function rulesPayload(rows: RuleRow[]) {
   return rows.map((r) => ({
     ...r.__extra,
+    id: r.id,
+    inherits: r.inherits,
     name: r.name.trim(),
     enabled: !!r.enabled,
     match: cleanList(r.match),
@@ -759,7 +999,14 @@ function rulesPayload(rows: RuleRow[]) {
     persona_id: r.persona_id || '',
     model: (r.model || '').trim(),
     native_exec: fromTriState(r.native_exec),
-    global_memory: fromTriState(r.global_memory)
+    global_memory: fromTriState(r.global_memory),
+    rate_limit:
+      r.rate_mode === 'limit'
+        ? r.rate_limits
+            .filter(rateRowValid)
+            .map((l) => ({ window: Number(l.amount) * UNIT_S[l.unit], count: Number(l.count) }))
+        : r.rate_mode,
+    rate_limit_reply: r.rate_limit_reply.trim()
   }))
 }
 
@@ -789,8 +1036,13 @@ async function loadConfig() {
 async function confirmProblems(): Promise<boolean> {
   const problems: string[] = []
   rules.value.forEach((rule, idx) => {
-    if (!rule.enabled) return
-    const errs = matchErrors(rule)
+    // A disabled rule still matters as a template others inherit.
+    if (!rule.enabled && !isParent(rule)) return
+    const errs = rule.enabled ? matchErrors(rule) : []
+    if (rule.rate_mode === 'limit') {
+      if (!rule.rate_limits.every(rateRowValid)) errs.push(tm('rateLimit.errorRow'))
+      if (!rule.rate_limits.some(rateRowValid)) errs.push(tm('rateLimit.errorEmpty'))
+    }
     if (errs.length) problems.push(`#${idx + 1} ${ruleLabel(rule, idx)}: ${errs.join('; ')}`)
   })
   if (!problems.length) return true
@@ -981,6 +1233,24 @@ onBeforeRouteLeave(async () => {
   color: rgb(var(--v-theme-warning));
 }
 
+.rate-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rate-row {
+  display: grid;
+  grid-template-columns: 120px auto 120px 120px auto;
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.rate-per {
+  color: var(--dashboard-muted);
+  font-size: 13px;
+}
+
 .tester-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 200px;
@@ -1034,6 +1304,10 @@ onBeforeRouteLeave(async () => {
   .tester-grid,
   .tester-policy {
     grid-template-columns: 1fr;
+  }
+
+  .rate-row {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   }
 }
 </style>

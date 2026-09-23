@@ -10,6 +10,7 @@ from astrbot.api.message_components import Image, Json, Plain
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.core import logger
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.permission_rate_limit import ACTIVE_REPLY_EXTRA
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.session_waiter import (
     FILTERS,
@@ -262,12 +263,20 @@ class Main(star.Star):
                             except Exception:
                                 logger.exception("主动回复处理图片失败")
 
-                    yield event.request_llm(
-                        prompt=prompt,
-                        session_id=event.session_id,
-                        image_urls=image_urls,
-                        conversation=conv,
-                    )
+                    # The bot chose to chime in: not a request the
+                    # sender's rate limit counts.
+                    # Cleared after the run, so another handler's request on
+                    # this same event is still counted.
+                    event.set_extra(ACTIVE_REPLY_EXTRA, True)
+                    try:
+                        yield event.request_llm(
+                            prompt=prompt,
+                            session_id=event.session_id,
+                            image_urls=image_urls,
+                            conversation=conv,
+                        )
+                    finally:
+                        event.set_extra(ACTIVE_REPLY_EXTRA, None)
                 except BaseException as e:
                     logger.error(traceback.format_exc())
                     logger.error(f"主动回复失败: {e}")

@@ -9,6 +9,16 @@ hit the event wins. Matching syntax (compatible with DynamicPersona):
 - ``role:admin`` / ``role:member``: by AstrBot role
 - ``*``: everyone
 
+A rule is a permission group. It may inherit from another rule (``inherits``
+names that rule's ``id``): every field it leaves unset -- an empty list, an
+empty persona / model / reply, an ``inherit`` switch or rate limit -- comes
+from the parent, and so on up the chain. Match conditions and the enabled
+switch are never inherited, so a rule with no match conditions (or a disabled
+one) still serves as a template.
+
+``rate_limit`` caps how many requests an account may send to the agent within
+sliding windows; see ``astrbot/core/permission_rate_limit.py``.
+
 Tool permissions are always enforced when a tool is called. Under code mode
 the denied tools are also left out of the set the model can see, which costs
 nothing because deferred tool specs never enter the prompt prefix; without
@@ -24,6 +34,10 @@ from typing import Any
 
 CONFIG_KEY = "permission_rules"
 EVENT_EXTRA_KEY = "_permission_policy"
+# Longest inheritance chain followed; deeper ones are cut off there.
+MAX_INHERIT_DEPTH = 16
+# Longest rate-limit window, in seconds (30 days).
+MAX_WINDOW_S = 30 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -41,6 +55,11 @@ class PermissionPolicy:
     native_exec: bool | None = None
     # Consumed by the scoped memory module (may_write_global).
     global_memory: bool | None = None
+    # (window seconds, max requests) pairs; every one must hold. Empty: no limit.
+    rate_limits: tuple[tuple[int, int], ...] = ()
+    rate_limit_reply: str = ""
+    # Ids of the rule that matched and the rules it inherited from, in order.
+    chain: tuple[str, ...] = ()
 
     @property
     def is_default(self) -> bool:
@@ -145,6 +164,100 @@ def condition_matches(condition: str, facts: EventFacts) -> bool:
     return False
 
 
+def parse_rate_limits(value: Any) -> tuple[tuple[int, int], ...] | None:
+    """A rule's rate limits: None to inherit, () for none, else the windows.
+
+    Accepts ``"inherit"`` / missing, ``"unlimited"``, or a list of
+    ``{"window": seconds, "count": n}``. Malformed or out-of-range entries are
+    skipped; a list left empty that way means no limit.
+    """
+    if value is None or value == "inherit":
+        return None
+    if not isinstance(value, list):
+        return ()
+    limits = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            window = int(float(item.get("window")))
+            count = int(float(item.get("count")))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 < window <= MAX_WINDOW_S and count > 0:
+            limits.append((window, count))
+    return tuple(sorted(set(limits)))
+
+
+def rule_id(rule: dict) -> str:
+    return str(rule.get("id") or "").strip()
+
+
+def inheritance_chain(rule: dict, rules: list[dict] | None) -> list[dict]:
+    """The rule followed by its ancestors, nearest first.
+
+    A missing parent ends the chain; a cycle is cut where it closes.
+    """
+    by_id: dict[str, dict] = {}
+    for r in rules or []:
+        # The first rule with an id owns it, as the WebUI shows.
+        if isinstance(r, dict) and rule_id(r):
+            by_id.setdefault(rule_id(r), r)
+    chain = [rule]
+    seen = {id(rule)}
+    current = rule
+    while len(chain) < MAX_INHERIT_DEPTH:
+        parent = by_id.get(str(current.get("inherits") or "").strip())
+        if parent is None or id(parent) in seen:
+            break
+        chain.append(parent)
+        seen.add(id(parent))
+        current = parent
+    return chain
+
+
+def _nearest(chain: list[dict], parse: Any, unset: Any) -> Any:
+    """The nearest value in the chain that is set, else ``unset``."""
+    for rule in chain:
+        value = parse(rule)
+        if value is not None and value != unset:
+            return value
+    return unset
+
+
+def policy_from_rule(rule: dict, rules: list[dict] | None) -> PermissionPolicy:
+    """The effective policy of one rule, with everything it inherits."""
+    chain = inheritance_chain(rule, rules)
+
+    def names(key: str) -> tuple[str, ...]:
+        return _nearest(chain, lambda r: _as_list(r.get(key)), ())
+
+    def text(key: str) -> str:
+        return _nearest(chain, lambda r: str(r.get(key) or "").strip(), "")
+
+    def switch(key: str) -> bool | None:
+        return _nearest(chain, lambda r: _as_opt_bool(r.get(key)), None)
+
+    # "unlimited" on a nearer rule is set, not unset: it ends the search.
+    rate_limits = _nearest(
+        chain, lambda r: parse_rate_limits(r.get("rate_limit")), None
+    )
+    return PermissionPolicy(
+        rule_name=str(rule.get("name") or ""),
+        tools_allow=names("tools_allow"),
+        tools_deny=names("tools_deny"),
+        mcp_allow=names("mcp_allow"),
+        mcp_deny=names("mcp_deny"),
+        persona_id=text("persona_id"),
+        model=text("model"),
+        native_exec=switch("native_exec"),
+        global_memory=switch("global_memory"),
+        rate_limits=rate_limits or (),
+        rate_limit_reply=text("rate_limit_reply"),
+        chain=tuple(rule_id(r) for r in chain),
+    )
+
+
 def resolve_policy(rules: list[dict] | None, facts: EventFacts) -> PermissionPolicy:
     for rule in rules or []:
         if (
@@ -155,17 +268,7 @@ def resolve_policy(rules: list[dict] | None, facts: EventFacts) -> PermissionPol
         conditions = _as_list(rule.get("match"))
         if not any(condition_matches(c, facts) for c in conditions):
             continue
-        return PermissionPolicy(
-            rule_name=str(rule.get("name") or ""),
-            tools_allow=_as_list(rule.get("tools_allow")),
-            tools_deny=_as_list(rule.get("tools_deny")),
-            mcp_allow=_as_list(rule.get("mcp_allow")),
-            mcp_deny=_as_list(rule.get("mcp_deny")),
-            persona_id=str(rule.get("persona_id") or ""),
-            model=str(rule.get("model") or ""),
-            native_exec=_as_opt_bool(rule.get("native_exec")),
-            global_memory=_as_opt_bool(rule.get("global_memory")),
-        )
+        return policy_from_rule(rule, rules)
     return DEFAULT_POLICY
 
 

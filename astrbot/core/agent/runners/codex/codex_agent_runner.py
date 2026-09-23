@@ -22,6 +22,7 @@ from pathlib import Path
 from astrbot.core import db_helper, logger, sp
 from astrbot.core.message.components import Json
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.permission_rate_limit import keep_rate_limit_use
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
 from astrbot.core.permission_rules import PermissionPolicy
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
@@ -361,6 +362,7 @@ def build_additional_context(req: ProviderRequest) -> dict[str, JsonObject]:
 
 
 GROUP_HISTORY_RESTORE_KEY = "_group_context_restore"
+GROUP_MESSAGE_FORGET_KEY = "_group_context_forget"
 _META_PREFIX = '<context_unit name="message_meta"'
 _GROUP_HISTORY_PREFIX = '<context_unit name="group_history"'
 
@@ -373,6 +375,19 @@ async def release_group_history(event: T.Any) -> None:
     they are lost.
     """
     await give_back(take_group_history(event))
+
+
+async def forget_group_message(event: T.Any) -> None:
+    """Removes a refused triggering message from the group history, so no
+    later request answers it on the sender's behalf."""
+    get_extra = getattr(event, "get_extra", None)
+    forget = get_extra(GROUP_MESSAGE_FORGET_KEY) if callable(get_extra) else None
+    if not callable(forget):
+        return
+    try:
+        await forget()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not drop a refused message from group history: %s", e)
 
 
 def take_group_history(event: T.Any) -> T.Any:
@@ -914,8 +929,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         # Release a follow-up waiting on the turn id, including
                         # when the submit failed.
                         active.ready.set()
-                    # The model has this turn's input now, group history too.
+                    # The model has this turn's input now, group history too,
+                    # so the request's rate-limit use is spent.
                     keep_group_history(self._event())
+                    keep_rate_limit_use(self._event())
                     await self._remember_sender(thread_id)
                     self._turn_running = True
                     while True:

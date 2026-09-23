@@ -48,6 +48,9 @@ DEFAULT_GROUP_MESSAGE_MAX_CNT = 1000
 # Event extra holding a coroutine function that puts the group history a
 # request took back, for a request that never reached the model.
 GROUP_HISTORY_RESTORE_KEY = "_group_context_restore"
+# Event extra holding a coroutine function that removes a triggering message
+# from the history, for one refused outright (rate limited).
+GROUP_MESSAGE_FORGET_KEY = "_group_context_forget"
 # A message that triggered the bot but has had no request prepared after this
 # long never will (filtered, rate limited, ...): it becomes plain history.
 PENDING_TRIGGER_TTL_S = 120.0
@@ -174,6 +177,9 @@ class GroupChatContext:
             pending = self._pending_triggers[umo]
             if getattr(event, "is_at_or_wake_command", False) is True:
                 pending[record_id] = time.monotonic()
+                event.set_extra(
+                    GROUP_MESSAGE_FORGET_KEY, self._forgetter(umo, record_id)
+                )
             if _trim_left(records, cfg["group_message_max_cnt"], record_ids):
                 kept = set(record_ids)
                 for rid in [rid for rid in pending if rid not in kept]:
@@ -182,6 +188,21 @@ class GroupChatContext:
             event.set_extra("_group_context_raw_idx", len(records) - 1)
 
         logger.debug(f"group_chat_context | {umo} | {final_message}")
+
+    def _forgetter(self, umo: str, record_id: str):
+        async def forget() -> None:
+            async with self._get_lock(umo):
+                self._pending_triggers[umo].pop(record_id, None)
+                records = self.raw_records.get(umo)
+                record_ids = self._record_ids.get(umo)
+                if not records or not record_ids or record_id not in record_ids:
+                    return
+                index = list(record_ids).index(record_id)
+                del record_ids[index]
+                if index < len(records):
+                    del records[index]
+
+        return forget
 
     async def on_req_llm(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         umo = event.unified_msg_origin

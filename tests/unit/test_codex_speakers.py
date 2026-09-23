@@ -424,3 +424,27 @@ async def test_a_run_that_fails_before_codex_gives_the_history_back(monkeypatch)
 
     assert [r.type for r in responses] == ["err"]
     assert given_back == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_trigger_is_dropped_from_the_history():
+    # Rate limited: nobody else's request may answer it later.
+    ctx = _history(
+        [("[a] one", "r1"), ("[Bob] @bot help", "r2"), ("[a] two", "r3")],
+        pending={"r2"},
+    )
+    event = _trigger("r2")
+    event.extras[gcc.GROUP_MESSAGE_FORGET_KEY] = ctx._forgetter(UMO, "r2")
+
+    await runner_mod.forget_group_message(event)
+
+    assert list(ctx.raw_records[UMO]) == ["[a] one", "[a] two"]
+    assert list(ctx._record_ids[UMO]) == ["r1", "r3"]
+    assert ctx._pending_triggers[UMO] == {}
+    # Already gone (shown or trimmed): nothing else is touched.
+    await runner_mod.forget_group_message(event)
+    assert list(ctx.raw_records[UMO]) == ["[a] one", "[a] two"]
+
+
+def test_the_forget_key_is_shared():
+    assert runner_mod.GROUP_MESSAGE_FORGET_KEY == gcc.GROUP_MESSAGE_FORGET_KEY

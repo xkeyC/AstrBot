@@ -9,6 +9,7 @@ from astrbot.core.agent.runners.codex.codex_agent_runner import (
     CodexAgentRunner,
     build_turn_input,
     drop_group_history,
+    forget_group_message,
     give_back,
     keep_group_history,
     release_group_history,
@@ -23,6 +24,7 @@ from astrbot.core.message.message_event_result import (
     MessageEventResult,
     ResultContentType,
 )
+from astrbot.core.permission_rate_limit import check_rate_limit, refund_rate_limit
 from astrbot.core.persona_error_reply import (
     resolve_event_conversation_persona_id,
     resolve_persona_custom_error_message,
@@ -369,21 +371,37 @@ class ThirdPartyAgentSubStage(Stage):
         if not req.prompt and not req.image_urls and not req.audio_urls:
             return
 
-        await prepare_codex_request(
-            event,
-            req,
-            self.ctx.plugin_manager.context,
-            self.conf,
-            self.runner_config,
-        )
+        # The sender's permission group may cap their requests; a refused one
+        # never reaches the agent, and no later request answers it either.
+        refusal = await check_rate_limit(event, self.conf)
+        if refusal is not None:
+            await forget_group_message(event)
+            if refusal:
+                event.set_result(MessageEventResult().message(refusal))
+                yield
+            return
+
+        try:
+            await prepare_codex_request(
+                event,
+                req,
+                self.ctx.plugin_manager.context,
+                self.conf,
+                self.runner_config,
+            )
+        except BaseException:
+            await refund_rate_limit(event)
+            raise
 
         custom_error_message = await self._resolve_persona_custom_error_message(event)
         set_persona_custom_error_message_on_event(event, custom_error_message)
 
         # call event hook
         if await call_event_hook(event, EventType.OnLLMRequestEvent, req):
-            # Stopped before the model: give back the group history it took.
+            # Stopped before the model: give back the group history it took,
+            # and the use it was counted as.
             await release_group_history(event)
+            await refund_rate_limit(event)
             return
 
         # Same sender while a Codex turn runs: steer into that turn (after the
@@ -398,6 +416,7 @@ class ThirdPartyAgentSubStage(Stage):
             )
         except BaseException:
             await release_group_history(event)
+            await refund_rate_limit(event)
             raise
         if target is not None:
             keep_group_history(event)
@@ -439,10 +458,17 @@ class ThirdPartyAgentSubStage(Stage):
             # A streamed run closed before it was ever consumed never started;
             # after a started run there is nothing left to give back.
             restore = take_group_history(event)
+            # A stream closed before it was consumed may still be run by a
+            # late consumer, so its use stays until that run's close. Decided
+            # now: a consumer arriving during this close starts a live run.
+            refund = not streaming_used or stream_consumed
 
             async def finish_close() -> None:
                 await _close_runner_if_supported(runner)
                 await give_back(restore)
+                # A no-op once Codex accepted the turn (the runner keeps it).
+                if refund:
+                    await refund_rate_limit(event)
 
             return finish_close
 
@@ -512,8 +538,9 @@ class ThirdPartyAgentSubStage(Stage):
                 await close_runner_once()
             elif stream_watchdog_task is None:
                 # Failed before the stream was set up (runner.reset): the run
-                # never starts, so its group history goes back.
+                # never starts, so its group history (and its use) goes back.
                 await release_group_history(event)
+                await refund_rate_limit(event)
             active_event_registry.unregister_agent_stop_callback(event)
 
         asyncio.create_task(
