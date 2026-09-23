@@ -237,10 +237,14 @@ def test_memory_thread_config_leaves_shared_writes_to_the_sender(tmp_path):
         memory_thread_config,
     )
     from astrbot.core.permission_rules import EVENT_EXTRA_KEY, PermissionPolicy
+    from astrbot.core.platform.message_type import MessageType
+
     def event(policy, group=""):
+        kind = MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
         return SimpleNamespace(
             get_extra=lambda key: policy if key == EVENT_EXTRA_KEY else None,
             get_group_id=lambda: group,
+            get_message_type=lambda: kind,
         )
 
     allowed = PermissionPolicy(global_memory=True)
@@ -257,6 +261,10 @@ def test_memory_thread_config_leaves_shared_writes_to_the_sender(tmp_path):
     assert in_group["memories.turn_scopes"] is True
     # A group's transcript mixes many people: it is never consolidated globally.
     assert in_group["memories.may_write_global"] is False
+    # A group task created before tasks recorded their group: still a group.
+    legacy = event(allowed, group="9")
+    legacy.get_group_id = lambda: ""
+    assert memory_thread_config(cfg, "u", legacy)["memories.may_write_global"] is False
     without_rule = memory_thread_config(cfg, "u", event(None))
     assert without_rule["memories.may_write_global"] is False
 

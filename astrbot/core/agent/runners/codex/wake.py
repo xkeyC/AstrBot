@@ -63,9 +63,11 @@ async def run_codex_cron_job(
         message_type=session.message_type,
     )
     cfg = ctx.get_config(umo=event.unified_msg_origin)
-    # Run with the permissions of the user who created the task.
+    # Run with the permissions of the user who created the task, matched as
+    # in the group they created it in.
     if sender_id := str(payload.get("sender_id") or ""):
         event.message_obj.sender.user_id = sender_id
+    event.message_obj.group_id = str(payload.get("group_id") or "")
     admin_ids = [str(a) for a in cfg.get("admins_id", [])]
     event.role = (
         "admin"
@@ -154,6 +156,7 @@ async def run_codex_background_wake(
         message_type=session.message_type,
     )
     event.message_obj.sender.user_id = str(origin_event.get_sender_id() or "")
+    event.message_obj.group_id = str(origin_event.get_group_id() or "")
     event.role = origin_event.role
     cfg = ctx.get_config(umo=origin_event.unified_msg_origin) or {}
     prompt = build_background_prompt(task_result, origin_event.message_str or "")
@@ -183,6 +186,7 @@ async def run_background_exec_completion(
     session_str: str,
     sender_id: str,
     role: str,
+    group_id: str = "",
     session_id: str,
     exit_code: int,
     output: str,
@@ -194,21 +198,15 @@ async def run_background_exec_completion(
     it is steered into that turn and answered in the same reply, and otherwise
     it queues behind whatever else that chat is doing.
     """
-    from astrbot.core.agent.runners.codex.codex_agent_runner import build_turn_input
+    from astrbot.core.agent.runners.codex.codex_agent_runner import (
+        build_turn_input,
+        turn_scopes,
+    )
     from astrbot.core.agent.runners.codex.native import try_steer
     from astrbot.core.cron.events import CronMessageEvent
+    from astrbot.core.permission_rules import CONFIG_KEY, policy_for_event
 
     prompt = build_background_exec_prompt(session_id, exit_code, output)
-    req = ProviderRequest()
-    req.session_id = session_str
-    req.prompt = prompt
-    if sender_id:
-        steered = await try_steer(
-            session_str, sender_id, build_turn_input(req), prompt=prompt
-        )
-        if steered is not None:
-            return
-
     try:
         session = MessageSession.from_str(session_str)
     except Exception as e:  # noqa: BLE001
@@ -222,8 +220,26 @@ async def run_background_exec_completion(
     )
     if sender_id:
         event.message_obj.sender.user_id = sender_id
+    # Group rules match as for the message that started the command.
+    event.message_obj.group_id = group_id
     event.role = role or "member"
     cfg = ctx.get_config(umo=event.unified_msg_origin)
+    if sender_id:
+        # Steered only into a turn of the same person in the same role.
+        policy_for_event(event, cfg.get(CONFIG_KEY) or [])
+        req = ProviderRequest()
+        req.session_id = session_str
+        req.prompt = prompt
+        steered = await try_steer(
+            session_str,
+            sender_id,
+            build_turn_input(req),
+            prompt=prompt,
+            scopes=turn_scopes(event),
+        )
+        if steered is not None:
+            return
+
     if not await run_in_session_thread(ctx, event, cfg, prompt, session_str):
         logger.warning(
             "Background command %s produced no reply; reporting it plainly.",

@@ -248,6 +248,8 @@ class _WatchTarget:
     #: them, so their permission rule and their place in the queue apply.
     sender_id: str
     is_admin: bool
+    #: The group it was started in ("" in private), for group permission rules.
+    group_id: str = ""
 
 
 def watch_background_session(
@@ -276,6 +278,7 @@ def watch_background_session(
         sandbox=sandbox,
         sender_id=str(event.get_sender_id() or ""),
         is_admin=getattr(event, "role", "") == "admin",
+        group_id=str(event.get_group_id() or ""),
     )
     task = asyncio.create_task(_watch(target), name=f"exec-watch-{session_id}")
     _watchers[key] = task
@@ -378,6 +381,7 @@ async def _deliver(target: _WatchTarget, exit_code: int, output: str) -> None:
             target.plugin_context,
             session_str=target.umo,
             sender_id=target.sender_id,
+            group_id=target.group_id,
             role="admin" if target.is_admin else "member",
             session_id=target.session_id,
             exit_code=exit_code,

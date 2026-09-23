@@ -25,6 +25,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.permission_rate_limit import keep_rate_limit_use
 from astrbot.core.permission_rules import DEFAULT_POLICY, PermissionPolicy
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
 
 from ...hooks import BaseAgentRunHooks
@@ -241,9 +242,11 @@ def memory_thread_config(
     Returns:
         Codex config overrides for the thread.
     """
+    # By the chat's type, not the event's group id, which a scheduled task
+    # created before tasks recorded their group (or through the API) lacks.
     is_private = False
     with contextlib.suppress(Exception):
-        is_private = not event.get_group_id()
+        is_private = event.get_message_type() == MessageType.FRIEND_MESSAGE
     trusted = event_policy(event).global_memory is True
     return {
         "features.memories": True,

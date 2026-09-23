@@ -25,6 +25,7 @@ def _context(
             event=SimpleNamespace(
                 unified_msg_origin=umo,
                 get_sender_id=lambda: sender_id,
+                get_group_id=lambda: "",
             ),
         )
     )
@@ -92,6 +93,7 @@ async def test_future_task_edit_requires_job_id():
             event=SimpleNamespace(
                 unified_msg_origin="test:private:session",
                 get_sender_id=lambda: "user-1",
+                get_group_id=lambda: "",
             ),
         )
     )
@@ -135,6 +137,7 @@ async def test_future_task_edit_updates_existing_job():
             event=SimpleNamespace(
                 unified_msg_origin="test:private:session",
                 get_sender_id=lambda: "user-1",
+                get_group_id=lambda: "",
             ),
         )
     )

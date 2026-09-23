@@ -49,8 +49,8 @@ async def test_the_initiator_s_running_turn_absorbs_the_result(
 ):
     steered: list[tuple] = []
 
-    async def _steer(umo, sender_id, turn_input, *, prompt=""):
-        steered.append((umo, sender_id))
+    async def _steer(umo, sender_id, turn_input, *, prompt="", scopes=None):
+        steered.append((umo, sender_id, scopes))
         return ""
 
     monkeypatch.setattr(native, "try_steer", _steer)
@@ -65,7 +65,10 @@ async def test_the_initiator_s_running_turn_absorbs_the_result(
         output="DONE",
     )
 
-    assert steered == [(UMO, "20017")]
+    # Only into a turn of the same person in the same role.
+    [(umo, sender, scopes)] = steered
+    assert (umo, sender) == (UMO, "20017")
+    assert scopes == [f"principal:{UMO.split(':')[0]}:20017:member"]
     assert _no_new_turn == [], "已经插进那一轮了，不该再起一轮"
 
 
@@ -73,7 +76,7 @@ async def test_the_initiator_s_running_turn_absorbs_the_result(
 async def test_someone_else_s_turn_makes_it_queue(monkeypatch, _no_new_turn):
     """别人的回合在跑：插不进去，退回成新的一轮，由会话锁排队。"""
 
-    async def _steer(umo, sender_id, turn_input, *, prompt=""):
+    async def _steer(umo, sender_id, turn_input, *, prompt="", scopes=None):
         return None  # try_steer 对不同发送者就是这样返回的
 
     monkeypatch.setattr(native, "try_steer", _steer)
@@ -186,3 +189,74 @@ async def test_an_unknown_sender_skips_straight_to_a_new_turn(
 
     assert steered == [], "没有身份就去插队，等于插进别人的回合"
     assert len(_no_new_turn) == 1, "仍然要起一轮把结果说出来"
+
+
+class _RulesCtx(_Ctx):
+    """A group rule grants what the catch-all rule does not."""
+
+    @staticmethod
+    def get_config(umo=None):
+        return {
+            "agent_runner": {"runner_type": "codex"},
+            "permission_rules": [
+                {"match": ["g_30003"], "global_memory": True},
+                {"match": ["*"], "global_memory": False},
+            ],
+        }
+
+
+@pytest.mark.asyncio
+async def test_the_result_is_judged_by_the_group_it_was_started_in(monkeypatch):
+    from astrbot.core.permission_rules import EVENT_EXTRA_KEY
+
+    steered, queued = [], []
+
+    async def _steer(umo, sender_id, turn_input, *, prompt="", scopes=None):
+        steered.append(scopes)
+
+    async def _run(ctx, event, cfg, prompt, delivery):
+        queued.append(event)
+        return True
+
+    monkeypatch.setattr(native, "try_steer", _steer)
+    monkeypatch.setattr(wake, "run_in_session_thread", _run)
+
+    await wake.run_background_exec_completion(
+        _RulesCtx(),
+        session_str=UMO,
+        sender_id="20017",
+        group_id="30003",
+        role="member",
+        session_id="sess-1",
+        exit_code=0,
+        output="DONE",
+    )
+
+    # As in the sender's own messages there: the group rule applies.
+    assert steered[0][:2] == ["memory.write_global", "memory.delete"]
+    [event] = queued
+    assert event.get_group_id() == "30003"
+    assert event.get_extra(EVENT_EXTRA_KEY).global_memory is True
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_task_runs_as_in_the_group_it_was_created_in(monkeypatch):
+    seen = []
+
+    async def _run(ctx, event, cfg, prompt, delivery):
+        seen.append((event.get_sender_id(), event.get_group_id()))
+        return True
+
+    monkeypatch.setattr(wake, "run_in_session_thread", _run)
+
+    await wake.run_codex_cron_job(
+        _RulesCtx(),
+        message="tick",
+        session_str=UMO,
+        extras={
+            "cron_payload": {"sender_id": "20017", "group_id": "30003"},
+            "cron_job": {"id": "job-1"},
+        },
+    )
+
+    assert seen == [("20017", "30003")]

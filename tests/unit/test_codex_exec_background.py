@@ -41,6 +41,10 @@ def _ctx(sender_id: str = "20017", role: str = "member"):
                 def get_sender_id():
                     return sender_id
 
+                @staticmethod
+                def get_group_id():
+                    return "30003"
+
     _Ctx.context.event.role = role
     return _Ctx()
 
@@ -142,6 +146,8 @@ async def test_the_watcher_remembers_who_started_the_command(monkeypatch):
 
     assert captured[0].sender_id == "20017"
     assert captured[0].is_admin is True
+    # Group rules match as in the message that started it.
+    assert captured[0].group_id == "30003"
     assert captured[0].umo == UMO
 
 

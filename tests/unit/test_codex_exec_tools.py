@@ -19,6 +19,7 @@ def _context(monkeypatch, booter, *, local: bool, role: str = "admin"):
     event = SimpleNamespace(
         unified_msg_origin="qq:FriendMessage:1",
         get_sender_id=lambda: "1",
+        get_group_id=lambda: "",
         role=role,
     )
     ctx = SimpleNamespace(context=SimpleNamespace(event=event, context=None))

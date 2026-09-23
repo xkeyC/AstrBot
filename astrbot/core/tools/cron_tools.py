@@ -129,6 +129,8 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
             payload = {
                 "session": context.context.event.unified_msg_origin,
                 "sender_id": context.context.event.get_sender_id(),
+                # With the sender, what their permission rule is matched on.
+                "group_id": context.context.event.get_group_id(),
                 "note": note,
                 "origin": "tool",
                 # The request that created the task, quoted when it runs (K12).
