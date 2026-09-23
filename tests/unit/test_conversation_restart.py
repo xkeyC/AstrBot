@@ -413,3 +413,20 @@ def test_restart_docs_use_current_permission_labels(locale, language):
     assert "allow_member_new_conversation" not in guide
     assert "Allow Non-Administrators to Start Group Conversations" not in guide
     assert "允许非管理员在群聊中新建对话" not in guide
+
+
+@pytest.mark.asyncio
+async def test_stop_asks_the_running_agents_to_stop(restart, monkeypatch):
+    # Not just ending the events: a Codex turn must be interrupted, and one
+    # still queued for the chat must end before it reaches Codex.
+    request = MagicMock(return_value=2)
+    monkeypatch.setattr(
+        commands.active_event_registry, "request_agent_stop_all", request
+    )
+
+    await restart.plugin.conversation_c.stop(restart.event)
+
+    request.assert_called_once_with(
+        restart.event.unified_msg_origin, exclude=restart.event
+    )
+    restart.stop.assert_not_called()

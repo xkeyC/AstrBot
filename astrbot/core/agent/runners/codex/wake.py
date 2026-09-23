@@ -93,27 +93,41 @@ async def run_in_session_thread(
     from astrbot.core.pipeline.process_stage.method.agent_sub_stages.codex_request import (
         prepare_codex_request,
     )
+    from astrbot.core.utils.active_event_registry import active_event_registry
 
     runner_cfg = normalize_agent_runner(cfg.get("agent_runner"))["config"]
     req = ProviderRequest()
     req.session_id = event.unified_msg_origin
     req.prompt = prompt
-    await prepare_codex_request(event, req, ctx, cfg, runner_cfg)
-    req.prompt = prompt
-
-    runner = CodexAgentRunner()
-    await runner.reset(
-        request=req,
-        run_context=AgentContextWrapper(
-            context=AstrAgentContext(context=ctx, event=event),
-            tool_call_timeout=int(runner_cfg.get("tool_call_timeout") or 120),
-        ),
-        agent_hooks=MAIN_AGENT_HOOKS,
-        provider_config=runner_cfg,
-        streaming=False,
-    )
-    async for _ in runner.step_until_done():
-        pass
+    # Active in the chat like any message's turn, from the start, so /stop
+    # reaches it (and counts it) at any point.
+    active_event_registry.register(event)
+    try:
+        await prepare_codex_request(event, req, ctx, cfg, runner_cfg)
+        req.prompt = prompt
+        runner = CodexAgentRunner()
+        await runner.reset(
+            request=req,
+            run_context=AgentContextWrapper(
+                context=AstrAgentContext(context=ctx, event=event),
+                tool_call_timeout=int(runner_cfg.get("tool_call_timeout") or 120),
+            ),
+            agent_hooks=MAIN_AGENT_HOOKS,
+            provider_config=runner_cfg,
+            streaming=False,
+        )
+        active_event_registry.register_agent_stop_callback(event, runner.request_stop)
+        if event.get_extra("agent_stop_requested") is True:
+            # Stopped while it was being prepared.
+            runner.request_stop()
+        async for _ in runner.step_until_done():
+            pass
+    finally:
+        active_event_registry.unregister(event)
+    if runner.was_aborted():
+        # Stopped: nothing to deliver. A background command's caller then
+        # reports its result plainly, so the result itself is not lost.
+        return False
     resp = runner.get_final_llm_resp()
     if resp is None or resp.role != "assistant":
         return False

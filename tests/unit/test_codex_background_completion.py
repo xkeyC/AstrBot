@@ -260,3 +260,61 @@ async def test_a_scheduled_task_runs_as_in_the_group_it_was_created_in(monkeypat
     )
 
     assert seen == [("20017", "30003")]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_turn_can_be_stopped_from_the_chat(monkeypatch):
+    from astrbot.core.agent.runners.codex import codex_agent_runner
+    from astrbot.core.pipeline.process_stage.method.agent_sub_stages import (
+        codex_request,
+    )
+    from astrbot.core.utils.active_event_registry import active_event_registry
+
+    seen = {}
+
+    class Runner:
+        async def reset(self, **kwargs):
+            pass
+
+        def request_stop(self):
+            seen["stopped"] = True
+
+        def was_aborted(self):
+            return seen.get("stopped", False)
+
+        async def step_until_done(self):
+            # While it runs, /stop in the chat finds and stops it.
+            seen["count"] = active_event_registry.request_agent_stop_all(UMO)
+            if False:
+                yield None
+
+        def get_final_llm_resp(self):
+            return None
+
+    async def prepare(event, req, ctx, cfg, runner_cfg):
+        pass
+
+    import astrbot.core.astr_agent_context as agent_context
+
+    monkeypatch.setattr(codex_agent_runner, "CodexAgentRunner", Runner)
+    monkeypatch.setattr(agent_context, "AstrAgentContext", lambda **kw: kw)
+    monkeypatch.setattr(agent_context, "AgentContextWrapper", lambda **kw: kw)
+    monkeypatch.setattr(codex_request, "prepare_codex_request", prepare)
+    from astrbot.core.cron.events import CronMessageEvent
+    from astrbot.core.platform.message_session import MessageSession
+
+    session = MessageSession.from_str(UMO)
+    event = CronMessageEvent(
+        context=_Ctx(),
+        session=session,
+        message="tick",
+        message_type=session.message_type,
+    )
+
+    ok = await wake.run_in_session_thread(_Ctx(), event, _Ctx.get_config(), "tick", "")
+
+    assert seen == {"count": 1, "stopped": True}
+    # Stopped: nothing delivered, so a background command reports plainly.
+    assert ok is False
+    # Gone once it ended.
+    assert active_event_registry.request_agent_stop_all(UMO) == 0

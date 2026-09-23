@@ -74,6 +74,11 @@ BUSY_NOTE = "我这边还在处理前面的消息，稍后再发一次吧。"
 # be started: without it the follow-up would look answered.
 FOLLOW_UP_DROPPED_NOTE = "（后面补充的消息没能处理，请再发一次。）"
 CODE_MODES = ("code_mode", "code_mode_only")
+STOPPED_NOTE = "（已中断）"
+
+
+class _StoppedWhileQueued(Exception):
+    """Stopped before the chat was free: the turn never reaches Codex."""
 
 
 def _data_path() -> Path:
@@ -912,6 +917,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
 
         try:
             async with session_slot(engine, self.umo, max_queued):
+                if self._aborted:
+                    raise _StoppedWhileQueued
                 # Opening the thread belongs in the critical section: it
                 # is what decides the thread id, so two senders arriving
                 # together on a new chat would otherwise each make one.
@@ -988,6 +995,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         # Running from here on: stopping or leaving must now
                         # interrupt it, even before the loop below starts.
                         self._turn_running = True
+                        if self._aborted:
+                            # Stopped during the submit, before stopping could
+                            # interrupt anything.
+                            await engine.interrupt(thread_id)
                     except BaseException as e:
                         active.aborted = True
                         if isinstance(e, asyncio.CancelledError):
@@ -1155,6 +1166,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                         last_agent_seq if unanswered else None
                                     )
                                     steered_before = active.steered
+                                    if self._aborted:
+                                        # Stopped while it was being submitted.
+                                        await engine.interrupt(thread_id)
                                     if error_msg:
                                         carried_error = error_msg
                                         answers_before = _answer_count(final_texts)
@@ -1230,6 +1244,24 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             chain = MessageChain().message(BUSY_NOTE)
             self.final_llm_resp = LLMResponse(role="assistant", result_chain=chain)
             self._transition_state(AgentState.DONE)
+            if self.streaming:
+                # A streamed reply's final result is not sent again.
+                yield AgentResponse(
+                    type="streaming_delta", data=AgentResponseData(chain=chain)
+                )
+            yield AgentResponse(type="llm_result", data=AgentResponseData(chain=chain))
+            return
+        except _StoppedWhileQueued:
+            # Nothing was kept, so closing the run gives back its group
+            # history and its rate-limit use.
+            logger.info("Codex turn for %s stopped while queued.", self.umo)
+            chain = MessageChain().message(STOPPED_NOTE)
+            self.final_llm_resp = LLMResponse(role="assistant", result_chain=chain)
+            self._transition_state(AgentState.DONE)
+            if self.streaming:
+                yield AgentResponse(
+                    type="streaming_delta", data=AgentResponseData(chain=chain)
+                )
             yield AgentResponse(type="llm_result", data=AgentResponseData(chain=chain))
             return
 
@@ -1255,7 +1287,7 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         if follow_up_dropped:
             tail = FOLLOW_UP_DROPPED_NOTE
         elif end == "turn_aborted" and not text and self._aborted:
-            tail = "（已中断）"
+            tail = STOPPED_NOTE
         if tail:
             if answered:
                 tail = f"\n\n{tail}"

@@ -190,6 +190,7 @@ async def _process_with(
     mock_history=True,
     watchdog_s=None,
     restore_gate=None,
+    prepare=None,
 ):
     """Runs the stage once.
 
@@ -227,7 +228,7 @@ async def _process_with(
         monkeypatch.setattr(third_party, "release_group_history", release)
         monkeypatch.setattr(third_party, "keep_group_history", keep)
     monkeypatch.setattr(third_party, "CodexAgentRunner", RunnerFactory)
-    monkeypatch.setattr(third_party, "prepare_codex_request", AsyncMock())
+    monkeypatch.setattr(third_party, "prepare_codex_request", prepare or AsyncMock())
     monkeypatch.setattr(third_party, "try_steer", steer or AsyncMock(return_value=None))
     monkeypatch.setattr(third_party, "build_turn_input", MagicMock(return_value=[]))
     monkeypatch.setattr(third_party, "active_event_registry", MagicMock())
@@ -581,3 +582,70 @@ async def test_a_consumer_arriving_mid_close_keeps_the_accepted_use(monkeypatch)
 
 async def _drain(stream):
     return [_ async for _ in stream]
+
+
+@pytest.mark.asyncio
+async def test_a_message_stopped_on_its_way_never_runs(monkeypatch):
+    check = AsyncMock(return_value=None)
+    prepare = AsyncMock()
+    monkeypatch.setattr(third_party, "check_rate_limit", check)
+    monkeypatch.setattr(third_party, "prepare_codex_request", prepare)
+    config = {
+        "agent_runner": {"runner_type": "codex", "config": {}},
+        "provider_settings": _provider_settings(),
+    }
+    stage = third_party.ThirdPartyAgentSubStage()
+    await stage.initialize(_stage_ctx(config))
+    extras = {"agent_stop_requested": True}  # /stop came before it got here
+    event = MagicMock()
+    event.message_str = "hello"
+    event.message_obj.message = []
+    event.get_extra.side_effect = lambda key, default=None: extras.get(key, default)
+
+    [item async for item in stage.process(event, "")]
+
+    # Nothing counted against its quota, nothing prepared or run.
+    check.assert_not_awaited()
+    prepare.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_message_stopped_on_its_way_leaves_the_group_history(monkeypatch):
+    forget = AsyncMock()
+    monkeypatch.setattr(third_party, "forget_group_message", forget)
+    config = {
+        "agent_runner": {"runner_type": "codex", "config": {}},
+        "provider_settings": _provider_settings(),
+    }
+    stage = third_party.ThirdPartyAgentSubStage()
+    await stage.initialize(_stage_ctx(config))
+    extras = {"agent_stop_requested": True}
+    event = MagicMock()
+    event.message_str = "hello"
+    event.message_obj.message = []
+    event.get_extra.side_effect = lambda key, default=None: extras.get(key, default)
+
+    [item async for item in stage.process(event, "")]
+
+    # No later request answers the cancelled one from the history.
+    forget.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_a_message_stopped_while_prepared_is_not_steered_in(monkeypatch):
+    async def prepare(event, *args, **kwargs):
+        event.set_extra("agent_stop_requested", True)
+
+    steer = AsyncMock(return_value="run-1")
+    refund = AsyncMock()
+    monkeypatch.setattr(third_party, "check_rate_limit", AsyncMock(return_value=None))
+    monkeypatch.setattr(third_party, "refund_rate_limit", refund)
+    monkeypatch.setattr(third_party, "forget_group_message", AsyncMock())
+    release, keep, event, runner, _ = await _process_with(
+        monkeypatch, prepare=prepare, steer=steer
+    )
+
+    steer.assert_not_awaited()
+    release.assert_awaited_once_with(event)
+    refund.assert_awaited_once_with(event)
+    runner.reset.assert_not_awaited()

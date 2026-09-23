@@ -754,6 +754,56 @@ async def test_another_turns_end_and_words_are_not_taken_for_ours(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_a_stop_during_the_submit_interrupts_the_turn(monkeypatch, temp_db):
+    interrupts = []
+    runners = []
+
+    async def submit_turn(self, thread_id, request):
+        runners[0].request_stop()  # the user presses stop meanwhile
+        return {"status": "started", "turn_id": "turn-1"}
+
+    async def interrupt(self, thread_id):
+        interrupts.append(thread_id)
+
+    monkeypatch.setattr(_Engine, "submit_turn", submit_turn)
+    monkeypatch.setattr(_Engine, "interrupt", interrupt, raising=False)
+    real_init = CodexAgentRunner.__init__
+
+    def init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        runners.append(self)
+
+    monkeypatch.setattr(CodexAgentRunner, "__init__", init)
+    events = [{"type": "turn_aborted", "_turn_id": "turn-1"}]
+    await _run(monkeypatch, temp_db, events, [None, None])
+
+    # Stopping could not interrupt a turn that did not exist yet; it does now.
+    assert interrupts == ["thread-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_stopped_while_queued_never_reaches_codex(monkeypatch, temp_db):
+    calls = []
+
+    async def submit_turn(self, thread_id, request):
+        calls.append(request)
+        return {"status": "started", "turn_id": "turn-1"}
+
+    monkeypatch.setattr(_Engine, "submit_turn", submit_turn)
+    real_reset = CodexAgentRunner.reset
+
+    async def reset(self, *args, **kwargs):
+        await real_reset(self, *args, **kwargs)
+        self.request_stop()  # /stop while it waited for the chat
+
+    monkeypatch.setattr(CodexAgentRunner, "reset", reset)
+    runner, responses, _ = await _run(monkeypatch, temp_db, [], [None, None])
+
+    assert calls == []
+    assert [r.data["chain"].get_plain_text() for r in responses] == ["（已中断）"]
+
+
+@pytest.mark.asyncio
 async def test_a_thread_shut_down_mid_turn_ends_the_turn(monkeypatch):
     class Rt:
         def __init__(self):
@@ -770,6 +820,22 @@ async def test_a_thread_shut_down_mid_turn_ends_the_turn(monkeypatch):
     # Not left waiting for its timeout.
     kinds = [queue.get_nowait()["type"] for _ in range(queue.qsize())]
     assert kinds == ["shutdown_complete", "_pump_closed"]
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_turn_stopped_while_queued_says_so(monkeypatch, temp_db):
+    real_reset = CodexAgentRunner.reset
+
+    async def reset(self, *args, **kwargs):
+        await real_reset(self, *args, **kwargs)
+        self.request_stop()
+
+    monkeypatch.setattr(CodexAgentRunner, "reset", reset)
+    _, responses, _ = await _run(monkeypatch, temp_db, [], [None, None], streaming=True)
+
+    # A streamed reply's final result is not sent again: the note is a delta.
+    assert responses[0].type == "streaming_delta"
+    assert responses[0].data["chain"].get_plain_text() == "（已中断）"
 
 
 @pytest.mark.asyncio

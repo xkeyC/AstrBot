@@ -50,6 +50,8 @@ from ....context import PipelineContext, call_event_hook
 from .codex_request import prepare_codex_request
 
 THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY = "_third_party_runner_error"
+# Set on every active event of a chat by /stop (active_event_registry).
+AGENT_STOP_REQUESTED = "agent_stop_requested"
 STREAM_CONSUMPTION_CLOSE_TIMEOUT_SEC = 30
 RUNNER_NO_RESULT_FALLBACK_MESSAGE = "Agent Runner did not return any result."
 RUNNER_NO_FINAL_RESPONSE_LOG = (
@@ -371,6 +373,11 @@ class ThirdPartyAgentSubStage(Stage):
 
         if not req.prompt and not req.image_urls and not req.audio_urls:
             return
+        if event.get_extra(AGENT_STOP_REQUESTED) is True:
+            # /stop arrived while this message was still on its way here. No
+            # later request may answer it from the group history either.
+            await forget_group_message(event)
+            return
 
         # The sender's permission group may cap their requests; a refused one
         # never reaches the agent, and no later request answers it either.
@@ -403,6 +410,14 @@ class ThirdPartyAgentSubStage(Stage):
             # and the use it was counted as.
             await release_group_history(event)
             await refund_rate_limit(event)
+            return
+
+        if event.get_extra(AGENT_STOP_REQUESTED) is True:
+            # Stopped while being prepared: not even into a turn that started
+            # after the /stop.
+            await release_group_history(event)
+            await refund_rate_limit(event)
+            await forget_group_message(event)
             return
 
         # Same sender while a Codex turn runs: steer into that turn (after the
@@ -506,6 +521,10 @@ class ThirdPartyAgentSubStage(Stage):
                 provider_config=self.runner_config,
                 streaming=runner_streaming,
             )
+            if event.get_extra(AGENT_STOP_REQUESTED) is True:
+                # /stop came while the request was being prepared, before this
+                # runner could hear it (reset clears its own flag).
+                runner.request_stop()
 
             if streaming_used:
                 stream_watchdog_task = _start_stream_watchdog(
