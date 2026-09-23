@@ -308,7 +308,9 @@ class CodexChatProvider(Provider):
         names, args, ids = [], [], []
         for call in calls:
             msg = call["msg"]
-            tool = pending.bridge.tools.get(str(msg.get("tool") or ""))
+            tool = pending.bridge.lookup(
+                msg.get("namespace"), str(msg.get("tool") or "")
+            )
             names.append(tool.name if tool else str(msg.get("tool") or ""))
             arguments = msg.get("arguments")
             args.append(arguments if isinstance(arguments, dict) else {})

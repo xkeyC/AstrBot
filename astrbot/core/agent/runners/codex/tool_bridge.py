@@ -27,6 +27,12 @@ from .constants import CODEX_TOOL_NAMESPACE
 
 _INVALID_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 _MAX_TOOL_NAME = 128
+# Source keys never contain "__", which would read as one more level.
+_SOURCE_KEY_SPLIT = re.compile(r"[^a-zA-Z0-9]+")
+_MAX_SOURCE_KEY = 40
+_MAX_SOURCE_DESCRIPTION = 200
+_BASE_DESCRIPTION = "AstrBot plugin tools for the current chat session."
+_DEFERRED_BASE_DESCRIPTION = "AstrBot tools for the current chat session."
 _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 
 JsonObject = dict[str, Any]
@@ -45,6 +51,32 @@ def _codex_name(name: str, taken: set[str]) -> str:
         candidate = base[: _MAX_TOOL_NAME - len(suffix)] + suffix
     taken.add(candidate)
     return candidate
+
+
+def _source_key(text: str) -> str:
+    return _SOURCE_KEY_SPLIT.sub("_", text).strip("_")[:_MAX_SOURCE_KEY].strip("_")
+
+
+def tool_source(tool: FunctionTool) -> tuple[str, str] | None:
+    """``(key, description)`` of the plugin or MCP server a tool comes from.
+
+    None for AstrBot's own tools, which belong to no plugin.
+    """
+    if server := tool_mcp_server(tool):
+        return f"mcp_{_source_key(server) or 'server'}", f"MCP server {server}."
+    module = getattr(tool, "handler_module_path", None)
+    if not module:
+        return None
+    from astrbot.core.star.star import star_map
+
+    plugin = star_map.get(module)
+    if plugin is None or not plugin.name:
+        return None
+    short = re.sub(r"^astrbot_plugin_", "", plugin.name, flags=re.IGNORECASE)
+    about = (plugin.short_desc or plugin.desc or "").strip()
+    label = plugin.display_name or plugin.name
+    description = f"Plugin {label}: {about}" if about else f"Plugin {label}."
+    return _source_key(short) or "plugin", description[:_MAX_SOURCE_DESCRIPTION]
 
 
 def _input_schema(tool: FunctionTool) -> JsonObject:
@@ -79,11 +111,18 @@ class CodexToolBridge:
                 without deferral, dropping them per sender would change the
                 prompt prefix and cost the cache, so they stay listed and are
                 refused when called.
+
+        Deferred tools from a plugin or an MCP server get a namespace of their
+        own, ``astrbot__<source>``, so Codex's tool catalog lists them under
+        that source; AstrBot's own tools stay in ``astrbot``. Without
+        deferral everything stays in ``astrbot``, keeping names short.
         """
         self.defer = defer
-        self.tools: dict[str, FunctionTool] = {}
+        # (namespace, Codex name) -> tool
+        self.tools: dict[tuple[str, str], FunctionTool] = {}
         self.specs: list[JsonObject] = []
-        taken: set[str] = set()
+        self._namespaces: dict[str, JsonObject] = {}
+        taken: dict[str, set[str]] = {}
         for tool in sorted((tool_set.tools if tool_set else []), key=lambda t: t.name):
             if not getattr(tool, "active", True):
                 continue
@@ -93,8 +132,9 @@ class CodexToolBridge:
                 and not policy.allows_tool(tool.name, tool_mcp_server(tool))
             ):
                 continue
-            name = _codex_name(tool.name, taken)
-            self.tools[name] = tool
+            namespace = self._namespace_for(tool)
+            name = _codex_name(tool.name, taken.setdefault(namespace, set()))
+            self.tools[(namespace, name)] = tool
             spec = {
                 "type": "function",
                 "name": name,
@@ -106,21 +146,44 @@ class CodexToolBridge:
                 # discovers them through ALL_TOOLS.
                 spec["deferLoading"] = True
             self.specs.append(spec)
+            self._namespaces[namespace]["tools"].append(spec)
         self.fingerprint = hashlib.sha256(
-            json.dumps(self.specs, sort_keys=True, ensure_ascii=False).encode()
+            json.dumps(
+                self.dynamic_tools(), sort_keys=True, ensure_ascii=False
+            ).encode()
         ).hexdigest()[:16]
 
-    def dynamic_tools(self) -> list[JsonObject]:
-        if not self.specs:
-            return []
-        return [
+    def _namespace_for(self, tool: FunctionTool) -> str:
+        source = tool_source(tool) if self.defer else None
+        if source is None:
+            name = CODEX_TOOL_NAMESPACE
+            description = (
+                _DEFERRED_BASE_DESCRIPTION if self.defer else _BASE_DESCRIPTION
+            )
+        else:
+            name = f"{CODEX_TOOL_NAMESPACE}__{source[0]}"
+            description = source[1]
+        self._namespaces.setdefault(
+            name,
             {
                 "type": "namespace",
-                "name": CODEX_TOOL_NAMESPACE,
-                "description": "AstrBot plugin tools for the current chat session.",
-                "tools": self.specs,
-            }
+                "name": name,
+                "description": description,
+                "tools": [],
+            },
+        )
+        return name
+
+    def dynamic_tools(self) -> list[JsonObject]:
+        return [
+            namespace
+            for _, namespace in sorted(self._namespaces.items())
+            if namespace["tools"]
         ]
+
+    def lookup(self, namespace: str | None, name: str) -> FunctionTool | None:
+        """The tool Codex calls ``namespace.name``."""
+        return self.tools.get((namespace or CODEX_TOOL_NAMESPACE, name))
 
     async def call(
         self,
@@ -134,8 +197,8 @@ class CodexToolBridge:
         name = params.get("tool", "")
         raw_args = params.get("arguments")
         args: JsonObject = raw_args if isinstance(raw_args, dict) else {}
-        tool = self.tools.get(name)
-        if tool is None or params.get("namespace") not in (None, CODEX_TOOL_NAMESPACE):
+        tool = self.lookup(params.get("namespace"), name)
+        if tool is None:
             return _text_result(
                 f"error: tool {params.get('namespace')}.{name} is not available.",
                 success=False,

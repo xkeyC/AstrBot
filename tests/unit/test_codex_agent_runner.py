@@ -362,7 +362,7 @@ def test_code_mode_hides_denied_tools_but_direct_mode_lists_them():
 
     hidden = CodexToolBridge(tools, defer=True, policy=denied)
     assert [spec["name"] for spec in hidden.specs] == ["calc"]
-    assert "weather" not in hidden.tools
+    assert hidden.lookup("astrbot", "weather") is None
 
     # Without deferral the tool set must stay identical for every sender, or
     # the prompt prefix (and its cache) would differ per user.
@@ -371,6 +371,46 @@ def test_code_mode_hides_denied_tools_but_direct_mode_lists_them():
 
     # No policy: nothing is filtered in either mode.
     assert len(CodexToolBridge(tools, defer=True).specs) == 2
+
+
+def test_code_mode_groups_plugin_and_mcp_tools_by_source(monkeypatch):
+    from astrbot.core.star.star import StarMetadata, star_map
+
+    monkeypatch.setitem(
+        star_map,
+        "data.plugins.weather.main",
+        StarMetadata(name="astrbot_plugin_weather", short_desc="Weather lookups"),
+    )
+    plugin_tool = _tool("get_weather")
+    plugin_tool.handler_module_path = "data.plugins.weather.main"
+    mcp_tool = _tool("now")
+    mcp_tool.mcp_server_name = "time.srv"
+    tools = ToolSet([_tool("send_message_to_user"), plugin_tool, mcp_tool])
+
+    grouped = CodexToolBridge(tools, defer=True)
+    assert [
+        (ns["name"], ns["description"], [spec["name"] for spec in ns["tools"]])
+        for ns in grouped.dynamic_tools()
+    ] == [
+        (
+            "astrbot",
+            "AstrBot tools for the current chat session.",
+            ["send_message_to_user"],
+        ),
+        ("astrbot__mcp_time_srv", "MCP server time.srv.", ["now"]),
+        (
+            "astrbot__weather",
+            "Plugin astrbot_plugin_weather: Weather lookups",
+            ["get_weather"],
+        ),
+    ]
+    assert grouped.lookup("astrbot__weather", "get_weather") is plugin_tool
+    assert grouped.lookup("astrbot", "get_weather") is None
+
+    # Without deferral the names stay short and in one namespace.
+    [flat] = CodexToolBridge(tools, defer=False).dynamic_tools()
+    assert flat["name"] == "astrbot"
+    assert len(flat["tools"]) == 3
 
 
 def test_hidden_tools_change_the_fingerprint_per_sender():
