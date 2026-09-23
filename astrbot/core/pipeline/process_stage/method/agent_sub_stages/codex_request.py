@@ -198,6 +198,15 @@ async def prepare_codex_request(
                 f"Permissions of this sender: {summary}. Do not attempt restricted "
                 "actions for them; if asked, say politely that they are not allowed.",
             )
+    if runner_config.get("memory_enabled") and policy.global_memory is True:
+        # Codex checks the turn's scopes when the memory tools run; this tells
+        # the model who holds them, per message, without touching the prefix.
+        req.add_persistent_context(
+            "memory_permission",
+            "This sender may manage shared memories: when they ask, you may "
+            "save impersonal knowledge to the shared memory folder, and delete "
+            "memories, in this chat whether it is a group or not.",
+        )
     req.context_anchors_complete = True
     if not req.prompt and (req.image_urls or req.extra_user_content_parts):
         req.prompt = "<attachment>"

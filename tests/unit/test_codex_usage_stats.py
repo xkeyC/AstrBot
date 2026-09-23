@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlmodel import select
@@ -579,3 +580,104 @@ async def test_nothing_answered_but_the_note_is_an_error(monkeypatch, temp_db):
     )
     [row] = rows
     assert row.status == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("granted", [True, False])
+async def test_each_turn_carries_its_senders_permission_scopes(
+    monkeypatch, temp_db, granted
+):
+    from astrbot.core.permission_rules import EVENT_EXTRA_KEY, PermissionPolicy
+
+    requests = []
+
+    class Engine(_Engine):
+        async def submit_turn(self, thread_id, request):
+            requests.append(request)
+            return await super().submit_turn(thread_id, request)
+
+    policy = PermissionPolicy(global_memory=True) if granted else PermissionPolicy()
+    extras = {EVENT_EXTRA_KEY: policy}
+    event = SimpleNamespace(
+        get_extra=lambda key, default=None: extras.get(key, default),
+        set_extra=extras.__setitem__,
+        get_group_id=lambda: "group-1",
+        get_sender_id=lambda: "42",
+        get_sender_name=lambda: "Ann",
+        get_platform_id=lambda: "qq",
+        role="member",
+        unified_msg_origin=UMO,
+    )
+    engine = Engine([{"type": "task_complete"}], [None, None])
+
+    async def get(options):
+        return engine
+
+    monkeypatch.setattr(runner_mod.CodexEngine, "get", staticmethod(get))
+
+    async def open_thread(self, engine):
+        return "thread-1", None
+
+    async def no_history(self, text):
+        pass
+
+    monkeypatch.setattr(CodexAgentRunner, "_open_thread", open_thread)
+    monkeypatch.setattr(CodexAgentRunner, "_sync_history", no_history)
+    monkeypatch.setattr(runner_mod, "db_helper", temp_db)
+    runner = CodexAgentRunner()
+    await runner.reset(
+        request=ProviderRequest(prompt="remember this", session_id=UMO),
+        run_context=SimpleNamespace(context=SimpleNamespace(event=event)),
+        agent_hooks=BaseAgentRunHooks(),
+        provider_config={"turn_timeout": 10, "memory_enabled": True},
+        streaming=False,
+    )
+    [_ async for _ in runner.step_until_done()]
+
+    # A group chat too: the sender's rule decides, turn by turn.
+    [request] = requests
+    granted_scopes = ["memory.write_global", "memory.delete"] if granted else []
+    # Plus who they are, so nobody else's input or code cell acts as them.
+    assert request["scopes"] == [*granted_scopes, "principal:qq:42:member"]
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_keeps_its_senders_scopes(monkeypatch, temp_db):
+    from astrbot.core.permission_rules import PermissionPolicy
+
+    calls = _steered_engine(monkeypatch)
+    monkeypatch.setattr(
+        runner_mod, "event_policy", lambda event: PermissionPolicy(global_memory=True)
+    )
+    events = [
+        {"type": "user_message", "message": "also save that to shared memory"},
+        {"type": "task_complete"},
+        {"type": "task_complete"},  # the continuation
+    ]
+    await _run(monkeypatch, temp_db, events, [None, _total(10, 0, 1)])
+
+    # The follow-up is the same sender's: it acts with their rights too.
+    assert [c["mode"] for c in calls] == ["start_or_steer", "start_if_idle"]
+    assert calls[0]["scopes"][:2] == ["memory.write_global", "memory.delete"]
+    assert calls[1]["scopes"] == calls[0]["scopes"]
+
+
+@pytest.mark.asyncio
+async def test_a_steer_carries_the_senders_scopes(monkeypatch):
+    requests = []
+
+    class Engine:
+        async def submit_turn(self, thread_id, request):
+            requests.append(request)
+            return {"status": "steered", "turn_id": "turn-1"}
+
+    active = native.ActiveTurn(Engine(), "thread-1", "turn-1", "42")
+    monkeypatch.setitem(native.ACTIVE_TURNS, UMO, active)
+
+    steered = await native.try_steer(
+        UMO, "42", [{"type": "text", "text": "and"}], scopes=["principal:qq:42:member"]
+    )
+
+    assert steered is not None
+    # Codex refuses it if the running turn is the same person under another role.
+    assert requests[0]["scopes"] == ["principal:qq:42:member"]

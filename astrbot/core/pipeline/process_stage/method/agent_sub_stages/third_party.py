@@ -14,6 +14,7 @@ from astrbot.core.agent.runners.codex.codex_agent_runner import (
     keep_group_history,
     release_group_history,
     take_group_history,
+    turn_scopes,
 )
 from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
 from astrbot.core.agent.runners.codex.native import try_steer
@@ -413,6 +414,7 @@ class ThirdPartyAgentSubStage(Stage):
                 str(event.get_sender_id() or ""),
                 build_turn_input(req),
                 prompt=req.prompt or "",
+                scopes=turn_scopes(event),
             )
         except BaseException:
             await release_group_history(event)

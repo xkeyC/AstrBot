@@ -38,6 +38,11 @@ EVENT_EXTRA_KEY = "_permission_policy"
 MAX_INHERIT_DEPTH = 16
 # Longest rate-limit window, in seconds (30 days).
 MAX_WINDOW_S = 30 * 24 * 3600
+# Permission scopes: capabilities sent with each Codex turn and checked by
+# Codex's own tools when they run, so a thread shared by many people (a group)
+# still acts on the rights of whoever sent the current turn.
+MEMORY_WRITE_GLOBAL_SCOPE = "memory.write_global"
+MEMORY_DELETE_SCOPE = "memory.delete"
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,14 @@ class PermissionPolicy:
     rate_limit_reply: str = ""
     # Ids of the rule that matched and the rules it inherited from, in order.
     chain: tuple[str, ...] = ()
+
+    @property
+    def scopes(self) -> list[str]:
+        """Permission scopes of the sender, sent with each of their turns."""
+        scopes = []
+        if self.global_memory is True:
+            scopes += [MEMORY_WRITE_GLOBAL_SCOPE, MEMORY_DELETE_SCOPE]
+        return scopes
 
     @property
     def is_default(self) -> bool:

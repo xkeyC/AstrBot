@@ -153,6 +153,8 @@ def test_voice_thread_reads_paired_and_global_memories(monkeypatch):
     # Reads global memories, never writes or deletes them.
     assert config["memories.may_write_global"] is False
     assert config["memories.may_delete"] is False
+    # No turn scopes: nothing shared is writable, whoever speaks.
+    assert config["memories.turn_scopes"] is False
     assert config["memories.auto_consolidate"] is False
     assert config["features.apps"] is False
     assert config["agents.enabled"] is False

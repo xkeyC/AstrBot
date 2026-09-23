@@ -160,14 +160,20 @@ async def session_slot(
 
 
 async def try_steer(
-    umo: str, sender_id: str, turn_input: list[JsonObject], *, prompt: str = ""
+    umo: str,
+    sender_id: str,
+    turn_input: list[JsonObject],
+    *,
+    prompt: str = "",
+    scopes: list[str] | None = None,
 ) -> str | None:
     """Inject a follow-up from the same sender into the running turn.
 
     Returns the running turn's source message id (or "") when Codex accepted
     the input; the caller then produces no reply of its own. Other senders,
     stopped turns, or a turn that already finished return None and are handled
-    as a new turn (queued).
+    as a new turn (queued). With ``scopes``, Codex also refuses to steer into
+    a turn carrying other ones (the same sender under another role).
     """
     active = ACTIVE_TURNS.get(umo)
     if (
@@ -188,10 +194,14 @@ async def try_steer(
         if active.aborted or not active.turn_id:
             return None
     try:
-        result = await active.engine.submit_turn(
-            active.thread_id,
-            {"input": turn_input, "mode": "steer", "expected_turn_id": active.turn_id},
-        )
+        request: JsonObject = {
+            "input": turn_input,
+            "mode": "steer",
+            "expected_turn_id": active.turn_id,
+        }
+        if scopes is not None:
+            request["scopes"] = scopes
+        result = await active.engine.submit_turn(active.thread_id, request)
     except Exception as e:  # noqa: BLE001
         logger.debug("codex steer failed for %s: %s", umo, e)
         return None

@@ -23,8 +23,8 @@ from astrbot.core import db_helper, logger, sp
 from astrbot.core.message.components import Json
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.permission_rate_limit import keep_rate_limit_use
+from astrbot.core.permission_rules import DEFAULT_POLICY, PermissionPolicy
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
-from astrbot.core.permission_rules import PermissionPolicy
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
 
 from ...hooks import BaseAgentRunHooks
@@ -189,30 +189,70 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
     return out
 
 
-def memory_thread_config(cfg: dict, umo: str, event: T.Any) -> JsonObject:
-    """Per-thread Codex memory settings (R16–R18).
-
-    Each chat gets its own local store (scope = UMO). Only a private chat whose
-    sender's rule grants ``global_memory`` may promote memories to the global
-    store; group chats stay local because many people's details mix there.
-    Whoever may write globally may also delete memories, so a wrong one can be
-    taken back. Both flags are fixed when the thread starts (Codex keeps
-    may_write_global sticky-false), so a rule change applies from the next
-    thread, which ``/reset`` starts.
-    """
+def event_policy(event: T.Any) -> PermissionPolicy:
+    """The permission policy resolved for the event's sender."""
     get_extra = getattr(event, "get_extra", None)
     policy = get_extra(POLICY_EXTRA_KEY) if callable(get_extra) else None
+    return policy if isinstance(policy, PermissionPolicy) else DEFAULT_POLICY
+
+
+def turn_scopes(event: T.Any) -> list[str]:
+    """Scopes a Codex turn of this event's sender carries.
+
+    Their permission scopes, plus one naming who they are (platform, sender
+    and role). Codex compares a turn's scopes before letting input join it or
+    letting a code cell from an earlier turn call tools in it, so the marker
+    keeps two people -- or one person under another role, like a task created
+    through the API -- from acting with each other's rights, even when their
+    permissions happen to match.
+    """
+    platform = sender = role = ""
+    with contextlib.suppress(Exception):
+        platform = str(event.get_platform_id() or "")
+        sender = str(event.get_sender_id() or "")
+        role = str(getattr(event, "role", "") or "member")
+    return [*event_policy(event).scopes, f"principal:{platform}:{sender}:{role}"]
+
+
+def memory_thread_config(
+    cfg: dict, umo: str, event: T.Any, *, turn_scopes: bool = True
+) -> JsonObject:
+    """Per-thread Codex memory settings (R16–R18).
+
+    Each chat gets its own local store (scope = UMO). Writing a shared memory
+    or deleting one is up to the sender of each turn (``turn_scopes``): each
+    turn carries its sender's permission scopes, so whoever has a rule
+    granting ``global_memory`` may do it in a group as well as in private,
+    e.g. to correct the bot. The thread's tools and prompt stay the same for
+    everyone, so switching senders costs no cache.
+
+    Automatic consolidation still promotes to the global store only from a
+    private chat of such a sender: a group's transcript mixes many people's
+    details. That flag is fixed when the thread starts (Codex keeps it
+    sticky-false), so a rule change applies to it from the next thread.
+
+    Args:
+        cfg: Runner config.
+        umo: The chat, which is also its memory scope.
+        event: The event starting the thread, for its sender's rule.
+        turn_scopes: False for a thread that must never write shared
+            memories or delete any, whoever speaks (the voice agent).
+
+    Returns:
+        Codex config overrides for the thread.
+    """
     is_private = False
     with contextlib.suppress(Exception):
         is_private = not event.get_group_id()
-    trusted = isinstance(policy, PermissionPolicy) and policy.global_memory is True
+    trusted = event_policy(event).global_memory is True
     return {
         "features.memories": True,
         "memories.dedicated_tools": True,
         "memories.extra_session_sources": ["astrbot"],
         "memories.scope_key": umo,
         "memories.may_write_global": bool(is_private and trusted),
-        "memories.may_delete": trusted,
+        "memories.may_delete": trusted and not turn_scopes,
+        "memories.turn_scopes": turn_scopes,
         "memories.auto_consolidate": bool(cfg.get("memory_auto_consolidate", True)),
     }
 
@@ -771,6 +811,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
             request["dynamic_tools"] = tools_update
         if self.req.model:
             request["model"] = self.req.model
+        # The sender's capabilities travel with their turn (scheduled and
+        # background tasks run as whoever created them); Codex's tools check
+        # them when they run.
+        request["scopes"] = turn_scopes(self._event())
         return request
 
     def _computer_runtime(self) -> str:
@@ -1064,6 +1108,8 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                                 for note in notes
                                             ],
                                             "mode": "start_if_idle",
+                                            # The same sender's follow-up: their rights.
+                                            "scopes": turn_scopes(self._event()),
                                         },
                                     )
                                 except Exception as e:  # noqa: BLE001

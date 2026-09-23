@@ -232,12 +232,11 @@ def test_native_exec_approvals_follow_permission_rules(tmp_path):
     assert native_exec_decision(event(None), True) == (True, "")
 
 
-def test_memory_thread_config_limits_global_to_permitted_private_chats(tmp_path):
+def test_memory_thread_config_leaves_shared_writes_to_the_sender(tmp_path):
     from astrbot.core.agent.runners.codex.codex_agent_runner import (
         memory_thread_config,
     )
     from astrbot.core.permission_rules import EVENT_EXTRA_KEY, PermissionPolicy
-
     def event(policy, group=""):
         return SimpleNamespace(
             get_extra=lambda key: policy if key == EVENT_EXTRA_KEY else None,
@@ -248,19 +247,23 @@ def test_memory_thread_config_limits_global_to_permitted_private_chats(tmp_path)
     cfg = {"memory_auto_consolidate": False}
     conf = memory_thread_config(cfg, "qq:FriendMessage:1", event(allowed))
     assert conf["memories.scope_key"] == "qq:FriendMessage:1"
+    # Shared writes and deletions follow each turn's scopes, in any chat.
+    assert conf["memories.turn_scopes"] is True
+    # Automatic consolidation reaches the shared store from their private chat.
     assert conf["memories.may_write_global"] is True
-    # Whoever may write globally may also take a memory back.
-    assert conf["memories.may_delete"] is True
     assert conf["memories.auto_consolidate"] is False
     assert conf["memories.extra_session_sources"] == ["astrbot"]
     in_group = memory_thread_config(cfg, "u", event(allowed, group="9"))
-    # A group never writes to the shared store, but a trusted sender can still
-    # curate what this chat remembers.
+    assert in_group["memories.turn_scopes"] is True
+    # A group's transcript mixes many people: it is never consolidated globally.
     assert in_group["memories.may_write_global"] is False
-    assert in_group["memories.may_delete"] is True
     without_rule = memory_thread_config(cfg, "u", event(None))
     assert without_rule["memories.may_write_global"] is False
-    assert without_rule["memories.may_delete"] is False
+
+    # The scopes a turn carries: a rule granting global_memory, in a group too.
+    assert allowed.scopes == ["memory.write_global", "memory.delete"]
+    assert PermissionPolicy().scopes == []
+    assert PermissionPolicy(global_memory=False).scopes == []
     exe = tmp_path / "codex.exe"
     exe.write_bytes(b"")
     base = {

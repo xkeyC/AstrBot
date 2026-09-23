@@ -72,8 +72,10 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "developer_instructions": "",
         "base_instructions": "",
         "thread_config": {},
-        # Codex native memories: per-chat local store, global store only for
-        # private chats of users whose permission rule sets global_memory.
+        # Codex native memories: per-chat local store. Senders whose permission
+        # rule sets global_memory may write shared memories and delete memories
+        # in any chat; automatic consolidation reaches the shared store only
+        # from their private chats.
         "memory_enabled": False,
         "memory_auto_consolidate": True,
         "show_commentary": False,

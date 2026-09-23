@@ -198,8 +198,9 @@ def voice_thread_config(memory_scope: str | None) -> dict:
     config = dict(VOICE_THREAD_CONFIG)
     cfg = _runner_config()
     if cfg.get("memory_enabled") and memory_scope:
-        # No event: no permission policy, so nothing global is writable.
-        config.update(memory_thread_config(cfg, memory_scope, None))
+        # No turn scopes: nothing global is writable and nothing can be
+        # deleted, whoever speaks.
+        config.update(memory_thread_config(cfg, memory_scope, None, turn_scopes=False))
     return config
 
 
