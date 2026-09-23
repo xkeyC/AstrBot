@@ -10,6 +10,17 @@ from astrbot.core.dashboard_assets import resolve_dashboard_dist
 WARNING_FRAGMENT = "does not declare a version matching core"
 
 
+@pytest.fixture(autouse=True)
+def _capture_astrbot_logger(caplog):
+    """AstrBot's logger does not propagate to the root logger, so caplog only
+    sees its records with the capture handler attached to it directly."""
+    from astrbot.core import logger
+
+    logger.addHandler(caplog.handler)
+    yield
+    logger.removeHandler(caplog.handler)
+
+
 def _make_dist(root, version: str | None) -> str:
     assets = root / "assets"
     assets.mkdir(parents=True)
