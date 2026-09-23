@@ -32,7 +32,7 @@ async def _clear_third_party_agent_runner_state(
             scope="umo", scope_id=umo, key=session_key, default={}
         )
         if isinstance(state, dict) and (thread_id := state.get("thread_id")):
-            CodexEngine.drop_thread_context(str(thread_id))
+            await CodexEngine.release_thread(umo, str(thread_id))
     await sp.remove_async(
         scope="umo",
         scope_id=umo,

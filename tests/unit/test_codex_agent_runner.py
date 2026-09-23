@@ -633,17 +633,22 @@ def test_inputs_without_additional_context_keep_the_threads_last_one():
     ]
 
 
-def test_a_replaced_thread_forgets_its_additional_context():
+def test_releasing_a_thread_unloads_it_and_forgets_its_context():
+    """/new and /reset leave the old thread: it is shut down in Codex and
+    its cached context is dropped."""
     import json
 
     from astrbot.core.agent.runners.codex.native import CodexEngine
 
-    sent = []
+    sent, shut = [], []
 
     class FakeRuntime:
         async def submit_turn(self, thread_id, request_json):
             sent.append(json.loads(request_json))
             return json.dumps({"status": "started"})
+
+        async def shutdown_thread(self, thread_id):
+            shut.append(thread_id)
 
     engine = CodexEngine(FakeRuntime())
     persona = {"astrbot_persona": {"value": "be a cat", "kind": "application"}}
@@ -652,10 +657,11 @@ def test_a_replaced_thread_forgets_its_additional_context():
         await engine.submit_turn("old", {"input": [], "additional_context": persona})
         CodexEngine._instances["test"] = engine
         try:
-            CodexEngine.drop_thread_context("old")
+            await CodexEngine.release_thread("chat", "old")
         finally:
             CodexEngine._instances.pop("test", None)
         await engine.submit_turn("old", {"input": [], "mode": "steer"})
 
     asyncio.run(run())
+    assert shut == ["old"]
     assert "additional_context" not in sent[-1]

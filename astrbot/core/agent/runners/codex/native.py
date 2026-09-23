@@ -518,10 +518,18 @@ class CodexEngine:
         self._additional_context.pop(thread_id, None)
 
     @classmethod
-    def drop_thread_context(cls, thread_id: str) -> None:
-        """Forget a thread's cached context in every engine (/new, /reset)."""
+    async def release_thread(cls, umo: str, thread_id: str) -> None:
+        """Unload a chat's thread in every engine once the chat left it
+        (/new, /reset): Codex keeps a loaded thread, its event pump and the
+        context cache until told otherwise, however many new ones follow.
+
+        Holds the chat's lock, so a turn still opening the thread finishes
+        first; the pump ends on its own when the thread shuts down.
+        """
         for engine in list(cls._instances.values()):
-            engine.drop_additional_context(thread_id)
+            async with engine.session_lock(umo):
+                await engine.forget_thread(thread_id)
+        logger.info("Codex thread %s released (umo=%s)", thread_id, umo)
 
     async def forget_thread(self, thread_id: str) -> None:
         self.drop_additional_context(thread_id)
