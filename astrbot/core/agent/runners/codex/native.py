@@ -112,6 +112,8 @@ ACTIVE_TURNS: dict[str, ActiveTurn] = {}
 
 #: How long a follow-up waits for a just-submitted turn to report its id.
 STEER_READY_TIMEOUT_S = 10.0
+# Added to each routed event: the id of the turn that emitted it.
+TURN_ID_FIELD = "_turn_id"
 
 #: umo -> turns holding or waiting for that chat's session lock.
 _QUEUED_TURNS: dict[str, int] = {}
@@ -276,8 +278,16 @@ class ThreadPump:
                     self.tool_tasks.add(task)
                     task.add_done_callback(self.tool_tasks.discard)
                 if self.route is not None:
+                    # Which turn it belongs to: a turn interrupted just before
+                    # this one still reports into the open route.
+                    msg[TURN_ID_FIELD] = str(event.get("id") or "")
                     self.route.events.put_nowait(msg)
                 if msg.get("type") == "shutdown_complete":
+                    if self.route is not None:
+                        # A turn still open would otherwise wait out its timeout.
+                        self.route.events.put_nowait(
+                            {"type": "_pump_closed", "message": "thread shut down"}
+                        )
                     break
         except asyncio.CancelledError:
             raise

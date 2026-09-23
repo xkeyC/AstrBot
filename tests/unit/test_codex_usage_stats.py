@@ -662,6 +662,61 @@ async def test_a_continuation_keeps_its_senders_scopes(monkeypatch, temp_db):
     assert calls[1]["scopes"] == calls[0]["scopes"]
 
 
+# ------------------------------------------------------------ orphaned turns
+
+
+@pytest.mark.asyncio
+async def test_a_turn_left_running_by_another_sender_is_interrupted_not_joined(
+    monkeypatch, temp_db
+):
+    calls, interrupts = [], []
+
+    async def submit_turn(self, thread_id, request):
+        calls.append(request)
+        if len(calls) == 1:
+            return {"status": "not_submitted", "reason": "ActiveTurnScopesMismatch"}
+        return {"status": "started", "turn_id": "turn-2"}
+
+    async def interrupt(self, thread_id):
+        interrupts.append(thread_id)
+
+    monkeypatch.setattr(_Engine, "submit_turn", submit_turn)
+    monkeypatch.setattr(_Engine, "interrupt", interrupt, raising=False)
+    events = [
+        {"type": "agent_message", "message": "hi", "phase": "final_answer"},
+        {"type": "task_complete"},
+    ]
+    _, responses, _ = await _run(monkeypatch, temp_db, events, [None, None])
+
+    # Stopped, then started afresh with the same request.
+    assert interrupts == ["thread-1"]
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert responses[-1].type == "llm_result"
+
+
+@pytest.mark.asyncio
+async def test_leaving_mid_turn_interrupts_it(monkeypatch, temp_db):
+    interrupts = []
+
+    async def interrupt(self, thread_id):
+        interrupts.append(thread_id)
+
+    monkeypatch.setattr(_Engine, "interrupt", interrupt, raising=False)
+    # No terminal event: the turn is still running when the runner is cancelled.
+    task = asyncio.create_task(_run(monkeypatch, temp_db, [], [None, None]))
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if native.ACTIVE_TURNS.get(UMO) is not None:
+            break
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Otherwise it runs on unread and the chat's next turn runs into it.
+    assert interrupts == ["thread-1"]
+
+
 @pytest.mark.asyncio
 async def test_a_steer_carries_the_senders_scopes(monkeypatch):
     requests = []
@@ -681,3 +736,118 @@ async def test_a_steer_carries_the_senders_scopes(monkeypatch):
     assert steered is not None
     # Codex refuses it if the running turn is the same person under another role.
     assert requests[0]["scopes"] == ["principal:qq:42:member"]
+
+
+@pytest.mark.asyncio
+async def test_another_turns_end_and_words_are_not_taken_for_ours(monkeypatch, temp_db):
+    # The turn interrupted just before ours still reports into our route.
+    events = [
+        {"type": "agent_message", "message": "stale", "_turn_id": "old"},
+        {"type": "turn_aborted", "_turn_id": "old"},
+        {"type": "agent_message", "message": "fresh", "_turn_id": "turn-1"},
+        {"type": "task_complete", "_turn_id": "turn-1"},
+    ]
+    _, responses, _ = await _run(monkeypatch, temp_db, events, [None, None])
+
+    [answer] = [r for r in responses if r.type == "llm_result"]
+    assert answer.data["chain"].get_plain_text() == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_a_thread_shut_down_mid_turn_ends_the_turn(monkeypatch):
+    class Rt:
+        def __init__(self):
+            self.raw = [json.dumps({"id": "", "msg": {"type": "shutdown_complete"}})]
+
+        async def next_event(self, thread_id):
+            return self.raw.pop(0) if self.raw else None
+
+    engine = SimpleNamespace(rt=Rt(), pumps={})
+    pump = native.ThreadPump(engine, "thread-1")
+    queue = pump.open_turn(None)
+    await pump._run()
+
+    # Not left waiting for its timeout.
+    kinds = [queue.get_nowait()["type"] for _ in range(queue.qsize())]
+    assert kinds == ["shutdown_complete", "_pump_closed"]
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_after_an_answer_keeps_the_answer(monkeypatch, temp_db):
+    events = [
+        {"type": "agent_message", "message": "done", "phase": "final_answer"},
+        {"type": "_pump_closed", "message": "thread shut down"},
+    ]
+    _, responses, rows = await _run(monkeypatch, temp_db, events, [None, None])
+
+    assert responses[-1].type == "llm_result"
+    assert responses[-1].data["chain"].get_plain_text().startswith("done")
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_cut_short_by_a_shutdown_is_not_passed_off_as_answered(
+    monkeypatch, temp_db
+):
+    _steered_engine(monkeypatch)
+    events = [
+        {"type": "agent_message", "message": "first", "phase": "final_answer"},
+        {"type": "user_message", "message": "and also"},  # steered in at the end
+        {"type": "task_complete"},
+        # The continuation for "and also" never finishes: the thread shuts down.
+        {"type": "_pump_closed", "message": "thread shut down"},
+    ]
+    _, responses, _ = await _run(monkeypatch, temp_db, events, [None, None])
+
+    text = responses[-1].data["chain"].get_plain_text()
+    assert text.startswith("first")
+    assert runner_mod.FOLLOW_UP_DROPPED_NOTE in text
+
+
+class _SteeredIn(dict):
+    """A user_message whose arrival marks a follow-up steered into the turn."""
+
+    def get(self, key, default=None):
+        if key == "type" and not self.get_counted():
+            native.ACTIVE_TURNS[UMO].steered += 1
+            self["_counted"] = True
+        return super().get(key, default)
+
+    def get_counted(self):
+        return super().get("_counted", False)
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_steered_into_a_continuation_counts_as_dropped(
+    monkeypatch, temp_db
+):
+    calls = []
+
+    async def submit_turn(self, thread_id, request):
+        calls.append(request)
+        return {"status": "started", "turn_id": f"turn-{len(calls)}"}
+
+    async def place(self, path):
+        return f"image at {path}"
+
+    async def no_steer(self, engine, thread_id, active, note):
+        return False
+
+    monkeypatch.setattr(_Engine, "submit_turn", submit_turn)
+    monkeypatch.setattr(runner_mod, "generated_image_path", lambda item: "img.png")
+    monkeypatch.setattr(CodexAgentRunner, "_place_generated_image", place)
+    monkeypatch.setattr(CodexAgentRunner, "_steer_note", no_steer)
+    events = [
+        {"type": "agent_message", "message": "first", "phase": "final_answer"},
+        # An image note that missed the turn: a notes-only continuation.
+        {"type": "item_completed", "item": {}},
+        {"type": "task_complete"},
+        # During it, the same sender's follow-up is steered in; then shutdown.
+        _SteeredIn(type="user_message", message="and also"),
+        {"type": "_pump_closed", "message": "thread shut down"},
+    ]
+    _, responses, _ = await _run(monkeypatch, temp_db, events, [None, None])
+
+    assert len(calls) == 2  # the continuation was started
+    text = responses[-1].data["chain"].get_plain_text()
+    assert text.startswith("first")
+    assert runner_mod.FOLLOW_UP_DROPPED_NOTE in text

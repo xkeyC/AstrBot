@@ -41,6 +41,7 @@ from .constants import (
 from .native import (
     ACTIVE_TURNS,
     TERMINAL_EVENTS,
+    TURN_ID_FIELD,
     ActiveTurn,
     CodexEngine,
     JsonObject,
@@ -940,6 +941,11 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 event_seq = last_user_seq = last_agent_seq = 0
                 first_end = True
                 continuations = 0
+                # The agent-message count when a continuation answering a
+                # steered follow-up was started; None when none was.
+                follow_up_since: int | None = None
+                # Follow-ups steered in before the latest continuation started.
+                steered_before = 0
                 # An error from before a continuation, and how many answers
                 # existed then: it stands unless the continuation answers.
                 carried_error: str | None = None
@@ -961,16 +967,34 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                     self._usage.start(await thread_usage(engine, thread_id))
                     self.stats.start_time = time.time()
                     try:
-                        sub = await engine.submit_turn(
-                            thread_id, self._turn_request(tools_update)
-                        )
+                        request = self._turn_request(tools_update)
+                        sub = await engine.submit_turn(thread_id, request)
+                        if sub.get("reason") == "ActiveTurnScopesMismatch":
+                            # This chat's slot is ours, so a turn still running
+                            # was left behind by a runner that stopped early.
+                            # Stop it and start ours instead of joining it.
+                            logger.warning(
+                                "Codex thread %s still ran another sender's turn; "
+                                "interrupting it.",
+                                thread_id,
+                            )
+                            await engine.interrupt(thread_id)
+                            sub = await engine.submit_turn(thread_id, request)
                         if sub.get("status") == "not_submitted":
                             raise RuntimeError(
                                 f"Codex did not accept the turn: {sub.get('reason')}"
                             )
                         active.turn_id = str(sub.get("turn_id") or "")
-                    except BaseException:
+                        # Running from here on: stopping or leaving must now
+                        # interrupt it, even before the loop below starts.
+                        self._turn_running = True
+                    except BaseException as e:
                         active.aborted = True
+                        if isinstance(e, asyncio.CancelledError):
+                            # Codex may have started the turn before the
+                            # cancellation reached us; do not leave it running.
+                            with contextlib.suppress(Exception):
+                                await asyncio.shield(engine.interrupt(thread_id))
                         raise
                     finally:
                         # Release a follow-up waiting on the turn id, including
@@ -981,7 +1005,6 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                     keep_group_history(self._event())
                     keep_rate_limit_use(self._event())
                     await self._remember_sender(thread_id)
-                    self._turn_running = True
                     while True:
                         remaining = timeout - (time.monotonic() - started)
                         if remaining <= 0:
@@ -993,6 +1016,11 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                         except asyncio.TimeoutError:
                             continue
                         kind = msg.get("type")
+                        turn_of = msg.get(TURN_ID_FIELD)
+                        if turn_of and active.turn_id and turn_of != active.turn_id:
+                            # Another turn's (its end, words, images, usage): one
+                            # interrupted just before ours still reports here.
+                            continue
                         event_seq += 1
                         if (
                             not self.stats.time_to_first_token
@@ -1123,6 +1151,10 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                     again = {}
                                 if again.get("status") == "started":
                                     active.turn_id = str(again.get("turn_id") or "")
+                                    follow_up_since = (
+                                        last_agent_seq if unanswered else None
+                                    )
+                                    steered_before = active.steered
                                     if error_msg:
                                         carried_error = error_msg
                                         answers_before = _answer_count(final_texts)
@@ -1137,9 +1169,39 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                             )
                             break
                         elif kind == "_pump_closed":
-                            raise RuntimeError(
-                                msg.get("message") or "Codex thread closed"
-                            )
+                            reason = msg.get("message") or "Codex thread closed"
+                            if not _answer_count(final_texts):
+                                raise RuntimeError(reason)
+                            # Keep what was already answered (e.g. before a
+                            # continuation the shutdown cut short), but not
+                            # as if a follow-up still waiting had been too.
+                            error_msg = reason
+                            if continuations:
+                                # A follow-up the continuation carried and has
+                                # not answered, or one steered into it since.
+                                follow_up_dropped = (
+                                    follow_up_since is not None
+                                    and last_agent_seq <= follow_up_since
+                                ) or (
+                                    active is not None
+                                    and active.steered > steered_before
+                                    and last_user_seq > last_agent_seq
+                                )
+                            else:
+                                follow_up_dropped = (
+                                    active is not None
+                                    and active.steered > 0
+                                    and last_user_seq > last_agent_seq
+                                )
+                            break
+                except BaseException:
+                    if self._turn_running:
+                        # Left mid-turn (cancelled, closed early): stop the turn,
+                        # or it runs on with nobody reading it and the chat's
+                        # next turn runs into it.
+                        with contextlib.suppress(Exception):
+                            await asyncio.shield(engine.interrupt(thread_id))
+                    raise
                 finally:
                     self._turn_running = False
                     if (
