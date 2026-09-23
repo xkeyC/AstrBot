@@ -650,7 +650,11 @@ def test_a_replaced_thread_forgets_its_additional_context():
 
     async def run():
         await engine.submit_turn("old", {"input": [], "additional_context": persona})
-        engine.drop_additional_context("old")
+        CodexEngine._instances["test"] = engine
+        try:
+            CodexEngine.drop_thread_context("old")
+        finally:
+            CodexEngine._instances.pop("test", None)
         await engine.submit_turn("old", {"input": [], "mode": "steer"})
 
     asyncio.run(run())

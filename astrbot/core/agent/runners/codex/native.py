@@ -517,6 +517,12 @@ class CodexEngine:
         """Forget the context a replaced thread's inputs carried."""
         self._additional_context.pop(thread_id, None)
 
+    @classmethod
+    def drop_thread_context(cls, thread_id: str) -> None:
+        """Forget a thread's cached context in every engine (/new, /reset)."""
+        for engine in list(cls._instances.values()):
+            engine.drop_additional_context(thread_id)
+
     async def forget_thread(self, thread_id: str) -> None:
         self.drop_additional_context(thread_id)
         with contextlib.suppress(Exception):
