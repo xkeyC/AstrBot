@@ -345,8 +345,9 @@ class CodexEngine:
     _instances: dict[str, CodexEngine] = {}
     _lock: asyncio.Lock | None = None
 
-    def __init__(self, rt: Any) -> None:
+    def __init__(self, rt: Any, codex_home: str = "") -> None:
         self.rt = rt
+        self.codex_home = codex_home
         self.pumps: dict[str, ThreadPump] = {}
         self.session_locks: dict[str, asyncio.Lock] = {}
         #: thread id -> handler of images Codex saves during that thread's turn.
@@ -377,19 +378,34 @@ class CodexEngine:
             cls._lock = asyncio.Lock()
         async with cls._lock:
             engine = cls._instances.get(key)
-            if engine is None:
-                binding = _import_binding()
-                Path(options["codex_home"]).mkdir(parents=True, exist_ok=True)
-                rt = await binding.Runtime.create(
-                    json.dumps(options, ensure_ascii=False)
+            if engine is not None:
+                return engine
+            binding = _import_binding()
+            codex_home = str(options["codex_home"])
+            Path(codex_home).mkdir(parents=True, exist_ok=True)
+            # A settings change (another model, say) builds a different option
+            # set. The engine it replaces still owns every chat's thread and
+            # its rollout file, so resuming those chats would fail with
+            # "already has an active writer" and lose their history: shut it
+            # down first, and start again from one engine per codex home.
+            for old_key, old in list(cls._instances.items()):
+                if old.codex_home != codex_home:
+                    continue
+                cls._instances.pop(old_key, None)
+                logger.info(
+                    "Codex settings changed; restarting the engine (codex_home=%s).",
+                    codex_home,
                 )
-                engine = cls(rt)
-                # Older bindings have no hook; images then arrive through the
-                # event stream alone.
-                if hasattr(rt, "set_saved_image_hook"):
-                    rt.set_saved_image_hook(engine._on_saved_image)
-                cls._instances[key] = engine
-                logger.info("Codex engine ready (codex_home=%s)", options["codex_home"])
+                with contextlib.suppress(Exception):
+                    await old.rt.shutdown()
+            rt = await binding.Runtime.create(json.dumps(options, ensure_ascii=False))
+            engine = cls(rt, codex_home)
+            # Older bindings have no hook; images then arrive through the
+            # event stream alone.
+            if hasattr(rt, "set_saved_image_hook"):
+                rt.set_saved_image_hook(engine._on_saved_image)
+            cls._instances[key] = engine
+            logger.info("Codex engine ready (codex_home=%s)", codex_home)
             return engine
 
     @classmethod
