@@ -369,6 +369,8 @@ class CodexEngine:
         self.rt = rt
         self.codex_home = codex_home
         self.pumps: dict[str, ThreadPump] = {}
+        # thread_id -> the additional context its inputs last carried.
+        self._additional_context: dict[str, JsonObject] = {}
         self.session_locks: dict[str, asyncio.Lock] = {}
         #: thread id -> handler of images Codex saves during that thread's turn.
         self.saved_image_handlers: dict[str, SavedImageHandler] = {}
@@ -490,6 +492,17 @@ class CodexEngine:
         return self._pump(thread_id)
 
     async def submit_turn(self, thread_id: str, request: JsonObject) -> JsonObject:
+        # Codex reads a missing additional_context as "none left" and clears
+        # what it keeps for the thread, so a steer or a continuation would
+        # lose the persona: not put back after compaction, and sent again
+        # whole on the next turn. Inputs without it carry the last one.
+        if "additional_context" in request:
+            self._additional_context[thread_id] = request["additional_context"]
+        elif thread_id in self._additional_context:
+            request = {
+                **request,
+                "additional_context": self._additional_context[thread_id],
+            }
         return json.loads(
             await self.rt.submit_turn(
                 thread_id, json.dumps(request, ensure_ascii=False)
@@ -501,5 +514,6 @@ class CodexEngine:
             await self.rt.interrupt(thread_id)
 
     async def forget_thread(self, thread_id: str) -> None:
+        self._additional_context.pop(thread_id, None)
         with contextlib.suppress(Exception):
             await self.rt.shutdown_thread(thread_id)

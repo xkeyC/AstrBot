@@ -597,3 +597,37 @@ def test_code_mode_names_cannot_reach_into_another_namespace():
         ToolSet([_tool("__foo"), _tool("x__y"), _tool("-z")]), defer=True
     )
     assert sorted(spec["name"] for spec in bridge.specs) == ["foo", "x_y", "z"]
+
+
+def test_inputs_without_additional_context_keep_the_threads_last_one():
+    """Codex reads a missing additional_context as "none": a steer or a
+    continuation must not clear the persona it keeps for the thread."""
+    import json
+
+    from astrbot.core.agent.runners.codex.native import CodexEngine
+
+    sent = []
+
+    class FakeRuntime:
+        async def submit_turn(self, thread_id, request_json):
+            sent.append((thread_id, json.loads(request_json)))
+            return json.dumps({"status": "started"})
+
+    engine = CodexEngine(FakeRuntime())
+    persona = {"astrbot_persona": {"value": "be a cat", "kind": "application"}}
+
+    async def run():
+        await engine.submit_turn("t1", {"input": [], "additional_context": persona})
+        await engine.submit_turn("t1", {"input": [], "mode": "steer"})
+        await engine.submit_turn("t2", {"input": [], "mode": "steer"})
+        await engine.submit_turn("t1", {"input": [], "additional_context": {}})
+        await engine.submit_turn("t1", {"input": [], "mode": "start_if_idle"})
+
+    asyncio.run(run())
+    assert [request.get("additional_context") for _, request in sent] == [
+        persona,
+        persona,
+        None,  # another thread has none of its own yet
+        {},
+        {},  # an explicit empty context is kept too
+    ]
