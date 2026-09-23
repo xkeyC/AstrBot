@@ -123,6 +123,7 @@ def test_engine_options_default_to_lean_code_mode(tmp_path):
     assert cfg["web_search"] == "disabled"
     assert cfg["include_permissions_instructions"] is False
     assert cfg["features.code_mode.structured_dynamic_tool_results"] is True
+    assert cfg["features.code_mode.tool_catalog"] is True
     overridden = engine_options(
         {
             "codex_home": str(tmp_path),

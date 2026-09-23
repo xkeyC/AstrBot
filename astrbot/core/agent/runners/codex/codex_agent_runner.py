@@ -116,6 +116,9 @@ def engine_options(cfg: dict) -> JsonObject:
         "model_tool_mode": tool_mode,
         "features.code_mode.structured_dynamic_tool_results": True,
         "features.code_mode.compact_exec_description": True,
+        # Deferred tools stay out of the prompt prefix; this names them, with
+        # short descriptions, in history and appends loads and unloads.
+        "features.code_mode.tool_catalog": True,
         "features.code_mode.exec_as_function_tool": bool(
             cfg.get("exec_as_function_tool")
         ),
