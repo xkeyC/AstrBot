@@ -38,8 +38,19 @@ _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 JsonObject = dict[str, Any]
 
 
-def _codex_name(name: str, taken: set[str]) -> str:
-    base = _INVALID_NAME_CHARS.sub("_", name) or "tool"
+def _codex_name(name: str, taken: set[str], *, js_safe: bool = False) -> str:
+    """A Codex tool name for ``name``, unique within ``taken``.
+
+    ``js_safe`` also turns ``-`` into ``_``, drops leading ``_`` and folds
+    ``__``: code mode calls tools as JS identifiers, where ``a-b`` and ``a_b``
+    are one name, and joins namespace and name with ``__`` (a leading ``_``
+    or an inner ``__`` could make it another namespace's tool).
+    """
+    base = _INVALID_NAME_CHARS.sub("_", name)
+    if js_safe:
+        base = re.sub(r"_{2,}", "_", base.replace("-", "_")).lstrip("_")
+    if not base.strip("_-"):
+        base = "tool"
     # "mcp" and "mcp__*" are reserved by Codex.
     if base == "mcp" or base.startswith("mcp__"):
         base = f"ext_{base}"
@@ -57,13 +68,15 @@ def _source_key(text: str) -> str:
     return _SOURCE_KEY_SPLIT.sub("_", text).strip("_")[:_MAX_SOURCE_KEY].strip("_")
 
 
-def tool_source(tool: FunctionTool) -> tuple[str, str] | None:
-    """``(key, description)`` of the plugin or MCP server a tool comes from.
+def tool_source(tool: FunctionTool) -> tuple[str, str, str] | None:
+    """``(key, description, identity)`` of the plugin or MCP server a tool
+    comes from; the key may be shared by several sources.
 
     None for AstrBot's own tools, which belong to no plugin.
     """
     if server := tool_mcp_server(tool):
-        return f"mcp_{_source_key(server) or 'server'}", f"MCP server {server}."
+        key = f"mcp_{_source_key(server) or 'server'}"
+        return key, f"MCP server {server}.", f"mcp:{server}"
     module = getattr(tool, "handler_module_path", None)
     if not module:
         return None
@@ -73,10 +86,29 @@ def tool_source(tool: FunctionTool) -> tuple[str, str] | None:
     if plugin is None or not plugin.name:
         return None
     short = re.sub(r"^astrbot_plugin_", "", plugin.name, flags=re.IGNORECASE)
+    key = _source_key(short) or _source_key(plugin.root_dir_name or "") or "plugin"
+    if key.lower().startswith("mcp"):
+        key = f"plugin_{key}"  # MCP servers own the mcp_ keys
     about = (plugin.short_desc or plugin.desc or "").strip()
     label = plugin.display_name or plugin.name
     description = f"Plugin {label}: {about}" if about else f"Plugin {label}."
-    return _source_key(short) or "plugin", description[:_MAX_SOURCE_DESCRIPTION]
+    return key, description[:_MAX_SOURCE_DESCRIPTION], f"plugin:{plugin.name}"
+
+
+def _source_namespaces(tools: list[FunctionTool]) -> dict[int, tuple[str, str]]:
+    """``id(tool) -> (namespace, description)`` for tools from a plugin or an
+    MCP server; sources whose keys collide get a short hash each."""
+    sources = {id(tool): source for tool in tools if (source := tool_source(tool))}
+    identities: dict[str, set[str]] = {}
+    for key, _, identity in sources.values():
+        identities.setdefault(key, set()).add(identity)
+    namespaces = {}
+    for tool_id, (key, description, identity) in sources.items():
+        if len(identities[key]) > 1:
+            digest = hashlib.sha1(identity.encode()).hexdigest()[:6]
+            key = f"{key}_{digest}"
+        namespaces[tool_id] = (f"{CODEX_TOOL_NAMESPACE}__{key}", description)
+    return namespaces
 
 
 def _input_schema(tool: FunctionTool) -> JsonObject:
@@ -123,17 +155,51 @@ class CodexToolBridge:
         self.specs: list[JsonObject] = []
         self._namespaces: dict[str, JsonObject] = {}
         taken: dict[str, set[str]] = {}
-        for tool in sorted((tool_set.tools if tool_set else []), key=lambda t: t.name):
-            if not getattr(tool, "active", True):
-                continue
+        active = [
+            tool
+            for tool in sorted(
+                (tool_set.tools if tool_set else []), key=lambda t: t.name
+            )
+            if getattr(tool, "active", True)
+        ]
+        if defer:
+            # Tools whose names need no folding claim them first, so a
+            # folded look-alike never takes a name prompts refer to.
+            active.sort(
+                key=lambda t: (
+                    _codex_name(t.name, set(), js_safe=True) != t.name,
+                    t.name,
+                )
+            )
+        sources = _source_namespaces(active) if defer else {}
+        for tool in active:
+            namespace, description = sources.get(
+                id(tool),
+                (
+                    CODEX_TOOL_NAMESPACE,
+                    _DEFERRED_BASE_DESCRIPTION if defer else _BASE_DESCRIPTION,
+                ),
+            )
+            # Names are given before the sender's rule filters anything, so a
+            # name means the same tool whoever speaks.
+            name = _codex_name(
+                tool.name, taken.setdefault(namespace, set()), js_safe=defer
+            )
             if (
                 defer
                 and policy is not None
                 and not policy.allows_tool(tool.name, tool_mcp_server(tool))
             ):
                 continue
-            namespace = self._namespace_for(tool)
-            name = _codex_name(tool.name, taken.setdefault(namespace, set()))
+            self._namespaces.setdefault(
+                namespace,
+                {
+                    "type": "namespace",
+                    "name": namespace,
+                    "description": description,
+                    "tools": [],
+                },
+            )
             self.tools[(namespace, name)] = tool
             spec = {
                 "type": "function",
@@ -152,27 +218,6 @@ class CodexToolBridge:
                 self.dynamic_tools(), sort_keys=True, ensure_ascii=False
             ).encode()
         ).hexdigest()[:16]
-
-    def _namespace_for(self, tool: FunctionTool) -> str:
-        source = tool_source(tool) if self.defer else None
-        if source is None:
-            name = CODEX_TOOL_NAMESPACE
-            description = (
-                _DEFERRED_BASE_DESCRIPTION if self.defer else _BASE_DESCRIPTION
-            )
-        else:
-            name = f"{CODEX_TOOL_NAMESPACE}__{source[0]}"
-            description = source[1]
-        self._namespaces.setdefault(
-            name,
-            {
-                "type": "namespace",
-                "name": name,
-                "description": description,
-                "tools": [],
-            },
-        )
-        return name
 
     def dynamic_tools(self) -> list[JsonObject]:
         return [

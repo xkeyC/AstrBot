@@ -546,3 +546,52 @@ def test_proxy_is_passed_to_codex_only():
     assert config["outbound_proxy"] == "socks5://127.0.0.1:7890"
     assert "outbound_proxy" not in engine_options({"proxy": ""})["config"]
     assert {k: os.environ.get(k) for k in before} == before
+
+
+def test_colliding_sources_get_their_own_namespaces(monkeypatch):
+    from astrbot.core.star.star import StarMetadata, star_map
+
+    monkeypatch.setitem(star_map, "p.x", StarMetadata(name="x"))
+    monkeypatch.setitem(star_map, "p.ax", StarMetadata(name="astrbot_plugin_x"))
+    monkeypatch.setitem(star_map, "p.mcp", StarMetadata(name="mcp_time"))
+    tools = []
+    for name, module in (("one", "p.x"), ("two", "p.ax"), ("three", "p.mcp")):
+        tool = _tool(name)
+        tool.handler_module_path = module
+        tools.append(tool)
+    server_tool = _tool("now")
+    server_tool.mcp_server_name = "time"
+    tools.append(server_tool)
+
+    names = [
+        ns["name"] for ns in CodexToolBridge(ToolSet(tools), defer=True).dynamic_tools()
+    ]
+    assert "astrbot__mcp_time" in names  # the MCP server
+    assert "astrbot__plugin_mcp_time" in names  # the plugin named mcp_time
+    x_namespaces = [n for n in names if n.startswith("astrbot__x_")]
+    assert len(x_namespaces) == 2 and "astrbot__x" not in names
+
+
+def test_code_mode_names_do_not_depend_on_the_sender():
+    from astrbot.core.permission_rules import PermissionPolicy
+
+    tools = ToolSet([_tool("a-b"), _tool("a_b")])
+    everyone = CodexToolBridge(tools, defer=True)
+    assert sorted(spec["name"] for spec in everyone.specs) == ["a_b", "a_b_2"]
+    denied = CodexToolBridge(
+        tools, defer=True, policy=PermissionPolicy(tools_deny=("a-b",))
+    )
+    # a_b keeps its own name; the folded a-b gets the suffix, whoever speaks.
+    assert everyone.lookup("astrbot", "a_b").name == "a_b"
+    assert [spec["name"] for spec in denied.specs] == ["a_b"]
+    only_folded = CodexToolBridge(
+        tools, defer=True, policy=PermissionPolicy(tools_deny=("a_b",))
+    )
+    assert [spec["name"] for spec in only_folded.specs] == ["a_b_2"]
+
+
+def test_code_mode_names_cannot_reach_into_another_namespace():
+    bridge = CodexToolBridge(
+        ToolSet([_tool("__foo"), _tool("x__y"), _tool("-z")]), defer=True
+    )
+    assert sorted(spec["name"] for spec in bridge.specs) == ["foo", "x_y", "z"]
