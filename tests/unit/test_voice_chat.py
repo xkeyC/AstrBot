@@ -38,6 +38,9 @@ async def test_a_private_voice_turn_runs_as_the_speaker(turns):
     assert event.role == "admin"  # the speaker's own permissions
     assert event.unified_msg_origin == "qq:FriendMessage:42"
     assert "Task: x" in event.message_str and "read aloud" in event.message_str
+    # The agent is told the speaker waits: be quick, report async work at once.
+    assert "waiting on the line" in event.message_str
+    assert "reply at once with its status" in event.message_str
 
 
 @pytest.mark.asyncio

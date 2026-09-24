@@ -25,7 +25,7 @@ VOICE_SENDER_NAME = "Voice"
 REQUEST_PROMPT = """<voice_request via="{via}" speaker="{speaker}">
 {body}
 </voice_request>
-This came from a live voice conversation. Your final reply is read aloud there, not posted to the chat: answer in plain spoken language, briefly, without Markdown, lists, links or code, in the speaker's language."""
+<system>This task comes from a live voice conversation: the speaker is waiting on the line. Finish it as fast as you can. If it needs long or asynchronous work (a background command, a scheduled task, anything you cannot finish right away), start that work and reply at once with its status (what was started, roughly how long it takes, how the result will reach them) instead of waiting for it. Your final reply is read aloud there, not posted to the chat: answer in plain spoken language, briefly, without Markdown, lists, links or code, in the speaker's language.</system>"""
 
 TASK_BODY = """What was said: {heard}
 Task: {task}"""
