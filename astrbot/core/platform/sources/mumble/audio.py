@@ -21,6 +21,7 @@ from aiortc import MediaStreamTrack
 from aiortc.mediastreams import MediaStreamError
 
 from astrbot import logger
+from astrbot.core.voice.pcm import FrameTrack
 
 SAMPLE_RATE = 48000
 FRAME_SAMPLES = 960  # 20 ms
@@ -213,39 +214,6 @@ class SpeechDetector:
         self._recent.clear()
 
 
-class MixerTrack(MediaStreamTrack):
-    """The mixed Mumble audio as an aiortc track; silence when nobody talks."""
-
-    kind = "audio"
-
-    def __init__(self, mixer: InboundMixer) -> None:
-        super().__init__()
-        self.mixer = mixer
-        self._pts = 0
-        self._start: float | None = None
-        self._silence = bytes(FRAME_BYTES)
-
-    async def recv(self) -> av.AudioFrame:
-        if self.readyState != "live":
-            raise MediaStreamError
-        if self._start is None:
-            self._start = time.monotonic()
-        wait = self._start + self._pts / SAMPLE_RATE - time.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
-        elif wait < -1.0:
-            # The loop stalled; resync instead of bursting to catch up.
-            self._start = time.monotonic() - self._pts / SAMPLE_RATE
-        data = self.mixer.pull() or self._silence
-        frame = av.AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
-        frame.planes[0].update(data)
-        frame.sample_rate = SAMPLE_RATE
-        frame.pts = self._pts
-        frame.time_base = fractions.Fraction(1, SAMPLE_RATE)
-        self._pts += FRAME_SAMPLES
-        return frame
-
-
 class OutboundVoice:
     """Forwards a peer's audio track to Mumble as Opus while it has sound.
 
@@ -393,3 +361,28 @@ class OutboundVoice:
         silence.time_base = fractions.Fraction(1, SAMPLE_RATE)
         packets = encoder.encode(silence)
         self._send(bytes(packets[-1]) if packets else b"", True)
+
+
+class MumbleMedia:
+    """A voice session's audio in Mumble (``astrbot.core.voice.VoiceMedia``)."""
+
+    def __init__(self, send: Callable[[bytes, bool], None], bitrate: int = 64000):
+        """
+        Args:
+            send: Sends one Opus frame to Mumble: ``(frame, terminator)``.
+            bitrate: Opus bitrate of the bot's voice.
+        """
+        self.mixer = InboundMixer()
+        self.outbound = OutboundVoice(send, bitrate)
+        self.track = FrameTrack(self.mixer)
+
+    async def play(self, track: MediaStreamTrack) -> None:
+        await self.outbound.run(track)
+
+    def start(self) -> None:
+        self.mixer.holding = False
+
+    def stop(self) -> None:
+        self.outbound.muted = True
+        self.outbound.finish()
+        self.mixer.clear()

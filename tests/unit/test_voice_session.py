@@ -2,8 +2,10 @@ import asyncio
 
 import pytest
 
-from astrbot.core.platform.sources.mumble import voice
-from astrbot.core.platform.sources.mumble.voice import VoiceOptions, VoiceSession
+from astrbot.core.platform.sources.mumble import voice as mumble_voice
+from astrbot.core.platform.sources.mumble.audio import MumbleMedia
+from astrbot.core.voice import session as voice
+from astrbot.core.voice.session import VoiceOptions, VoiceSession
 
 
 class FakeRuntime:
@@ -12,6 +14,9 @@ class FakeRuntime:
 
     async def realtime_start(self, thread_id, request):
         self.calls.append("start")
+
+    async def realtime_append_text(self, thread_id, text):
+        self.calls.append(f"text:{text}")
 
     async def realtime_stop(self, thread_id):
         self.calls.append("stop")
@@ -84,7 +89,7 @@ def make_session(closed: list) -> VoiceSession:
         scope_id="test:voice:server",
         prompt="p",
         options=VoiceOptions(name="Jarvis", aliases=[]),
-        send_audio=lambda frame, end: None,
+        media=MumbleMedia(lambda frame, end: None),
         on_closed=closed.append,
     )
 
@@ -259,9 +264,53 @@ def test_realtime_prompts_state_the_date(monkeypatch):
     options = voice.VoiceOptions(name="Jarvis", aliases=["贾维斯"])
     today = datetime.datetime.now().astimezone().strftime("%Y-%m-%d")
     for prompt in (
-        voice.channel_prompt(options),
-        voice.whisper_prompt(options, "alice"),
+        mumble_voice.channel_prompt(options),
+        mumble_voice.whisper_prompt(options, "alice"),
     ):
         assert f"Today is {today}" in prompt
         assert "must be delegated to the backend" in prompt
-    assert '("Jarvis", "贾维斯")' in voice.channel_prompt(options)
+    assert '("Jarvis", "贾维斯")' in mumble_voice.channel_prompt(options)
+
+
+@pytest.mark.asyncio
+async def test_say_needs_a_ready_session(engine):
+    session = make_session([])
+    with pytest.raises(RuntimeError):
+        await session.say("hello")
+    session.ready = True
+    session._engine = engine
+    session._thread_id = "t1"
+    await session.say("hello")
+    assert engine.rt.calls == ["text:hello"]
+
+
+def test_close_stops_the_media(engine):
+    class Media:
+        track = None
+        stopped = 0
+
+        async def play(self, track):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            self.stopped += 1
+
+    media = Media()
+    session = VoiceSession(
+        key="k",
+        scope_id="s",
+        prompt="p",
+        options=VoiceOptions(name="n", aliases=[]),
+        media=media,
+        on_closed=lambda s: None,
+    )
+
+    async def run():
+        await session.close("a")
+        await session.close("b")
+
+    asyncio.run(run())
+    assert media.stopped == 1

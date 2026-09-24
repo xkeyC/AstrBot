@@ -2,9 +2,9 @@
 
 The voice agent runs in its own Codex thread, but gets the tools, execution
 environment and approvals an ordinary (non-admin) member of the paired chat
-would get there: the server group for channel voice, the whisperer's private
-chat for a whisper. Channel voice is a mix of speakers, so no one's own
-permissions apply; the member rule does, whoever is talking.
+would get there (e.g. a Mumble server group, a caller's private chat). A voice
+conversation may mix speakers, so no one's own permissions apply; the member
+rule does, whoever is talking.
 
 Tool calls run against a synthetic event of that chat, the way scheduled
 tasks do (see ``codex/wake.py``).
@@ -17,7 +17,7 @@ from typing import Any
 
 from astrbot import logger
 
-VOICE_SENDER_ID = "mumble-voice"
+VOICE_SENDER_ID = "voice"
 
 
 @dataclass
@@ -61,7 +61,7 @@ async def voice_agent_tools(umo: str, runner_cfg: dict) -> VoiceTools | None:
 
     ctx = current_context()
     if ctx is None:
-        logger.warning("Mumble voice: no core context, the voice agent gets no tools")
+        logger.warning("Voice: no core context, the voice agent gets no tools")
         return None
     session = MessageSession.from_str(umo)
     event = CronMessageEvent(

@@ -2,8 +2,8 @@ import pytest
 
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY, PermissionPolicy
-from astrbot.core.platform.sources.mumble import voice_tools
 from astrbot.core.star.context import Context
+from astrbot.core.voice import tools as voice_tools
 
 UMO = "mumble_test:GroupMessage:server"
 

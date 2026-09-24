@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from astrbot.core.platform.sources.mumble.icetcp import (
+from astrbot.core.voice.icetcp import (
     IceTcpRelay,
     open_proxied_tcp,
     replace_candidates,

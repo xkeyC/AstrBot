@@ -205,7 +205,10 @@ def test_voice_routing_in_standby(adapter, monkeypatch):
                 def feed(inner, *args):
                     self.fed.append(args)
 
-            self.mixer = Mixer()
+            class Media:
+                mixer = Mixer()
+
+            self.media = Media()
 
     def start(key, user):
         started.append(key)

@@ -10,10 +10,10 @@ from astrbot.core.platform.sources.mumble import audio
 from astrbot.core.platform.sources.mumble.audio import (
     FRAME_SAMPLES,
     InboundMixer,
-    MixerTrack,
     OutboundVoice,
     SpeechDetector,
 )
+from astrbot.core.voice.pcm import FrameTrack
 
 
 def tone(frames: int, amplitude: float = 8000.0, freq: float = 440.0) -> np.ndarray:
@@ -96,7 +96,7 @@ def test_speech_detector_needs_sustained_sound():
 async def test_mixer_track_serves_silence_then_audio():
     mixer = InboundMixer()
     mixer.holding = False
-    track = MixerTrack(mixer)
+    track = FrameTrack(mixer)
     silent = await track.recv()
     assert silent.samples == FRAME_SAMPLES
     assert not np.frombuffer(bytes(silent.planes[0]), dtype=np.int16)[

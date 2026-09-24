@@ -176,7 +176,7 @@ class MumblePlatformAdapter(Platform):
             support_streaming_message=False,
         )
 
-        from .voice import VoiceOptions
+        from astrbot.core.voice.session import VoiceOptions
 
         aliases = cfg.get("mumble_voice_aliases") or []
         self.voice_options = VoiceOptions(
@@ -418,9 +418,9 @@ class MumblePlatformAdapter(Platform):
         for session in self.voice_sessions.values():
             if session.closing:
                 continue  # stays muted until released
-            session.outbound.muted = muted
+            session.media.outbound.muted = muted
             if muted:
-                session.mixer.clear()
+                session.media.mixer.clear()
         self._detector.clear()
         self._preroll.clear()
         with contextlib.suppress(Exception):
@@ -452,7 +452,9 @@ class MumblePlatformAdapter(Platform):
             return  # channel listeners: not our conversation
         session = self.voice_sessions.get(key)
         if session is not None:
-            session.mixer.feed(user.session, packet.opus_data, packet.is_terminator)
+            session.media.mixer.feed(
+                user.session, packet.opus_data, packet.is_terminator
+            )
             return
         # Standby: keep a short pre-roll and wait for real speech.
         now = time.monotonic()
@@ -470,10 +472,13 @@ class MumblePlatformAdapter(Platform):
         if session is None:
             return
         for _, speaker, data, terminator in self._preroll.pop(key, ()):
-            session.mixer.feed(speaker, data, terminator)
+            session.media.mixer.feed(speaker, data, terminator)
 
     def _start_voice(self, key: str, user: User):
-        from .voice import VoiceSession, channel_prompt, whisper_prompt
+        from astrbot.core.voice.session import VoiceSession
+
+        from .audio import MumbleMedia
+        from .voice import channel_prompt, whisper_prompt
 
         if key == SERVER_SESSION:
             prompt = channel_prompt(self.voice_options)
@@ -498,11 +503,12 @@ class MumblePlatformAdapter(Platform):
             scope_id=f"{self.meta().id}:voice:{key}",
             prompt=prompt,
             options=self.voice_options,
-            send_audio=send,
+            media=MumbleMedia(send, self._voice_bitrate()),
             on_closed=self._voice_closed,
+            label="Mumble",
+            thread_key="mumble_voice_thread",
             # The chat the voice conversation belongs to: the server group,
             # or the whisperer's private chat.
-            bitrate=self._voice_bitrate(),
             memory_scope=(
                 f"{self.meta().id}:{MessageType.GROUP_MESSAGE.value}:{SERVER_SESSION}"
                 if key == SERVER_SESSION
@@ -510,7 +516,6 @@ class MumblePlatformAdapter(Platform):
             ),
         )
         self.voice_sessions[key] = session
-        session.mixer.holding = True
 
         def failed(exc: Exception) -> None:
             logger.error("Mumble voice session %s failed to start: %s", key, exc)
@@ -562,7 +567,7 @@ class MumblePlatformAdapter(Platform):
                 item for item in channel if item[1] != user.session
             )
         for session in self.voice_sessions.values():
-            session.mixer.forget(user.session)
+            session.media.mixer.forget(user.session)
         # Their whisper session would keep answering a session id the server
         # may hand to someone else.
         whisper = self.voice_sessions.get(f"whisper:{user_key(user)}")
