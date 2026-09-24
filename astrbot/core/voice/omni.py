@@ -165,6 +165,8 @@ def router_config(name: str, aliases: list[str], group: bool, bias: float) -> di
         "audio_units": 12,
         "silence_hold": 1,
         "tool_hold": 3,
+        # Utterances end with the transcripts sent from here (Utterances).
+        "client_transcripts": True,
         "transcribe_prompt": "请仔细听这段音频片段，并将其内容逐字记录。",
         "user_template": "{heard}",
         "system": system,
@@ -489,7 +491,7 @@ class OmniVoiceSession(VoiceSession):
                     if not self.group and time.monotonic() < self._playing_until:
                         # One to one: a whole sentence over the bot's answer
                         # (forced speech, which the model does not stop for).
-                        self._cut()
+                        self._cut(pending=True)
             if self._say_cancel:
                 request["say_cancel"] = True
                 self._say_cancel = False
@@ -544,7 +546,7 @@ class OmniVoiceSession(VoiceSession):
             ):
                 # One to one: the model stopped because the speaker talked
                 # over it; what is still buffered goes too.
-                self._cut()
+                self._cut(pending=True)
         elif kind == "response.done" and said:
             logger.debug(
                 "%s omni voice %s said: %s", self.label, self.key, "".join(said)
@@ -575,26 +577,32 @@ class OmniVoiceSession(VoiceSession):
             json.dumps(arguments, ensure_ascii=False) if arguments else "",
             heard,
         )
-        if name in ("", "reply", "silence"):
-            # A stop for silence lets what was already said play out: the
-            # model was answering something before this utterance came.
-            return
         if event.get("interrupted"):
-            # It was answering a task itself: that answer is made up.
+            # The model was still talking when this utterance came, and it
+            # talks straight into what it hears: what it has not said yet is
+            # likely a reply to chatter (silence) or a made-up answer (task).
             self._cut()
+        if name in ("", "reply", "silence"):
+            return
         if self.omni.tool_filler:
             self._say.append(self.omni.tool_filler)
         task = str(arguments.get("task") or heard)
         text = TASK_PROMPT.format(heard=heard or task, task=task)
         self._spawn(self._submit(text), "task")
 
-    def _cut(self) -> None:
-        """Drops the speech being played, the rest of it still arriving and
-        what the server has not spoken yet."""
+    def _cut(self, pending: bool = False) -> None:
+        """Drops the speech being played and the rest of it still arriving.
+
+        Args:
+            pending: Also drop what is still to be spoken (forced speech the
+                server has not said yet, answers waiting here): the speaker
+                talked over the bot and moved on.
+        """
         self._cut_until = time.monotonic() + CUT_SECONDS
         self._playing_until = 0.0
-        self._say.clear()
-        self._say_cancel = True
+        if pending:
+            self._say.clear()
+            self._say_cancel = True
         self.media.flush()
 
     async def _submit(self, text: str) -> None:

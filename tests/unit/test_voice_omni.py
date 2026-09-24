@@ -169,8 +169,8 @@ async def test_silence_and_reply_do_nothing():
     )
     session._on_tool_call({"name": "reply", "heard": "小乐讲个笑话"})
     assert session._tasks == [] and session._say == []
-    # A stop for silence lets the speech already made play out.
-    assert session.media.calls == []
+    # The stopped speech is dropped (it was turning to the chatter).
+    assert session.media.calls == ["flush"]
 
 
 @pytest.mark.asyncio
@@ -318,10 +318,13 @@ async def test_a_bad_event_is_skipped_not_fatal():
 @pytest.mark.asyncio
 async def test_a_cut_cancels_pending_speech_and_holds_new_speech():
     session = make_session()
+    session._say = ["结果"]
+    session._cut()  # a router stop keeps what is still to be spoken
+    assert session._say == ["结果"] and not session._say_cancel
     session._say = ["旧答案"]
-    session._cut()
+    session._cut(pending=True)  # talked over: it goes too
     assert session._say == [] and session._say_cancel
-    assert session.media.calls == ["flush"]
+    assert session.media.calls == ["flush", "flush"]
     session._ws = FakeWs()
     session._say.append("好的，我查一下。")
     send = asyncio.create_task(session._send(FakeUtterances([(False, None)] * 3)))
