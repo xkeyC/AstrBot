@@ -177,6 +177,10 @@ class VoiceOptions:
     model: str = ""
     extra_prompt: str = ""
     agent_instructions: str = ""
+    # Realtime media over the peer's ICE-TCP candidate even without a proxy:
+    # no packet loss on lossy paths, at the cost of latency spikes (which a
+    # playout buffer absorbs). With a proxy, media always takes TCP.
+    media_tcp: bool = False
 
 
 def _runner_config() -> dict:
@@ -480,18 +484,19 @@ class VoiceSession:
         await engine.rt.realtime_start(self._thread_id, json.dumps(request))
         sdp = await self._wait_open(answer, SDP_TIMEOUT)
         self._phase("answer received")
-        if proxy := str(_runner_config().get("proxy") or "").strip():
+        proxy = str(_runner_config().get("proxy") or "").strip()
+        if proxy or self.options.media_tcp:
             # Media cannot take a proxy over UDP: go through the peer's
-            # ICE-TCP candidates, one TCP connection opened via the proxy.
+            # ICE-TCP candidates, one TCP connection (via the proxy, if set).
             candidates = tcp_candidates(sdp)
             if not candidates:
                 raise RuntimeError(
-                    "proxy set, but the peer offered no ICE-TCP candidate"
+                    "media over TCP, but the peer offered no ICE-TCP candidate"
                 )
             self._relay = IceTcpRelay(proxy, candidates)
             port = await self._wait_open(self._relay.start(), CONNECT_TIMEOUT)
             sdp = replace_candidates(sdp, _local_address(), port)
-            self._phase("media relay through proxy ready")
+            self._phase("media relay over TCP ready")
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
         deadline = time.monotonic() + CONNECT_TIMEOUT
         while pc.connectionState != "connected":

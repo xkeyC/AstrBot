@@ -28,9 +28,13 @@ JITTER_FRAMES = 2  # 40 ms
 # during the next pause.
 MAX_BACKLOG_BYTES = SAMPLE_RATE * 2 * 10
 FRAME_SECONDS = FRAME_SAMPLES / SAMPLE_RATE
-# With a playout buffer, each stretch of speech starts with this much sent at
-# once, so the receiving side's own buffer never runs dry on jitter.
-LEAD_FRAMES = 5  # 100 ms
+# With a playout buffer, a stretch of speech starts once this much is queued
+# or has been waiting this long: WebRTC hands over a realtime model's audio
+# in bursts (measured gaps p95 ~110 ms, p99 ~180 ms), and the far side plays
+# what arrives, so each gap would be heard as a dropout.
+PREBUFFER_FRAMES = 10  # 200 ms
+# Sent at once when a stretch starts, to fill the far side's small buffer.
+LEAD_FRAMES = 3  # 60 ms
 
 
 class FrameSource(Protocol):
@@ -160,18 +164,39 @@ class PcmMedia:
 
     async def _pace(self, ended: asyncio.Event) -> None:
         """Sends queued speech at real-time pace, one 20 ms chunk at a time,
-        until the queue is empty after ``ended`` is set."""
+        until the queue is empty after ``ended`` is set.
+
+        Each stretch of speech (and each restart after the queue ran dry)
+        first buffers up PREBUFFER_FRAMES, or waits that long.
+        """
         loop = asyncio.get_running_loop()
         queue = self._queue
         assert queue is not None
         next_at = 0.0
+        playing = False
+        waiting_since: float | None = None
         while True:
+            if not playing:
+                now = loop.time()
+                if not queue:
+                    if ended.is_set() or self.muted:
+                        return
+                    waiting_since = None
+                    await asyncio.sleep(FRAME_SECONDS)
+                    continue
+                if waiting_since is None:
+                    waiting_since = now
+                if (
+                    len(queue) < PREBUFFER_FRAMES
+                    and now - waiting_since < PREBUFFER_FRAMES * FRAME_SECONDS
+                    and not ended.is_set()
+                ):
+                    await asyncio.sleep(FRAME_SECONDS)
+                    continue
+                playing, waiting_since = True, None
+                next_at = now - LEAD_FRAMES * FRAME_SECONDS
             if not queue:
-                if ended.is_set() or self.muted:
-                    return
-                await asyncio.sleep(FRAME_SECONDS)
-                # A new stretch of speech: send a short lead at once.
-                next_at = loop.time() - LEAD_FRAMES * FRAME_SECONDS
+                playing = False  # ran dry: buffer up again
                 continue
             wait = next_at - loop.time()
             if wait > 0:

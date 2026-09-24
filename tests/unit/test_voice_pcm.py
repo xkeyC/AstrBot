@@ -93,3 +93,28 @@ async def test_playout_buffer_paces_speech_and_flush_drops_it(monkeypatch):
     media.flush()
     await asyncio.wait_for(task, 5)
     assert len(sent) < 45  # the flushed rest was never sent
+
+
+class TrickleTrack(ToneTrack):
+    """Frames with pauses between them, as WebRTC delivers a model's speech."""
+
+    def __init__(self, frames: int, pause: float) -> None:
+        super().__init__(frames)
+        self.pause = pause
+
+    async def recv(self):
+        await asyncio.sleep(self.pause)
+        return await super().recv()
+
+
+@pytest.mark.asyncio
+async def test_playout_buffer_waits_to_prebuffer_before_speaking(monkeypatch):
+    monkeypatch.setattr(pcm, "FRAME_SECONDS", 0.01)
+    sent = []
+    media = PcmMedia(sent.append, buffer_seconds=3)
+    # Three frames (60 ms of speech) spread over 60 ms: under the prebuffer.
+    task = asyncio.create_task(media.play(TrickleTrack(3, 0.02)))
+    await asyncio.sleep(0.07)
+    assert sent == []  # still buffering up
+    await asyncio.wait_for(task, 5)
+    assert len(sent) >= 2  # played out once the track ended

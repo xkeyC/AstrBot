@@ -1,9 +1,11 @@
-"""WebRTC media through a proxy, over the peer's ICE-TCP candidates.
+"""WebRTC media over the peer's ICE-TCP candidates, directly or via a proxy.
 
 aiortc (aioice) only speaks ICE over UDP, which no HTTP or SOCKS proxy that
-AstrBot is likely to be given can carry. The realtime peer is ICE-lite and
+AstrBot is likely to be given can carry, and which loses packets on long
+paths (measured ~6% to the realtime peer from China; aiortc's audio jitter
+buffer then drops whole runs of frames). The realtime peer is ICE-lite and
 also offers passive TCP candidates on port 443, so media can instead ride one
-TCP connection opened through the proxy.
+TCP connection, opened directly or through the proxy.
 
 ``IceTcpRelay`` bridges the two: it listens on a local UDP port that is put
 in the SDP answer as the peer's only candidate, and forwards every datagram
@@ -66,7 +68,7 @@ async def open_proxied_tcp(
 
     Args:
         proxy_url: ``socks5://``, ``socks5h://`` or ``http://`` URL, optionally
-            with ``user:password@``.
+            with ``user:password@``; empty connects directly.
         host: Destination host (an IP address for ICE candidates).
         port: Destination port.
 
@@ -74,6 +76,10 @@ async def open_proxied_tcp(
         ConnectionError: The proxy refused or failed the connection.
         ValueError: The proxy URL scheme is not supported.
     """
+    if not proxy_url:
+        return await asyncio.wait_for(
+            asyncio.open_connection(host, port), CONNECT_TIMEOUT
+        )
     url = urlsplit(proxy_url)
     scheme = url.scheme.lower()
     if scheme not in ("socks5", "socks5h", "http"):
@@ -147,6 +153,11 @@ class IceTcpRelay(asyncio.DatagramProtocol):
     """A local UDP port that relays to the peer's ICE-TCP candidate."""
 
     def __init__(self, proxy_url: str, candidates: list[tuple[str, int]]) -> None:
+        """
+        Args:
+            proxy_url: Proxy for the TCP connection; empty connects directly.
+            candidates: The peer's ICE-TCP candidates, tried in order.
+        """
         self.proxy_url = proxy_url
         self.candidates = candidates
         self.port = 0
@@ -157,7 +168,7 @@ class IceTcpRelay(asyncio.DatagramProtocol):
         self._closed = False
 
     async def start(self) -> int:
-        """Connects through the proxy and binds the local UDP port.
+        """Connects (through the proxy, if any) and binds the local UDP port.
 
         Returns:
             The local UDP port to advertise in the SDP answer.
@@ -170,7 +181,11 @@ class IceTcpRelay(asyncio.DatagramProtocol):
             except (OSError, ConnectionError, asyncio.TimeoutError) as exc:
                 last_error = exc
                 logger.warning(
-                    "Mumble voice: ICE-TCP %s:%s via proxy failed: %s", host, port, exc
+                    "Voice: ICE-TCP %s:%s %s failed: %s",
+                    host,
+                    port,
+                    "via proxy" if self.proxy_url else "direct",
+                    exc,
                 )
                 continue
             sock = writer.get_extra_info("socket")
@@ -181,9 +196,7 @@ class IceTcpRelay(asyncio.DatagramProtocol):
             self._reader_task = asyncio.create_task(self._read(reader))
             break
         else:
-            raise ConnectionError(
-                f"no ICE-TCP candidate reachable through the proxy: {last_error}"
-            )
+            raise ConnectionError(f"no ICE-TCP candidate reachable: {last_error}")
         transport, _ = await loop.create_datagram_endpoint(
             lambda: self, local_addr=("0.0.0.0", 0)
         )
@@ -208,9 +221,7 @@ class IceTcpRelay(asyncio.DatagramProtocol):
                     self._transport.sendto(packet, self._local_peer)
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             if not self._closed:
-                logger.warning(
-                    "Mumble voice: ICE-TCP connection through the proxy closed"
-                )
+                logger.warning("Voice: ICE-TCP media connection closed")
         finally:
             self.close()
 
