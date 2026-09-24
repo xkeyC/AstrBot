@@ -2,8 +2,8 @@
 
 The server's duplex model listens and speaks. A tool router in the server (the
 same LLM in text mode) decides every utterance: let the model answer, stay
-silent, or hand a task to the voice agent thread (Codex, as for Codex
-realtime), whose answer the model then speaks verbatim in its own voice.
+silent, or hand a task to the paired chat (Codex, as for Codex realtime; see
+``chat``), whose answer the model then speaks verbatim in its own voice.
 Utterances are found and transcribed here, on CPU (Silero VAD + SenseVoice),
 and sent to the server with the audio. The platform's audio comes and goes
 through the session's ``VoiceMedia``, as for Codex realtime.
@@ -149,6 +149,7 @@ ROUTER_PRIVATE = """你是语音助手"{name}"的决策模块。{name}正在和�
 
 # Spoken while a task waits for the paired chat's turn, and when it fails.
 BUSY_SPEECH = "我这边还在忙前面的事，稍等一下。"
+DONE_SPEECH = "好了，办完了。"
 FAILED_SPEECH = "这件事没能办成。"
 
 
@@ -419,8 +420,8 @@ def _load_ref_audio(path: str) -> np.ndarray:
 
 
 class OmniVoiceSession(VoiceSession):
-    """A voice conversation on the local omni server, with the voice agent
-    thread of ``VoiceSession`` doing the tasks the router hands off.
+    """A voice conversation on the local omni server; the tasks the router
+    hands off go to the paired chat, as in ``VoiceSession``.
 
     The server serves one conversation at a time: a second one is refused
     when it starts, and the platform tries again later.
@@ -531,7 +532,7 @@ class OmniVoiceSession(VoiceSession):
         """
         if not self.ready or self._closed:
             raise RuntimeError("voice session is not ready")
-        await self._submit(OPENING_BODY.format(purpose=text))
+        self._ask(OPENING_BODY.format(purpose=text))
 
     async def _open_agent(self) -> None:
         """Nothing to open: tasks go to the paired chat, and the omni server
@@ -682,15 +683,16 @@ class OmniVoiceSession(VoiceSession):
         if name in ("", "reply", "silence"):
             return
         now = time.monotonic()
-        if self.chat.busy():
-            self._say.append(BUSY_SPEECH)
-        elif self.omni.tool_filler and now - self._task_at > FILLER_GAP_SECONDS:
-            self._say.append(self.omni.tool_filler)
-        self._task_at = now
         task = str(arguments.get("task") or heard)
-        self._spawn(
-            self._submit(TASK_BODY.format(heard=heard or task, task=task)), "task"
-        )
+        busy = self._ask(TASK_BODY.format(heard=heard or task, task=task))
+        # One acknowledgement for a request that came in pieces: none for a
+        # piece following the last one closely.
+        if now - self._task_at > FILLER_GAP_SECONDS:
+            if busy:
+                self._say.append(BUSY_SPEECH)
+            elif self.omni.tool_filler:
+                self._say.append(self.omni.tool_filler)
+        self._task_at = now
 
     def _check_barge_in(self) -> None:
         """One to one: the model stopped speaking and the speaker went on
@@ -726,15 +728,24 @@ class OmniVoiceSession(VoiceSession):
             self._say_cancel = True
         self.media.flush()
 
-    async def _submit(self, body: str) -> None:
-        """Has the paired chat answer ``body`` (queued with its messages), and
-        speaks the answer."""
-        answer = await self.chat.ask(body)
-        if self._closed:
-            return
-        text = speakable(answer or "") or FAILED_SPEECH
+    async def _tell(self, answer: str | None) -> None:
+        """Speaks a request's answer (None: it failed)."""
+        if answer is None:
+            text = FAILED_SPEECH
+        else:
+            text = speakable(answer) or DONE_SPEECH
         logger.info("%s omni voice %s: chat answered: %s", self.label, self.key, text)
         self._say.append(text)
+
+    async def note(self, text: str) -> None:
+        """A result that reached the chat later (see ``VoiceSession.note``).
+
+        The hook for a context note the duplex model decides on (whether and
+        how to tell it); until the server takes such notes it is spoken
+        verbatim, like an answer.
+        """
+        if not self._closed and (spoken := speakable(text)):
+            self._say.append(spoken)
 
     async def _release_transport(self) -> None:
         # Sending and receiving stop before the socket closes under them.

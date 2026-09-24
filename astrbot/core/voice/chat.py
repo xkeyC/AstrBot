@@ -4,7 +4,12 @@ A voice conversation has no agent of its own: what the voice model hands off
 runs as a turn of the paired chat's Codex thread, through the chat runner,
 like a message of that chat. So voice and text share one context, persona,
 tool set, memory and approvals, and queue behind each other on the chat's
-session lock. The answer comes back to be spoken; nothing is posted.
+session lock. The answer goes back to the voice model, which tells it in its
+own words; nothing is posted, unless the conversation has ended by then (the
+answer is then posted as text, not lost).
+
+Results reaching the chat later (background work, scheduled tasks) are also
+given to the chat's open voice conversation, if any (``announce``).
 
 Identity: in a private conversation (a call, a whisper) the turn runs as the
 person talking, with their own permissions. In a group (a voice channel) the
@@ -14,23 +19,58 @@ the member role.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from astrbot import logger
+from astrbot.core.message.message_event_result import MessageChain
+
+if TYPE_CHECKING:
+    from .session import VoiceSession
 
 # The sender of group voice turns (never an admin, whatever is configured).
 VOICE_SENDER_ID = "voice"
 VOICE_SENDER_NAME = "Voice"
+# Marks a voice turn's event: its turn scopes differ from the same person's
+# text turns, so their text is queued rather than joined into a voice turn
+# (whose answer is only spoken), and it keeps a speaker label.
+VOICE_TURN_EXTRA = "voice_turn"
 
 REQUEST_PROMPT = """<voice_request via="{via}" speaker="{speaker}">
 {body}
 </voice_request>
-<system>This task comes from a live voice conversation: the speaker is waiting on the line. Finish it as fast as you can. If it needs long or asynchronous work (a background command, a scheduled task, anything you cannot finish right away), start that work and reply at once with its status (what was started, roughly how long it takes, how the result will reach them) instead of waiting for it. Your final reply is read aloud there, not posted to the chat: answer in plain spoken language, briefly, without Markdown, lists, links or code, in the speaker's language.</system>"""
+<system>This task comes from a live voice conversation: the speaker is waiting on the line. Finish it as fast as you can. If it needs long or asynchronous work (a background command, a scheduled task, anything you cannot finish right away), start that work and reply at once with its status (what was started, roughly how long it takes, how the result will reach them) instead of waiting for it. Your final reply is given to the voice model, which tells it to the speaker; it is not posted to the chat: answer in plain spoken language, briefly, without Markdown, lists, links or code, in the speaker's language.</system>"""
 
 TASK_BODY = """What was said: {heard}
 Task: {task}"""
 
 OPENING_BODY = """The voice conversation just started. Give the words to open it with. Purpose: {purpose}"""
+
+# Voice conversations open now, by the UMO of their paired chat.
+VOICE_SESSIONS: dict[str, VoiceSession] = {}
+# Requests outliving the voice session that made them.
+_REQUESTS: set[asyncio.Task] = set()
+
+
+def _attribute(text: str) -> str:
+    """``text`` made safe inside a double-quoted tag attribute."""
+    return text.replace('"', "'").replace("<", "(").replace(">", ")")
+
+
+async def announce(umo: str, text: str) -> bool:
+    """Gives ``text`` (a result that reached the chat) to the chat's open
+    voice conversation, whose model decides whether and how to tell it.
+
+    Returns:
+        Whether a voice conversation took it.
+    """
+    session = VOICE_SESSIONS.get(umo)
+    if session is None or session.closing or not session.ready or not text:
+        return False
+    await session.note(text)
+    return True
 
 
 @dataclass
@@ -52,26 +92,94 @@ class VoiceChat:
     sender_id: str = VOICE_SENDER_ID
     sender_name: str = VOICE_SENDER_NAME
     via: str = "voice"
+    # Requests of this conversation run one after the other, in order.
+    _order: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    )
+    # Requests made and not answered yet (counted from the moment they are
+    # made, before they reach the lock).
+    _open: int = field(default=0, init=False, repr=False, compare=False)
 
     def busy(self) -> bool:
-        """Whether a turn runs in the chat now (a request would queue)."""
-        from astrbot.core.agent.runners.codex.native import ACTIVE_TURNS
+        """Whether a request would wait: a turn runs or waits in the chat, or
+        an earlier request of this conversation is not done."""
+        from astrbot.core.agent.runners.codex.native import _QUEUED_TURNS
 
-        return self.umo in ACTIVE_TURNS
+        return _QUEUED_TURNS.get(self.umo, 0) > 0 or self._open > 0
+
+    def request(
+        self, body: str, on_answer: Callable[[str | None], Awaitable[Any]]
+    ) -> bool:
+        """Runs ``body`` as a turn of the chat, after this conversation's
+        earlier requests, and hands the answer to ``on_answer``. The request
+        outlives the voice session (a hang-up does not cancel it).
+
+        Returns:
+            Whether it has to wait (see ``busy``), decided before it queues.
+        """
+        busy = self.busy()
+        self._open += 1
+
+        async def run() -> None:
+            try:
+                async with self._order:
+                    answer = await self.ask(body)
+            finally:
+                self._open -= 1
+            await on_answer(answer)
+
+        task = asyncio.create_task(run(), name=f"voice-request-{self.umo}")
+        _REQUESTS.add(task)
+        task.add_done_callback(_REQUESTS.discard)
+        return busy
+
+    def _event(self, ctx, message: str):
+        """A synthetic event of the chat, from the person talking."""
+        from astrbot.core.cron.events import CronMessageEvent
+        from astrbot.core.platform.message_session import MessageSession
+
+        session = MessageSession.from_str(self.umo)
+        sender_id = self.sender_id if self.private else VOICE_SENDER_ID
+        sender_name = self.sender_name if self.private else VOICE_SENDER_NAME
+        # The sender is set on the message, not passed in: the constructor
+        # would make them the bot (self_id) too.
+        event = CronMessageEvent(
+            context=ctx,
+            session=session,
+            message=message,
+            message_type=session.message_type,
+        )
+        event.message_obj.sender.user_id = sender_id
+        event.message_obj.sender.nickname = sender_name
+        if not self.private:
+            event.message_obj.group_id = session.session_id
+        cfg = ctx.get_config(umo=self.umo)
+        admins = {str(a) for a in cfg.get("admins_id", [])}
+        event.role = "admin" if self.private and sender_id in admins else "member"
+        event.set_extra(VOICE_TURN_EXTRA, True)
+        return event
 
     async def voice_persona(self) -> str:
         """The voice persona of the chat's active persona: short instructions
         for the voice model, or empty when there are none.
 
-        The persona is resolved as for the chat's turns (a persona forced on
-        the session, else the conversation's, else the configured default).
+        The persona is resolved as for the chat's turns: a persona the
+        permission rules pick for the speaker, else one forced on the session,
+        else the conversation's, else the configured default.
         """
+        from astrbot.core import astrbot_config
+        from astrbot.core.event_llm_overrides import get_event_selected_persona_id
+        from astrbot.core.permission_rules import CONFIG_KEY, policy_for_event
         from astrbot.core.star.context import current_context
 
         ctx = current_context()
         if ctx is None:
             return ""
         try:
+            event = self._event(ctx, "")
+            policy = policy_for_event(event, astrbot_config.get(CONFIG_KEY) or [])
+            if policy.persona_id:
+                event.set_selected_persona(policy.persona_id)
             conversation_id = await ctx.conversation_manager.get_curr_conversation_id(
                 self.umo
             )
@@ -89,6 +197,7 @@ class VoiceChat:
                 else None,
                 platform_name=self.umo.split(":", 1)[0],
                 provider_settings=ctx.get_config(umo=self.umo),
+                selected_persona_id=get_event_selected_persona_id(event),
             )
         except Exception as exc:  # noqa: BLE001 - the platform default applies
             logger.warning("Voice: persona of %s not resolved: %s", self.umo, exc)
@@ -102,38 +211,43 @@ class VoiceChat:
             body: The request (see TASK_BODY, OPENING_BODY).
 
         Returns:
-            The answer to speak, or None when the turn was stopped, failed or
-            the core is not up.
+            The answer (empty when the turn ended without one), or None when
+            the turn was stopped, refused (a full queue), failed or the core
+            is not up.
         """
+        from astrbot.core.agent.runners.codex.codex_agent_runner import BUSY_NOTE
         from astrbot.core.agent.runners.codex.wake import run_turn_in_session
-        from astrbot.core.cron.events import CronMessageEvent
-        from astrbot.core.platform.message_session import MessageSession
         from astrbot.core.star.context import current_context
 
         ctx = current_context()
         if ctx is None:
             logger.warning("Voice: no core context, a request is not answered")
             return None
-        session = MessageSession.from_str(self.umo)
-        sender_id = self.sender_id if self.private else VOICE_SENDER_ID
         sender_name = self.sender_name if self.private else VOICE_SENDER_NAME
-        prompt = REQUEST_PROMPT.format(via=self.via, speaker=sender_name, body=body)
-        event = CronMessageEvent(
-            context=ctx,
-            session=session,
-            message=prompt,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            message_type=session.message_type,
+        prompt = REQUEST_PROMPT.format(
+            via=_attribute(self.via),
+            speaker=_attribute(sender_name),
+            body=body.replace("</voice_request>", ""),
         )
-        event.message_obj.sender.user_id = sender_id
-        if not self.private:
-            event.message_obj.group_id = session.session_id
-        cfg = ctx.get_config(umo=self.umo)
-        admins = {str(a) for a in cfg.get("admins_id", [])}
-        event.role = "admin" if self.private and sender_id in admins else "member"
+        # The event carries what was asked (a task created now quotes it);
+        # the turn gets it wrapped.
+        event = self._event(ctx, body)
         try:
-            return await run_turn_in_session(ctx, event, cfg, prompt)
+            answer = await run_turn_in_session(
+                ctx, event, ctx.get_config(umo=self.umo), prompt
+            )
         except Exception as exc:  # noqa: BLE001 - reported; the voice goes on
             logger.warning("Voice: request to %s failed: %s", self.umo, exc)
             return None
+        return None if answer == BUSY_NOTE else answer
+
+
+async def deliver(umo: str, answer: str) -> None:
+    """Gets a voice request's answer to its chat after its voice conversation
+    ended: to another open voice conversation of the chat, else as text."""
+    if not answer or await announce(umo, answer):
+        return
+    from astrbot.core.star.context import current_context
+
+    if (ctx := current_context()) is not None:
+        await ctx.send_message(umo, MessageChain().message(answer))

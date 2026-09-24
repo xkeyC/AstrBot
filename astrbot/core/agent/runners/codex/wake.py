@@ -91,6 +91,11 @@ async def run_in_session_thread(
         return False
     if text and delivery_session_str:
         await ctx.send_message(delivery_session_str, MessageChain().message(text))
+        # A voice conversation of that chat hears of it too (its model
+        # decides whether to tell it).
+        from astrbot.core.voice.chat import announce
+
+        await announce(delivery_session_str, text)
     return True
 
 

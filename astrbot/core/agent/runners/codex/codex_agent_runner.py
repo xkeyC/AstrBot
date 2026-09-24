@@ -224,16 +224,19 @@ def turn_scopes(event: T.Any) -> list[str]:
     permissions happen to match.
     """
     platform = sender = role = ""
+    voice = False
     with contextlib.suppress(Exception):
         platform = str(event.get_platform_id() or "")
         sender = str(event.get_sender_id() or "")
         role = str(getattr(event, "role", "") or "member")
-    return [*event_policy(event).scopes, f"principal:{platform}:{sender}:{role}"]
+        voice = bool(event.get_extra("voice_turn"))
+    scopes = [*event_policy(event).scopes, f"principal:{platform}:{sender}:{role}"]
+    # A voice turn's answer is only spoken: the same person's text must not
+    # join it, but wait for its own turn.
+    return [*scopes, "via:voice"] if voice else scopes
 
 
-def memory_thread_config(
-    cfg: dict, umo: str, event: T.Any, *, turn_scopes: bool = True
-) -> JsonObject:
+def memory_thread_config(cfg: dict, umo: str, event: T.Any) -> JsonObject:
     """Per-thread Codex memory settings (R16–R18).
 
     Each chat gets its own local store (scope = UMO). Writing a shared memory
@@ -252,8 +255,6 @@ def memory_thread_config(
         cfg: Runner config.
         umo: The chat, which is also its memory scope.
         event: The event starting the thread, for its sender's rule.
-        turn_scopes: False for a thread that must never write shared
-            memories or delete any, whoever speaks (the voice agent).
 
     Returns:
         Codex config overrides for the thread.
@@ -270,8 +271,9 @@ def memory_thread_config(
         "memories.extra_session_sources": ["astrbot"],
         "memories.scope_key": umo,
         "memories.may_write_global": bool(is_private and trusted),
-        "memories.may_delete": trusted and not turn_scopes,
-        "memories.turn_scopes": turn_scopes,
+        # Deleting is decided per turn, by its sender's scopes.
+        "memories.may_delete": False,
+        "memories.turn_scopes": True,
         "memories.auto_consolidate": bool(cfg.get("memory_auto_consolidate", True)),
     }
 
@@ -706,7 +708,12 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
         """
         event = getattr(getattr(self.run_context, "context", None), "event", None)
         try:
-            if event is not None and event.get_platform_name() == "cron":
+            # Voice requests come as synthetic events too, but from a person.
+            if (
+                event is not None
+                and event.get_platform_name() == "cron"
+                and not event.get_extra("voice_turn")
+            ):
                 return {"id": "", "label": ""}
         except Exception:  # noqa: BLE001
             pass

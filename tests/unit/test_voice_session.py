@@ -4,19 +4,23 @@ import pytest
 
 from astrbot.core.platform.sources.mumble import voice as mumble_voice
 from astrbot.core.platform.sources.mumble.audio import MumbleMedia
+from astrbot.core.voice import chat as chat_module
 from astrbot.core.voice import session as voice
+from astrbot.core.voice.chat import VoiceChat
 from astrbot.core.voice.session import VoiceOptions, VoiceSession
 
 
 class FakeRuntime:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.roles: list[str] = []
 
     async def realtime_start(self, thread_id, request):
         self.calls.append("start")
 
-    async def realtime_append_text(self, thread_id, text):
+    async def realtime_append_text(self, thread_id, text, role="user"):
         self.calls.append(f"text:{text}")
+        self.roles.append(role)
 
     async def realtime_append_speech(self, thread_id, text):
         self.calls.append(f"speech:{text}")
@@ -64,8 +68,11 @@ class FakeEngine:
         self.forgotten.append(thread_id)
 
 
-class FakeChat:
+class FakeChat(VoiceChat):
+    """The real ordering and busy logic; the chat's turns are faked."""
+
     def __init__(self) -> None:
+        super().__init__(umo="test:FriendMessage:1", private=True)
         self.asked: list[str] = []
         self.answer: str | None = "It is three."
         self.is_busy = False
@@ -74,7 +81,7 @@ class FakeChat:
         self.release.set()
 
     def busy(self) -> bool:
-        return self.is_busy
+        return self.is_busy or super().busy()
 
     async def voice_persona(self) -> str:
         return self.persona
@@ -83,6 +90,13 @@ class FakeChat:
         self.asked.append(body)
         await self.release.wait()
         return self.answer
+
+
+async def settle() -> None:
+    """Lets requests handed to the chat finish."""
+    for _ in range(5):
+        await asyncio.gather(*chat_module._REQUESTS)
+        await asyncio.sleep(0)
 
 
 class FakeSp:
@@ -192,6 +206,7 @@ async def test_a_handoff_is_answered_by_the_chat_and_spoken(engine):
     session = make_session([])
     session._engine, session._thread_id = engine, "t1"
     await session._handoff(handoff("look up the time"))
+    await settle()
     (body,) = session.chat.asked
     assert "look up the time" in body and "what time is it" in body
     assert engine.rt.calls == ["speech:It is three."]
@@ -203,26 +218,76 @@ async def test_a_busy_chat_is_announced_and_requests_keep_their_order(engine):
     session._engine, session._thread_id = engine, "t1"
     session.chat.is_busy = True
     session.chat.release.clear()
-    first = asyncio.create_task(session._handoff(handoff("first")))
-    await asyncio.sleep(0)
+    await session._handoff(handoff("first"))
     session.chat.is_busy = False
-    second = asyncio.create_task(session._handoff(handoff("second")))
-    await asyncio.sleep(0)
-    # Both waiting are told so: the chat is busy, then the first one.
+    # The first request still waits: the second is told it is busy too.
+    await session._handoff(handoff("second"))
+    await asyncio.sleep(0.05)
     assert engine.rt.calls == [f"speech:{voice.BUSY_SPEECH}"] * 2
     session.chat.release.set()
-    await asyncio.gather(first, second)
+    await settle()
     assert [b.split("Task: ")[1] for b in session.chat.asked] == ["first", "second"]
     assert engine.rt.calls[2:] == ["speech:It is three."] * 2
 
 
 @pytest.mark.asyncio
-async def test_an_unanswered_handoff_is_said_to_have_failed(engine):
+async def test_failed_and_empty_answers_are_told_as_such(engine):
     session = make_session([])
     session._engine, session._thread_id = engine, "t1"
     session.chat.answer = None
     await session._handoff(handoff("x"))
-    assert engine.rt.calls == [f"speech:{voice.FAILED_SPEECH}"]
+    await settle()
+    session.chat.answer = ""
+    await session._handoff(handoff("y"))
+    await settle()
+    assert engine.rt.calls == [
+        f"speech:{voice.FAILED_SPEECH}",
+        f"speech:{voice.DONE_SPEECH}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_waited_answer_counts_as_activity(engine):
+    session = make_session([])
+    session._engine, session._thread_id = engine, "t1"
+    session.chat.release.clear()
+    await session._handoff(handoff("x"))
+    await asyncio.sleep(0.05)
+    before = session.last_activity
+    await asyncio.sleep(0.05)
+    assert session.last_activity > before  # still waiting: active now
+    session.chat.release.set()
+    await settle()
+    assert session.last_answer_at > 0 and session._pending == 0
+
+
+@pytest.mark.asyncio
+async def test_an_answer_after_the_session_closed_is_posted(engine, monkeypatch):
+    posted = []
+
+    async def fake_deliver(umo, answer):
+        posted.append((umo, answer))
+
+    monkeypatch.setattr(voice, "deliver", fake_deliver)
+    session = make_session([])
+    session._engine, session._thread_id = engine, "t1"
+    session.chat.release.clear()
+    await session._handoff(handoff("x"))
+    await session.close("hung up")
+    session.chat.release.set()  # the request was not cancelled by the close
+    await settle()
+    assert posted == [("test:FriendMessage:1", "It is three.")]
+    assert "speech:It is three." not in engine.rt.calls
+
+
+@pytest.mark.asyncio
+async def test_a_note_goes_to_the_model_as_developer_context(engine):
+    session = make_session([])
+    session._engine, session._thread_id = engine, "t1"
+    await session.note("The backup finished.")
+    (call,) = engine.rt.calls
+    assert call.startswith("text:") and "The backup finished." in call
+    assert engine.rt.roles == ["developer"]
 
 
 @pytest.mark.asyncio

@@ -35,7 +35,7 @@ from astrbot import logger
 from astrbot.core import astrbot_config, sp
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .chat import TASK_BODY, VoiceChat
+from .chat import TASK_BODY, VOICE_SESSIONS, VoiceChat, deliver
 from .icetcp import IceTcpRelay, replace_candidates, tcp_candidates
 
 VOICE_THREAD_KEY = "voice_thread"
@@ -62,10 +62,15 @@ VOICE_THREAD_CONFIG = {
     "agents.enabled": False,
     "features.multi_agent_v2": False,
 }
-# Told to the realtime model while a request waits for the chat's turn, and
-# when one cannot be answered. It words them for the listener.
+# Given to the realtime model as the backend's word on a request: while it
+# waits for the chat's turn, when it ended without an answer, and when it
+# could not be answered. The model tells the listener in its own words.
 BUSY_SPEECH = "Still busy with an earlier request; this one is next, the answer follows as soon as it is done."
+DONE_SPEECH = "Done; there is nothing more to say about it."
 FAILED_SPEECH = "That request could not be completed."
+# A result reaching the chat later (background work, a scheduled task).
+NOTE_PROMPT = """(Note from the backend, not said by the listener: {text}
+Tell the listener about it if it matters to them, briefly and in your own words; otherwise say nothing.)"""
 SDP_TIMEOUT = 30.0
 CONNECT_TIMEOUT = 15.0
 # Pause between WebRTC connecting and handing the model the audio kept
@@ -241,8 +246,9 @@ class VoiceSession:
         self.prompt = prompt
         self.options = options
         self.chat = chat
-        # Handoffs are answered in order.
-        self._handoff_lock = asyncio.Lock()
+        # Requests handed to the chat and not answered yet.
+        self._pending = 0
+        self.last_answer_at = 0.0
         self.media = media
         self.label = label
         self.thread_key = thread_key
@@ -267,8 +273,12 @@ class VoiceSession:
 
     @property
     def last_activity(self) -> float:
-        """Start or latest speech recognised by the model, for standby."""
-        return max(self.started_at, self.last_transcript_at)
+        """Start, latest speech recognised by the model or latest answer;
+        now while a request waits for its answer. For standby and idle
+        hang-up."""
+        if self._pending:
+            return time.monotonic()
+        return max(self.started_at, self.last_transcript_at, self.last_answer_at)
 
     def launch(self, on_failed: Callable[[Exception], None]) -> None:
         """Starts the session in the background.
@@ -339,7 +349,8 @@ class VoiceSession:
         await self._connect()
 
     async def _open_agent(self) -> None:
-        """Opens (or resumes) the voice agent thread and routes its events to
+        """Opens (or resumes) the thread carrying the realtime conversation
+        and routes its events to
         ``self._events_queue``."""
         engine = await _codex_engine()
         self._check_open()
@@ -366,7 +377,7 @@ class VoiceSession:
             self._thread_id = info["thread_id"]
             self._phase("thread opened")
             logger.info(
-                "%s voice agent thread for %s: %s (%s)",
+                "%s voice thread for %s: %s (%s)",
                 self.label,
                 self.key,
                 self._thread_id,
@@ -468,6 +479,7 @@ class VoiceSession:
         self.media.start()
         self.started_at = time.monotonic()
         self.ready = True
+        VOICE_SESSIONS[self.chat.umo] = self
         logger.info(
             "%s voice session %s started in %.1fs (thread %s)",
             self.label,
@@ -549,19 +561,50 @@ class VoiceSession:
         )
         task = str(handoff.get("input_transcript") or heard)
         logger.info("%s voice %s: handoff %r", self.label, self.key, task)
-        if self.chat.busy() or self._handoff_lock.locked():
-            await self._speak(BUSY_SPEECH)
-        async with self._handoff_lock:
-            if self._closed:
-                return
-            answer = await self.chat.ask(
-                TASK_BODY.format(heard=heard or task, task=task)
+        if self._ask(TASK_BODY.format(heard=heard or task, task=task)):
+            self._spawn(self._speak(BUSY_SPEECH), "busy")
+
+    def _ask(self, body: str) -> bool:
+        """Hands ``body`` to the paired chat (in order, outliving this
+        session); the answer comes to ``_answered``.
+
+        Returns:
+            Whether it waits behind other work.
+        """
+        self._pending += 1
+        return self.chat.request(body, self._answered)
+
+    async def _answered(self, answer: str | None) -> None:
+        self._pending -= 1
+        self.last_answer_at = time.monotonic()
+        if self._closed:
+            # The conversation ended meanwhile: the answer is not lost.
+            await deliver(self.chat.umo, answer or "")
+            return
+        await self._tell(answer)
+
+    async def _tell(self, answer: str | None) -> None:
+        """Gives the voice model a request's answer (None: it failed)."""
+        if answer is None:
+            answer = FAILED_SPEECH
+        await self._speak(answer or DONE_SPEECH)
+
+    async def note(self, text: str) -> None:
+        """Adds a note (a result that reached the chat) to the voice model's
+        context; the model decides whether and how to tell the listener."""
+        if self._engine is None or self._thread_id is None or self._closed:
+            return
+        try:
+            await self._engine.rt.realtime_append_text(
+                self._thread_id, NOTE_PROMPT.format(text=text), "developer"
             )
-        if not self._closed:
-            await self._speak(answer or FAILED_SPEECH)
+        except Exception as exc:  # noqa: BLE001 - the conversation goes on
+            logger.warning("%s voice %s: note failed: %s", self.label, self.key, exc)
 
     async def _speak(self, text: str) -> None:
-        """Has the realtime model say ``text`` (a backend answer)."""
+        """Gives the realtime model ``text`` as the backend's answer to the
+        pending handoff (Codex hands it over as context; the model words
+        it)."""
         if self._engine is None or self._thread_id is None or self._closed:
             return
         try:
@@ -610,6 +653,8 @@ class VoiceSession:
             logger.info("%s voice session %s closed: %s", self.label, self.key, reason)
             await self._release()
         finally:
+            if VOICE_SESSIONS.get(self.chat.umo) is self:
+                del VOICE_SESSIONS[self.chat.umo]
             self._on_closed(self)
 
     async def _release_transport(self) -> None:
