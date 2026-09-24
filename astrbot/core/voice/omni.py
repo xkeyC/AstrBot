@@ -62,10 +62,10 @@ BACKCHANNELS = sorted(
     {
         *"嗯啊哦噢哎诶唉呃额对好是行哈嘿呵嗷哼呀啦嘛呢咳",
         *("好的", "是的", "对的", "好吧", "行吧", "明白", "明白了", "知道了"),
-        *("可以", "没错", "没问题", "有道理", "原来如此", "这样啊"),
+        *("可以", "没错", "没问题", "有道理", "原来如此", "这样啊", "好嘞", "然后呢"),
         *("ok", "okay", "yeah", "yes", "yep", "yup", "uh", "huh", "um", "mm"),
         *("hmm", "mhm", "right", "sure", "gotit", "isee", "cool", "nice"),
-        *("haha", "hehe", "lol"),
+        *("haha", "hehe", "lol", "mhmm"),
     },
     key=len,
     reverse=True,
@@ -214,11 +214,15 @@ def takes_floor(text: str, names: list[str] | None = None) -> bool:
     if names is not None:
         lowered = text.lower()
         return any(name and name.lower() in lowered for name in names)
+    if text.rstrip().endswith(("?", "？")):
+        return True  # a question: "可以吗？", "真的？"
     rest = "".join(ch for ch in text.lower() if ch.isalnum())
     while rest:
         word = next((w for w in BACKCHANNELS if rest.startswith(w)), None)
         if word is None:
-            return True  # "可以吗", "是我", "别说了"...
+            # Two characters or more ("别说了", "停下"), or a question
+            # ("可以吗"); one left over is a particle ("对吧", "OK的", "哇").
+            return len(rest) >= 2 or "吗" in rest
         rest = rest[len(word) :]
     return False
 
@@ -432,6 +436,7 @@ class OmniVoiceSession(VoiceSession):
         self._say_cancel = False
         self._cut_until = 0.0
         self._voiced_at = 0.0
+        self._voiced_units = 0  # voiced units in a row
         self._task_at = 0.0
         # When the speech handed to the media so far ends playing, roughly.
         self._playing_until = 0.0
@@ -552,6 +557,7 @@ class OmniVoiceSession(VoiceSession):
                 "audio": base64.b64encode(unit.astype(np.float32).tobytes()).decode(),
                 "voiced": voiced,
             }
+            self._voiced_units = self._voiced_units + 1 if voiced else 0
             if voiced:
                 self._voiced_at = time.monotonic()
             if transcript is not None:
@@ -627,6 +633,8 @@ class OmniVoiceSession(VoiceSession):
                     and not self.group
                     and now < self._playing_until
                     and now - self._voiced_at < BARGE_IN_SECONDS
+                    # Speech going on for a while, not a backchannel.
+                    and self._voiced_units >= 2
                 ):
                     # One to one: the model stopped speaking because the
                     # speaker talked over it; what it had still to say goes
