@@ -165,6 +165,9 @@ class VoiceMedia(Protocol):
     def stop(self) -> None:
         """The session is closing: drop pending audio, end speech in progress."""
 
+    def flush(self) -> None:
+        """Drops the model's audio not played yet (its speech was cut)."""
+
 
 @dataclass
 class VoiceOptions:
@@ -182,13 +185,17 @@ def _runner_config() -> dict:
     return normalize_agent_runner(astrbot_config.get("agent_runner"))["config"]
 
 
-async def _codex_engine():
-    """The Codex engine the chat runner uses: same runtime, same account."""
+async def _codex_engine(realtime: bool = True):
+    """The Codex engine the chat runner uses: same runtime, same account.
+
+    Args:
+        realtime: Whether the binding must support Codex realtime.
+    """
     from astrbot.core.agent.runners.codex.codex_agent_runner import engine_options
     from astrbot.core.agent.runners.codex.native import CodexEngine
 
     engine = await CodexEngine.get(engine_options(_runner_config()))
-    if not hasattr(engine.rt, "realtime_start"):
+    if realtime and not hasattr(engine.rt, "realtime_start"):
         raise RuntimeError(
             "codex_astrbot binding has no realtime support; update codex-astrbot"
         )
@@ -228,7 +235,13 @@ class VoiceSession:
     and runs once. A close during start lets the start stop at its next step
     and then releases whatever it had created, so nothing outlives the
     session (in particular no realtime call keeps running unowned).
+
+    Another voice model replaces the transport (``_connect``,
+    ``_release_transport``, ``say``) and keeps the voice agent thread.
     """
+
+    # Whether the Codex binding must support realtime (the transport here).
+    NEEDS_REALTIME = True
 
     def __init__(
         self,
@@ -346,7 +359,13 @@ class VoiceSession:
         raise asyncio.TimeoutError
 
     async def _start(self) -> None:
-        engine = await _codex_engine()
+        await self._open_agent()
+        await self._connect()
+
+    async def _open_agent(self) -> None:
+        """Opens (or resumes) the voice agent thread and routes its events to
+        ``self._events_queue``."""
+        engine = await _codex_engine(self.NEEDS_REALTIME)
         self._check_open()
         self._engine = engine
         state = await sp.get_async(
@@ -420,6 +439,9 @@ class VoiceSession:
         )
         self._events_queue = events
 
+    async def _connect(self) -> None:
+        """Starts the realtime conversation over WebRTC on the agent thread."""
+        engine, events = self._engine, self._events_queue
         # No STUN: the far end offers public host candidates and we connect
         # out to them. aiortc's default Google STUN server only adds a
         # multi-second wait while gathering.
@@ -596,9 +618,8 @@ class VoiceSession:
         finally:
             self._on_closed(self)
 
-    async def _release(self) -> None:
-        """Releases what exists now; each resource only once, so it can run
-        again for what a late start created afterwards."""
+    async def _release_transport(self) -> None:
+        """Stops the realtime conversation and closes WebRTC (each once)."""
         engine, thread_id = self._engine, self._thread_id
         if self._realtime_requested and engine is not None and thread_id:
             self._realtime_requested = False
@@ -611,6 +632,12 @@ class VoiceSession:
         relay, self._relay = self._relay, None
         if relay is not None:
             relay.close()
+
+    async def _release(self) -> None:
+        """Releases what exists now; each resource only once, so it can run
+        again for what a late start created afterwards."""
+        engine, thread_id = self._engine, self._thread_id
+        await self._release_transport()
         current = asyncio.current_task()
         for task in self._tasks:
             if task is not current:

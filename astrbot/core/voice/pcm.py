@@ -133,3 +133,6 @@ class PcmMedia:
     def stop(self) -> None:
         self.muted = True
         self._buffer.clear()
+
+    def flush(self) -> None:
+        """Nothing to drop: audio goes to ``send`` as it arrives."""

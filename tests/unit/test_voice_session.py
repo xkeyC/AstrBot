@@ -74,7 +74,7 @@ def engine(monkeypatch):
     gate = asyncio.Event()
     engine = FakeEngine(gate)
 
-    async def codex_engine():
+    async def codex_engine(realtime=True):
         return engine
 
     monkeypatch.setattr(voice, "_codex_engine", codex_engine)
@@ -118,7 +118,7 @@ async def test_close_during_start_leaves_nothing_running(engine):
 
 @pytest.mark.asyncio
 async def test_start_failure_is_reported_once(engine, monkeypatch):
-    async def broken():
+    async def broken(realtime=True):
         raise RuntimeError("binding has no realtime support")
 
     monkeypatch.setattr(voice, "_codex_engine", broken)

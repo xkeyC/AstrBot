@@ -233,6 +233,8 @@ class OutboundVoice:
         self._bitrate = bitrate
         self.muted = False
         self.talking = False
+        # Buffered audio beyond this many frames is dropped, oldest first.
+        self.max_queued = MAX_QUEUED_FRAMES
         self._queue: deque[tuple[bytes, bool]] = deque()
         self._track_ended = False
 
@@ -271,7 +273,7 @@ class OutboundVoice:
                     samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
                     loud = float(np.sqrt(np.mean(samples * samples))) >= SILENCE_RMS
                     self._queue.append((chunk, loud))
-                    while len(self._queue) > MAX_QUEUED_FRAMES:
+                    while len(self._queue) > self.max_queued:
                         self._queue.popleft()
             self._track_ended = True
             await player
@@ -342,6 +344,11 @@ class OutboundVoice:
             for packet in encoder.encode(out):
                 self._send(bytes(packet), False)
 
+    def flush(self) -> None:
+        """Drops the audio not played yet; the stretch of speech ends after
+        the hangover."""
+        self._queue.clear()
+
     def finish(self) -> None:
         """Ends a stretch of speech cut off mid-way, so Mumble clients do not
         keep showing the bot as talking."""
@@ -366,14 +373,24 @@ class OutboundVoice:
 class MumbleMedia:
     """A voice session's audio in Mumble (``astrbot.core.voice.VoiceMedia``)."""
 
-    def __init__(self, send: Callable[[bytes, bool], None], bitrate: int = 64000):
+    def __init__(
+        self,
+        send: Callable[[bytes, bool], None],
+        bitrate: int = 64000,
+        buffer_seconds: float = 0,
+    ):
         """
         Args:
             send: Sends one Opus frame to Mumble: ``(frame, terminator)``.
             bitrate: Opus bitrate of the bot's voice.
+            buffer_seconds: Playout buffer when the model delivers its speech
+                ahead of time (a local model); 0 keeps the default 3 s, meant
+                to bound latency with a realtime peer.
         """
         self.mixer = InboundMixer()
         self.outbound = OutboundVoice(send, bitrate)
+        if buffer_seconds:
+            self.outbound.max_queued = int(buffer_seconds / FRAME_SECONDS)
         self.track = FrameTrack(self.mixer)
 
     async def play(self, track: MediaStreamTrack) -> None:
@@ -386,3 +403,6 @@ class MumbleMedia:
         self.outbound.muted = True
         self.outbound.finish()
         self.mixer.clear()
+
+    def flush(self) -> None:
+        self.outbound.flush()

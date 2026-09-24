@@ -562,6 +562,12 @@ CONFIG_METADATA_2 = {
                         "mumble_voice_prompt": "",
                         "mumble_voice_agent_instructions": "",
                         "mumble_voice_idle_timeout": 300,
+                        "mumble_voice_backend": "codex_realtime",
+                        "mumble_omni_url": "ws://127.0.0.1:19060/backend",
+                        "mumble_omni_ref_audio": "",
+                        "mumble_omni_silence_bias": 4.0,
+                        "mumble_omni_tool_filler": "好的，我查一下。",
+                        "mumble_omni_asr_dir": "",
                     },
                     # "WebChat": {
                     #     "id": "webchat",
@@ -944,6 +950,38 @@ CONFIG_METADATA_2 = {
                         "description": "语音待机时间",
                         "type": "int",
                         "hint": "连续多少秒没有识别到语音就进入待机（断开实时语音），检测到新的人声时自动恢复。闭麦超过 1 分钟也会断开。",
+                    },
+                    "mumble_voice_backend": {
+                        "description": "语音后端",
+                        "type": "string",
+                        "options": ["codex_realtime", "minicpm_omni"],
+                        "labels": ["Codex 实时语音", "本地 MiniCPM-o"],
+                        "hint": "Codex 实时语音：需要 Codex Agent 执行器登录含语音的 ChatGPT 订阅账号。本地 MiniCPM-o：连接自己部署的 llama.cpp-omni 服务端（astrbot-omni 分支），全双工对话在本地完成，查询、执行等任务由模型调用工具交给语音 Agent 线程（Codex）处理。",
+                    },
+                    "mumble_omni_url": {
+                        "description": "MiniCPM-o 服务地址",
+                        "type": "string",
+                        "hint": "llama-omni-server 的 WebSocket 地址，例如 ws://127.0.0.1:19060/backend。服务端同一时间只服务一个语音会话，其余会话先到先得、不应答。",
+                    },
+                    "mumble_omni_ref_audio": {
+                        "description": "参考音频（音色克隆）",
+                        "type": "string",
+                        "hint": "可选。本机音频文件路径（wav/mp3 等），机器人用这段声音的音色说话；只取前 10 秒，建议 5～10 秒清晰人声。留空使用默认音色。",
+                    },
+                    "mumble_omni_silence_bias": {
+                        "description": "频道沉默倾向",
+                        "type": "float",
+                        "hint": "频道语音中判断“这句话不是对机器人说的”的倾向（沉默工具的 logit 偏置）。越大越不容易接话，默认 4；私语不受影响。",
+                    },
+                    "mumble_omni_tool_filler": {
+                        "description": "任务应答语",
+                        "type": "string",
+                        "hint": "可选。模型把任务交给后台时先说的一句话，例如“好的，我查一下。”留空则不说。",
+                    },
+                    "mumble_omni_asr_dir": {
+                        "description": "语音识别模型目录",
+                        "type": "string",
+                        "hint": "可选。SenseVoice 与 Silero VAD 模型所在目录，缺少时自动从 HuggingFace 下载（可用 HF_ENDPOINT 环境变量指定镜像）。留空使用 data/models/sensevoice。",
                     },
                     "misskey_instance_url": {
                         "description": "Misskey 实例 URL",

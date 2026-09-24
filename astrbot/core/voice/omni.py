@@ -1,0 +1,589 @@
+"""Full-duplex voice through a local MiniCPM-o 4.5 server (llama.cpp-omni).
+
+The server's duplex model listens and speaks. A tool router in the server (the
+same LLM in text mode) decides every utterance: let the model answer, stay
+silent, or hand a task to the voice agent thread (Codex, as for Codex
+realtime), whose answer the model then speaks verbatim in its own voice.
+Utterances are found and transcribed here, on CPU (Silero VAD + SenseVoice),
+and sent to the server with the audio. The platform's audio comes and goes
+through the session's ``VoiceMedia``, as for Codex realtime.
+
+Server: the ``astrbot-omni`` branch of llama.cpp-omni (session voice clone,
+forced speech, tool router); see docs/zh/platform/mumble.md.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import fractions
+import json
+import os
+import re
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import av
+import numpy as np
+from aiortc import MediaStreamTrack
+from aiortc.mediastreams import MediaStreamError
+
+from astrbot import logger
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+from .session import VoiceSession
+
+IN_RATE = 16000  # the server's input: 1 s units of 16 kHz float32
+OUT_RATE = 24000  # the server's speech: 24 kHz float32
+# Noise under the input: the duplex model answers more naturally over a noise
+# floor than over digital silence (measured with the same prompts).
+DITHER = 10 ** (-55 / 20)
+# The first session also loads every model on the server.
+INIT_TIMEOUT = 120.0
+# A voice reference longer than this confuses the model (it is part of the
+# system prompt), and the voice clone does not need more.
+REF_AUDIO_SECONDS = 10.0
+# Speech arrives faster than real time; the server may send a whole answer
+# at once, so a player must buffer this much of it (see MumbleMedia).
+PLAYOUT_BUFFER_SECONDS = 120.0
+# Audio still arriving for speech that was just cut is dropped this long.
+CUT_SECONDS = 0.6
+# The speaker counts as talking over the bot this long after speech.
+BARGE_IN_SECONDS = 1.5
+
+ASR_FILES = {
+    "model.int8.onnx": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    "tokens.txt": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    "silero_vad.onnx": "csukuangfj/vad",
+}
+
+DUPLEX_GROUP_PROMPT = (
+    "你是语音助手{name}，在一个多人语音频道里和大家聊天。请用自然、简短的中文口语回答。"
+)
+DUPLEX_PRIVATE_PROMPT = (
+    "你是语音助手{name}，正在和{speaker}一对一语音聊天。请用自然、简短的中文口语回答。"
+)
+
+ROUTER_TOOLS = """# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{"type": "function", "function": {{"name": "silence", "description": "{silence}", "parameters": {{"type": "object", "properties": {{}}, "required": []}}}}}}
+{{"type": "function", "function": {{"name": "reply", "description": "这句话是对{name}说的，{name}可以直接用口语回答。", "parameters": {{"type": "object", "properties": {{}}, "required": []}}}}}}
+{{"type": "function", "function": {{"name": "backend_task", "description": "交给后台执行：联网搜索、查询实时信息、执行操作。结果之后由{name}念出来。", "parameters": {{"type": "object", "properties": {{"task": {{"type": "string", "description": "要完成的任务，一句完整的话，包含所有必要细节。"}}}}, "required": ["task"]}}}}}}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{{"name": <function-name>, "arguments": <args-json-object>}}
+</tool_call>"""
+
+ROUTER_TASKS = """- 对{name}说的，且需要实时信息（时间、日期、天气、新闻、价格、比分等）、联网搜索、查资料、或者执行操作（设置提醒、发消息、控制设备、记录内容等）：调用 backend_task。
+- 对{name}说的，闲聊或者凭常识就能回答的：调用 reply。
+
+{name}自己不知道现在的时间、日期、天气和任何最新消息，这些一律用 backend_task。每次必须且只能调用一个工具，不要输出其他文字。"""
+
+ROUTER_GROUP = """你是语音助手"{name}"的决策模块。你收到的是多人语音频道里最新一句话的转写（可能有识别错误）。频道里的人大多在互相聊天，只有叫到"{name}"（或同音字{aliases}）的话，或者紧接着和{name}对话的话，才是对{name}说的。
+
+根据这句话选择一种处理方式：
+- 不是对{name}说的：调用 silence。
+{tasks}
+
+示例：
+"老张你那边信号不好，听不清" -> silence（在和老张说话）
+"哈哈哈笑死我了" -> silence（没有叫{name}）
+"{name}，今天几号？" -> backend_task，task："查询今天的日期"
+"{name}，帮我把这首歌加到收藏" -> backend_task，task："把当前播放的歌曲加入收藏"
+"{name}，你觉得猫可爱还是狗可爱？" -> reply
+"{name}，用英语怎么说谢谢？" -> reply
+
+{tools}"""
+
+ROUTER_PRIVATE = """你是语音助手"{name}"的决策模块。{name}正在和一个人一对一语音聊天，你收到的是对方最新一句话的转写（可能有识别错误）。
+
+根据这句话选择一种处理方式：
+- 没有需要回应的内容（只有"嗯""啊"之类的语气词、咳嗽、背景声音）：调用 silence。
+{tasks}
+
+示例：
+"嗯……" -> silence
+"今天几号？" -> backend_task，task："查询今天的日期"
+"帮我把这首歌加到收藏" -> backend_task，task："把当前播放的歌曲加入收藏"
+"你觉得猫可爱还是狗可爱？" -> reply
+
+{tools}"""
+
+# What the voice agent thread receives for the bot to speak first.
+OPENING_PROMPT = """Open the conversation now; your answer is read aloud as the bot's first words.
+Purpose: {text}"""
+# What the voice agent thread receives for a task.
+TASK_PROMPT = """A voice request to handle now; your answer is read aloud.
+What was said: {heard}
+Task: {task}"""
+
+
+@dataclass
+class OmniOptions:
+    url: str = "ws://127.0.0.1:19060/backend"
+    ref_audio: str = ""
+    silence_bias: float = 4.0
+    tool_filler: str = ""
+    asr_dir: str = ""
+
+
+def router_config(name: str, aliases: list[str], group: bool, bias: float) -> dict:
+    """The server's tool router configuration for a conversation."""
+    alias_text = "".join(f"、{a}" for a in aliases if a and a != name)
+    tools = ROUTER_TOOLS.format(
+        name=name,
+        silence="这句话不是对你说的，保持沉默。"
+        if group
+        else "没有需要回应的内容，保持沉默。",
+    )
+    template = ROUTER_GROUP if group else ROUTER_PRIVATE
+    system = template.format(
+        name=name,
+        aliases=alias_text,
+        tasks=ROUTER_TASKS.format(name=name),
+        tools=tools,
+    )
+    return {
+        "tools": ["silence", "reply", "backend_task"],
+        # Unaddressed chatter still reads as a question to the model: the
+        # bias makes it pick silence unless the utterance is clearly for it.
+        "bias": {"silence": bias if group else 0.0},
+        "audio_units": 12,
+        "silence_hold": 1,
+        "tool_hold": 3,
+        "transcribe_prompt": "请仔细听这段音频片段，并将其内容逐字记录。",
+        "user_template": "{heard}",
+        "system": system,
+    }
+
+
+def duplex_prompt(name: str, extra: str, speaker: str = "") -> str:
+    prompt = (
+        DUPLEX_PRIVATE_PROMPT.format(name=name, speaker=speaker)
+        if speaker
+        else DUPLEX_GROUP_PROMPT.format(name=name)
+    )
+    return f"{prompt}\n{extra}" if extra else prompt
+
+
+def speakable(text: str) -> str:
+    """Plain spoken text from an agent answer (no Markdown, links or code)."""
+    text = re.sub(r"```.*?```", "", text, flags=re.S)
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[*_`#>|]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# ---------------------------------------------------------------- speech recognition
+
+_asr_lock = threading.Lock()
+_asr_load = asyncio.Lock()
+_recognizer = None
+
+
+async def _asr_models(asr_dir: str) -> Path:
+    """The SenseVoice + Silero VAD model directory, downloaded on first use."""
+    from astrbot.core.utils.io import download_file
+
+    directory = (
+        Path(asr_dir)
+        if asr_dir
+        else Path(get_astrbot_data_path()) / "models" / "sensevoice"
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+    for name, repo in ASR_FILES.items():
+        path = directory / name
+        if path.exists() and path.stat().st_size > 0:
+            continue
+        logger.info("Omni voice: downloading %s", name)
+        partial = path.with_suffix(path.suffix + ".part")
+        await download_file(f"{endpoint}/{repo}/resolve/main/{name}", str(partial))
+        partial.replace(path)
+    return directory
+
+
+async def _load_recognizer(asr_dir: str):
+    """The shared SenseVoice recogniser (loaded once, used under _asr_lock)."""
+    global _recognizer
+    async with _asr_load:
+        directory = await _asr_models(asr_dir)
+        if _recognizer is None:
+            import sherpa_onnx
+
+            _recognizer = await asyncio.to_thread(
+                sherpa_onnx.OfflineRecognizer.from_sense_voice,
+                model=str(directory / "model.int8.onnx"),
+                tokens=str(directory / "tokens.txt"),
+                num_threads=2,
+                use_itn=True,
+            )
+        return _recognizer, directory / "silero_vad.onnx"
+
+
+class Utterances:
+    """Finds utterances in the input (VAD) and transcribes each one."""
+
+    # A pause shorter than this between two pieces of speech (e.g. after
+    # "<name>,") makes them one utterance, even if the first was already
+    # reported on its own.
+    JOIN_SECONDS = 1.5
+
+    def __init__(self, recognizer, vad_model: Path) -> None:
+        import sherpa_onnx
+
+        config = sherpa_onnx.VadModelConfig()
+        config.silero_vad.model = str(vad_model)
+        config.silero_vad.min_silence_duration = 0.6
+        config.sample_rate = IN_RATE
+        self._vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=30)
+        self._recognizer = recognizer
+        self._last_text = ""
+        self._last_end = -(10**9)  # sample where the last utterance ended
+
+    def feed(self, unit: np.ndarray) -> tuple[bool, str | None]:
+        """Takes one unit of input.
+
+        Returns:
+            Whether the unit has speech, and the transcript of an utterance
+            that ended in it (``None`` if none did).
+        """
+        voiced = False
+        for i in range(0, len(unit), 512):
+            self._vad.accept_waveform(unit[i : i + 512])
+            voiced = voiced or self._vad.is_speech_detected()
+        text = None
+        while not self._vad.empty():
+            start = self._vad.front.start
+            samples = np.asarray(self._vad.front.samples, dtype=np.float32)
+            self._vad.pop()
+            with _asr_lock:
+                stream = self._recognizer.create_stream()
+                stream.accept_waveform(IN_RATE, samples)
+                self._recognizer.decode_stream(stream)
+                piece = stream.result.text.strip()
+            if start - self._last_end < self.JOIN_SECONDS * IN_RATE:
+                piece = self._last_text + piece
+            self._last_text, self._last_end = piece, start + len(samples)
+            text = piece
+        return voiced, text
+
+
+# ---------------------------------------------------------------- audio
+
+
+class PcmTrack(MediaStreamTrack):
+    """The server's speech as a track for ``OutboundVoice``."""
+
+    kind = "audio"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._queue: asyncio.Queue[av.AudioFrame | None] = asyncio.Queue()
+        self._pts = 0
+
+    def put(self, samples: np.ndarray) -> None:
+        frame = av.AudioFrame.from_ndarray(
+            samples.reshape(1, -1), format="flt", layout="mono"
+        )
+        frame.sample_rate = OUT_RATE
+        frame.pts = self._pts
+        frame.time_base = fractions.Fraction(1, OUT_RATE)
+        self._pts += len(samples)
+        self._queue.put_nowait(frame)
+
+    def end(self) -> None:
+        self._queue.put_nowait(None)
+
+    async def recv(self) -> av.AudioFrame:
+        frame = await self._queue.get()
+        if frame is None:
+            raise MediaStreamError
+        return frame
+
+
+def _load_ref_audio(path: str) -> np.ndarray:
+    """The first REF_AUDIO_SECONDS of a recording, 16 kHz mono float32."""
+    resampler = av.AudioResampler(format="flt", layout="mono", rate=IN_RATE)
+    chunks = []
+    with av.open(path) as container:
+        for frame in container.decode(audio=0):
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray().reshape(-1))
+    for out in resampler.resample(None):
+        chunks.append(out.to_ndarray().reshape(-1))
+    audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
+    return audio[: int(REF_AUDIO_SECONDS * IN_RATE)].astype(np.float32)
+
+
+# ---------------------------------------------------------------- session
+
+
+class OmniVoiceSession(VoiceSession):
+    """A voice conversation on the local omni server, with the voice agent
+    thread of ``VoiceSession`` doing the tasks the router hands off.
+
+    The server serves one conversation at a time: a second one is refused
+    when it starts, and the platform tries again later.
+    """
+
+    NEEDS_REALTIME = False
+
+    def __init__(self, *args, omni: OmniOptions, group: bool, **kwargs) -> None:
+        """
+        Args:
+            omni: Server connection and voice settings.
+            group: Whether several people talk here (a channel) rather than
+                one person with the bot (a whisper, a call).
+            *args, **kwargs: As for ``VoiceSession``.
+        """
+        super().__init__(*args, **kwargs)
+        self.omni = omni
+        self.group = group
+        self._ws = None
+        self._track = PcmTrack()
+        self._say: list[str] = []
+        self._cut_until = 0.0
+        self._voiced_at = 0.0
+        # When the speech handed to the media so far ends playing, roughly.
+        self._playing_until = 0.0
+
+    async def _connect(self) -> None:
+        import websockets
+
+        recognizer, vad_model = await _load_recognizer(self.omni.asr_dir)
+        self._check_open()
+        utterances = Utterances(recognizer, vad_model)
+        payload: dict = {
+            "mode": "full_duplex",
+            "use_tts": True,
+            "vision": False,
+            "system_prompt": self.prompt,
+            "config": {
+                "listen_prob_scale": 1.0,
+                "force_listen_count": 0,
+                "length_penalty": 1.6,
+                "max_new_speak_tokens_per_chunk": 20,
+                "router": router_config(
+                    self.options.name,
+                    self.options.aliases,
+                    self.group,
+                    self.omni.silence_bias,
+                ),
+            },
+        }
+        if self.omni.ref_audio:
+            ref = await asyncio.to_thread(_load_ref_audio, self.omni.ref_audio)
+            payload["voice"] = {"ref_audio": base64.b64encode(ref.tobytes()).decode()}
+        self._ws = await self._wait_open(
+            websockets.connect(
+                self.omni.url, max_size=64 * 1024 * 1024, open_timeout=15
+            ),
+            20,
+        )
+        await self._ws.send(json.dumps({"type": "session.init", "payload": payload}))
+        reply = json.loads(await self._wait_open(self._ws.recv(), INIT_TIMEOUT))
+        if reply.get("type") != "session.created":
+            raise RuntimeError(f"omni server refused the session: {reply}")
+        self._phase("omni session created")
+        self._spawn(self.media.play(self._track), "outbound")
+        self._spawn(self._receive(), "receive")
+        self._spawn(self._send(utterances), "send")
+        self._spawn(self._agent_events(), "agent")
+        self.media.start()
+        self.started_at = time.monotonic()
+        self.ready = True
+        logger.info(
+            "%s omni voice session %s started in %.1fs (thread %s)",
+            self.label,
+            self.key,
+            self.started_at - self.created_at,
+            self._thread_id,
+        )
+
+    async def say(self, text: str) -> None:
+        """Has the bot speak first about ``text`` (e.g. why it placed a call):
+        the voice agent words it, the model speaks it.
+
+        Raises:
+            RuntimeError: The session is not ready.
+        """
+        if not self.ready or self._closed or self._engine is None:
+            raise RuntimeError("voice session is not ready")
+        await self._submit(OPENING_PROMPT.format(text=text))
+
+    async def _send(self, utterances: Utterances) -> None:
+        """Sends the input in real-time units of one second."""
+        resampler = av.AudioResampler(format="flt", layout="mono", rate=IN_RATE)
+        rng = np.random.default_rng()
+        buffer = np.zeros(0, np.float32)
+        while True:
+            frame = await self.media.track.recv()
+            for out in resampler.resample(frame):
+                buffer = np.concatenate([buffer, out.to_ndarray().reshape(-1)])
+            if len(buffer) < IN_RATE:
+                continue
+            unit, buffer = buffer[:IN_RATE], buffer[IN_RATE:]
+            voiced, transcript = await asyncio.to_thread(utterances.feed, unit)
+            unit = unit + rng.normal(0, DITHER, IN_RATE).astype(np.float32)
+            request: dict = {
+                "audio": base64.b64encode(unit.astype(np.float32).tobytes()).decode(),
+                "voiced": voiced,
+            }
+            if voiced:
+                self._voiced_at = time.monotonic()
+            if transcript is not None:
+                request["transcript"] = transcript
+                if transcript:
+                    self.last_transcript_at = time.monotonic()
+                    logger.debug(
+                        "%s omni voice %s heard: %s", self.label, self.key, transcript
+                    )
+            if self._say:
+                request["say"] = " ".join(self._say)
+                self._say.clear()
+            await self._ws.send(json.dumps({"type": "input.append", "input": request}))
+
+    async def _receive(self) -> None:
+        said: list[str] = []
+        try:
+            async for raw in self._ws:
+                event = json.loads(raw)
+                kind = event.get("type")
+                if kind == "response.output.delta":
+                    delta = event.get("kind")
+                    now = time.monotonic()
+                    if delta == "audio" and now >= self._cut_until:
+                        samples = np.frombuffer(
+                            base64.b64decode(event["audio"]), np.float32
+                        )
+                        self._track.put(samples)
+                        self._playing_until = (
+                            max(now, self._playing_until) + len(samples) / OUT_RATE
+                        )
+                    elif delta == "text":
+                        said.append(event.get("text") or "")
+                    elif (
+                        delta == "listen"
+                        and not self.group
+                        and now < self._playing_until
+                        and now - self._voiced_at < BARGE_IN_SECONDS
+                    ):
+                        # One to one: the model stopped because the speaker
+                        # talked over it; what is still buffered goes too.
+                        self._cut()
+                elif kind == "response.done" and said:
+                    logger.debug(
+                        "%s omni voice %s said: %s", self.label, self.key, "".join(said)
+                    )
+                    said.clear()
+                elif kind == "response.tool_call":
+                    self._on_tool_call(event)
+                elif kind == "session.closed":
+                    self._request_close(f"omni session closed: {event.get('reason')}")
+                    return
+        except Exception as exc:  # noqa: BLE001 - the connection ended
+            logger.debug(
+                "%s omni voice %s: receive ended: %s", self.label, self.key, exc
+            )
+        self._request_close("omni server connection closed")
+
+    def _on_tool_call(self, event: dict) -> None:
+        name = event.get("name") or ""
+        heard = event.get("heard") or ""
+        arguments = event.get("arguments") or {}
+        logger.info(
+            "%s omni voice %s: %s %s for %r",
+            self.label,
+            self.key,
+            name,
+            json.dumps(arguments, ensure_ascii=False) if arguments else "",
+            heard,
+        )
+        if name in ("", "reply", "silence"):
+            # A stop for silence lets what was already said play out: the
+            # model was answering something before this utterance came.
+            return
+        if event.get("interrupted"):
+            # It was answering a task itself: that answer is made up.
+            self._cut()
+        if self.omni.tool_filler:
+            self._say.append(self.omni.tool_filler)
+        task = str(arguments.get("task") or heard)
+        text = TASK_PROMPT.format(heard=heard or task, task=task)
+        self._spawn(self._submit(text), "task")
+
+    def _cut(self) -> None:
+        """Drops the speech being played and the rest of it still arriving."""
+        self._cut_until = time.monotonic() + CUT_SECONDS
+        self._playing_until = 0.0
+        self.media.flush()
+
+    async def _submit(self, text: str) -> None:
+        """Gives the voice agent thread a request; its answer is spoken by
+        ``_agent_events``. A request while another runs joins that turn."""
+        try:
+            result = await self._engine.submit_turn(
+                self._thread_id,
+                {
+                    "input": [{"type": "text", "text": text, "text_elements": []}],
+                    "mode": "start_or_steer",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, the voice goes on
+            logger.warning(
+                "%s omni voice %s: request not submitted: %s",
+                self.label,
+                self.key,
+                exc,
+            )
+            return
+        if result.get("status") == "not_submitted":
+            logger.warning(
+                "%s omni voice %s: request not accepted: %s",
+                self.label,
+                self.key,
+                result.get("reason"),
+            )
+
+    async def _agent_events(self) -> None:
+        """Speaks the voice agent's answers."""
+        while True:
+            msg = await self._events_queue.get()
+            kind = msg.get("type")
+            if kind == "agent_message" and msg.get("phase") in (None, "final_answer"):
+                if text := speakable(msg.get("message") or ""):
+                    logger.info(
+                        "%s omni voice %s: agent answered: %s",
+                        self.label,
+                        self.key,
+                        text,
+                    )
+                    self._say.append(text)
+            elif kind == "error":
+                logger.warning(
+                    "%s omni voice %s: agent error: %s",
+                    self.label,
+                    self.key,
+                    msg.get("message"),
+                )
+            elif kind == "_pump_closed":
+                self._request_close("voice thread closed")
+                return
+
+    async def _release_transport(self) -> None:
+        ws, self._ws = self._ws, None
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
+        self._track.end()

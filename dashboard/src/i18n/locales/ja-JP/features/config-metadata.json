@@ -812,6 +812,34 @@
         "description": "音声スタンバイまでの時間",
         "hint": "音声が認識されない状態がこの秒数続くとスタンバイ（リアルタイム切断）になり、新しい発話を検知すると自動で再開します。1 分以上ミュートしても切断されます。"
       },
+      "mumble_voice_backend": {
+        "description": "音声バックエンド",
+        "hint": "Codex リアルタイム：音声を含む ChatGPT サブスクリプションで Codex Agent ランナーにログインしている必要があります。ローカル MiniCPM-o：自分で用意した llama.cpp-omni サーバー（astrbot-omni ブランチ）に接続し、全二重の会話はローカルで行います。検索や操作などのタスクはモデルのツール呼び出しで音声 Agent スレッド（Codex）に渡されます。",
+        "labels": [
+          "Codex リアルタイム",
+          "ローカル MiniCPM-o"
+        ]
+      },
+      "mumble_omni_url": {
+        "description": "MiniCPM-o サーバー URL",
+        "hint": "llama-omni-server の WebSocket URL（例：ws://127.0.0.1:19060/backend）。サーバーは同時に 1 つの音声会話のみ扱います。先着順で、ほかの会話には応答しません。"
+      },
+      "mumble_omni_ref_audio": {
+        "description": "参照音声（声のクローン）",
+        "hint": "任意。ローカル音声ファイル（wav、mp3 など）のパス。ボットはこの声で話します。先頭 10 秒のみ使用し、5～10 秒の明瞭な音声を推奨します。空欄で既定の声を使います。"
+      },
+      "mumble_omni_silence_bias": {
+        "description": "チャンネルでの沈黙傾向",
+        "hint": "チャンネル音声を「ボット宛てではない」と判断する傾向（沈黙ツールのロジットバイアス）。大きいほど応答しにくくなります。既定は 4。ささやきには影響しません。"
+      },
+      "mumble_omni_tool_filler": {
+        "description": "タスク受付の返事",
+        "hint": "任意。タスクをバックエンドに渡すときに最初に話す言葉（例：「確認しますね。」）。空欄なら何も話しません。"
+      },
+      "mumble_omni_asr_dir": {
+        "description": "音声認識モデルのディレクトリ",
+        "hint": "任意。SenseVoice と Silero VAD のモデルの場所。ない場合は HuggingFace から自動ダウンロードします（ミラーは HF_ENDPOINT で指定）。空欄で data/models/sensevoice を使います。"
+      },
       "type": {
         "description": "アダプターの種類"
       },

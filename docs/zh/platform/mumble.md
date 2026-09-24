@@ -30,6 +30,16 @@ Mumble 适配器以机器人身份连接 Mumble 服务器（1.5 及以上），�
 - **闭麦 / 开麦**：在频道里发送 `唤醒前缀 + 闭麦`（或 `mute`，也可以用全局唤醒前缀），私聊里直接发 `闭麦`，机器人就不听也不说，并显示为静音；发 `开麦`（`unmute`）恢复。闭麦超过 1 分钟会断开语音会话。
 - 可配置的语音选项：`语音唤醒名` 和 `语音唤醒别名`、`音色`（juniper、maple、spruce、ember、vale、breeze、arbor、sol、cove，默认 cove）、`实时语音模型`、`语音附加提示词`、`语音 Agent 指令`。
 
+## 本地语音后端（MiniCPM-o）
+
+把 `语音后端` 设为 **本地 MiniCPM-o**，全双工对话就改由自己部署的 MiniCPM-o 4.5 完成，不需要 ChatGPT 订阅；查询、执行等任务仍交给上面的语音 Agent 线程（Codex）。
+
+- **服务端**：llama.cpp-omni 的 `astrbot-omni` 分支（在上游基础上增加了音色克隆、强制播报和工具路由），模型用 `MiniCPM-o-4_5-Q4_K_M.gguf` 加 audio / tts / token2wav 三组 GGUF。推荐的启动参数：`-ngl 99 -c 16384 -fa on -ctk q8_0 -ctv q8_0 --temp 0.7 --top-k 100 --top-p 0.8 --repeat-penalty 1.05`，并设置环境变量 `OMNI_TTS_N_CTX=4096`、`OMNI_ROUTER_CTX=2048`；使用音色克隆时还要设置 `OMNI_VOICE_BUNDLE_CMD`，指向 `tools/omni/voice/make_voice_bundle.py`（需要 `campplus.onnx`、`speech_tokenizer_v2_25hz.onnx`）。实测显存约 10.2 GB（16K 上下文），12 GB 显卡可以运行。
+- 在 `MiniCPM-o 服务地址` 填写服务端的 WebSocket 地址（如 `ws://127.0.0.1:19060/backend`）。服务端同一时间只服务一个语音会话：频道语音和私语先到先得，其余不应答。
+- **工具调用**：模型在双工模式下不会调用工具。服务端对每句话用同一个模型的文本模式做一次工具选择（Qwen3 工具格式）：`reply` 让模型直接回答；`silence` 表示这句话不是对机器人说的，模型保持沉默；`backend_task` 把任务交给语音 Agent 线程，结果由模型用自己的声音原样念出来。句子的切分和转写在 AstrBot 本地完成（Silero VAD + SenseVoice，CPU 运行，首次使用时自动下载约 240 MB 模型）。
+- `频道沉默倾向` 调节频道里“不是对机器人说的”判断倾向（默认 4，越大越不容易接话）；私语不受影响。`任务应答语` 是把任务交给后台时先说的一句话。
+- **音色克隆**：`参考音频` 填本机音频文件路径，取前 10 秒；建议 5～10 秒清晰人声。
+
 ## 代理
 
 在 Codex Agent 执行器设置里填写 `Codex 代理`（如 `socks5://127.0.0.1:7890`、`http://127.0.0.1:7890`），Codex 的全部流量都会走这个代理：模型请求、登录，以及实时语音的信令和控制连接。它不影响 AstrBot 的其他部分。
