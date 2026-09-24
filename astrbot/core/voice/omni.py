@@ -53,6 +53,9 @@ PLAYOUT_BUFFER_SECONDS = 120.0
 CUT_SECONDS = 0.6
 # The speaker counts as talking over the bot this long after speech.
 BARGE_IN_SECONDS = 1.5
+# An agent answer longer than this is cut (it is read aloud at ~5 characters
+# a second, and all of it goes into the duplex model's short context).
+MAX_SPOKEN_CHARS = 400
 
 ASR_FILES = {
     "model.int8.onnx": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
@@ -134,7 +137,7 @@ class OmniOptions:
     url: str = "ws://127.0.0.1:19060/backend"
     ref_audio: str = ""
     silence_bias: float = 4.0
-    tool_filler: str = ""
+    tool_filler: str = "好的，我查一下。"
     asr_dir: str = ""
 
 
@@ -183,14 +186,18 @@ def speakable(text: str) -> str:
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[*_`#>|]+", "", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > MAX_SPOKEN_CHARS:
+        cut = max(text.rfind(p, 0, MAX_SPOKEN_CHARS) for p in "。！？.!?")
+        text = text[: cut + 1 if cut > 0 else MAX_SPOKEN_CHARS]
+    return text
 
 
 # ---------------------------------------------------------------- speech recognition
 
 _asr_lock = threading.Lock()
 _asr_load = asyncio.Lock()
-_recognizer = None
+_recognizers: dict[Path, object] = {}  # model directory -> SenseVoice recogniser
 
 
 async def _asr_models(asr_dir: str) -> Path:
@@ -210,27 +217,31 @@ async def _asr_models(asr_dir: str) -> Path:
             continue
         logger.info("Omni voice: downloading %s", name)
         partial = path.with_suffix(path.suffix + ".part")
-        await download_file(f"{endpoint}/{repo}/resolve/main/{name}", str(partial))
+        await download_file(
+            f"{endpoint}/{repo}/resolve/main/{name}",
+            str(partial),
+            allow_insecure_ssl_fallback=False,
+        )
         partial.replace(path)
     return directory
 
 
 async def _load_recognizer(asr_dir: str):
-    """The shared SenseVoice recogniser (loaded once, used under _asr_lock)."""
-    global _recognizer
+    """The SenseVoice recogniser of a model directory, shared by sessions
+    (loaded once, used under _asr_lock)."""
     async with _asr_load:
         directory = await _asr_models(asr_dir)
-        if _recognizer is None:
+        if directory not in _recognizers:
             import sherpa_onnx
 
-            _recognizer = await asyncio.to_thread(
+            _recognizers[directory] = await asyncio.to_thread(
                 sherpa_onnx.OfflineRecognizer.from_sense_voice,
                 model=str(directory / "model.int8.onnx"),
                 tokens=str(directory / "tokens.txt"),
                 num_threads=2,
                 use_itn=True,
             )
-        return _recognizer, directory / "silero_vad.onnx"
+        return _recognizers[directory], directory / "silero_vad.onnx"
 
 
 class Utterances:
@@ -275,7 +286,11 @@ class Utterances:
                 self._recognizer.decode_stream(stream)
                 piece = stream.result.text.strip()
             if start - self._last_end < self.JOIN_SECONDS * IN_RATE:
-                piece = self._last_text + piece
+                last = self._last_text
+                spaced = (
+                    last[-1:].isascii() and last[-1:].isalnum() and piece[:1].isascii()
+                )
+                piece = last + (" " if spaced else "") + piece
             self._last_text, self._last_end = piece, start + len(samples)
             text = piece
         return voiced, text
@@ -355,6 +370,7 @@ class OmniVoiceSession(VoiceSession):
         self._ws = None
         self._track = PcmTrack()
         self._say: list[str] = []
+        self._say_cancel = False
         self._cut_until = 0.0
         self._voiced_at = 0.0
         # When the speech handed to the media so far ends playing, roughly.
@@ -363,8 +379,10 @@ class OmniVoiceSession(VoiceSession):
     async def _connect(self) -> None:
         import websockets
 
-        recognizer, vad_model = await _load_recognizer(self.omni.asr_dir)
-        self._check_open()
+        # A first use downloads the models (~240 MB); a close stops that.
+        recognizer, vad_model = await self._wait_open(
+            _load_recognizer(self.omni.asr_dir), 1800
+        )
         utterances = Utterances(recognizer, vad_model)
         payload: dict = {
             "mode": "full_duplex",
@@ -390,7 +408,12 @@ class OmniVoiceSession(VoiceSession):
             payload["voice"] = {"ref_audio": base64.b64encode(ref.tobytes()).decode()}
         self._ws = await self._wait_open(
             websockets.connect(
-                self.omni.url, max_size=64 * 1024 * 1024, open_timeout=15
+                self.omni.url,
+                max_size=64 * 1024 * 1024,
+                open_timeout=15,
+                # The server answers pings only between inputs, not while it
+                # loads models or builds a voice for session.init.
+                ping_interval=None,
             ),
             20,
         )
@@ -427,6 +450,17 @@ class OmniVoiceSession(VoiceSession):
 
     async def _send(self, utterances: Utterances) -> None:
         """Sends the input in real-time units of one second."""
+        try:
+            await self._send_units(utterances)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported, the session ends
+            logger.warning(
+                "%s omni voice %s: sending failed: %s", self.label, self.key, exc
+            )
+            self._request_close(f"omni send failed: {exc}")
+
+    async def _send_units(self, utterances: Utterances) -> None:
         resampler = av.AudioResampler(format="flt", layout="mono", rate=IN_RATE)
         rng = np.random.default_rng()
         buffer = np.zeros(0, np.float32)
@@ -452,59 +486,87 @@ class OmniVoiceSession(VoiceSession):
                     logger.debug(
                         "%s omni voice %s heard: %s", self.label, self.key, transcript
                     )
-            if self._say:
+                    if not self.group and time.monotonic() < self._playing_until:
+                        # One to one: a whole sentence over the bot's answer
+                        # (forced speech, which the model does not stop for).
+                        self._cut()
+            if self._say_cancel:
+                request["say_cancel"] = True
+                self._say_cancel = False
+            # After a cut, speech waits until what is still arriving from the
+            # cut speech has been dropped (it is dropped by time).
+            if self._say and time.monotonic() >= self._cut_until:
                 request["say"] = " ".join(self._say)
                 self._say.clear()
             await self._ws.send(json.dumps({"type": "input.append", "input": request}))
 
     async def _receive(self) -> None:
+        import websockets
+
         said: list[str] = []
         try:
             async for raw in self._ws:
-                event = json.loads(raw)
-                kind = event.get("type")
-                if kind == "response.output.delta":
-                    delta = event.get("kind")
-                    now = time.monotonic()
-                    if delta == "audio" and now >= self._cut_until:
-                        samples = np.frombuffer(
-                            base64.b64decode(event["audio"]), np.float32
-                        )
-                        self._track.put(samples)
-                        self._playing_until = (
-                            max(now, self._playing_until) + len(samples) / OUT_RATE
-                        )
-                    elif delta == "text":
-                        said.append(event.get("text") or "")
-                    elif (
-                        delta == "listen"
-                        and not self.group
-                        and now < self._playing_until
-                        and now - self._voiced_at < BARGE_IN_SECONDS
-                    ):
-                        # One to one: the model stopped because the speaker
-                        # talked over it; what is still buffered goes too.
-                        self._cut()
-                elif kind == "response.done" and said:
-                    logger.debug(
-                        "%s omni voice %s said: %s", self.label, self.key, "".join(said)
+                try:
+                    self._on_event(json.loads(raw), said)
+                except Exception as exc:  # noqa: BLE001 - one bad event
+                    logger.warning(
+                        "%s omni voice %s: bad server event skipped: %s",
+                        self.label,
+                        self.key,
+                        exc,
                     )
-                    said.clear()
-                elif kind == "response.tool_call":
-                    self._on_tool_call(event)
-                elif kind == "session.closed":
-                    self._request_close(f"omni session closed: {event.get('reason')}")
+                if self._closed:
                     return
-        except Exception as exc:  # noqa: BLE001 - the connection ended
+        except websockets.ConnectionClosed as exc:
             logger.debug(
-                "%s omni voice %s: receive ended: %s", self.label, self.key, exc
+                "%s omni voice %s: connection closed: %s", self.label, self.key, exc
             )
         self._request_close("omni server connection closed")
+
+    def _on_event(self, event: dict, said: list[str]) -> None:
+        kind = event.get("type")
+        if kind == "response.output.delta":
+            delta = event.get("kind")
+            now = time.monotonic()
+            if delta == "audio" and now >= self._cut_until:
+                samples = np.frombuffer(base64.b64decode(event["audio"]), np.float32)
+                self._track.put(samples)
+                self._playing_until = (
+                    max(now, self._playing_until) + len(samples) / OUT_RATE
+                )
+            elif delta == "text":
+                said.append(event.get("text") or "")
+            elif (
+                delta == "listen"
+                and not self.group
+                and now < self._playing_until
+                and now - self._voiced_at < BARGE_IN_SECONDS
+            ):
+                # One to one: the model stopped because the speaker talked
+                # over it; what is still buffered goes too.
+                self._cut()
+        elif kind == "response.done" and said:
+            logger.debug(
+                "%s omni voice %s said: %s", self.label, self.key, "".join(said)
+            )
+            said.clear()
+        elif kind == "response.tool_call":
+            self._on_tool_call(event)
+        elif kind == "session.closed":
+            self._request_close(f"omni session closed: {event.get('reason')}")
 
     def _on_tool_call(self, event: dict) -> None:
         name = event.get("name") or ""
         heard = event.get("heard") or ""
         arguments = event.get("arguments") or {}
+        if isinstance(arguments, str):
+            # Some generations quote the arguments object.
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                arguments = {"task": arguments}
+        if not isinstance(arguments, dict):
+            arguments = {}
         logger.info(
             "%s omni voice %s: %s %s for %r",
             self.label,
@@ -527,9 +589,12 @@ class OmniVoiceSession(VoiceSession):
         self._spawn(self._submit(text), "task")
 
     def _cut(self) -> None:
-        """Drops the speech being played and the rest of it still arriving."""
+        """Drops the speech being played, the rest of it still arriving and
+        what the server has not spoken yet."""
         self._cut_until = time.monotonic() + CUT_SECONDS
         self._playing_until = 0.0
+        self._say.clear()
+        self._say_cancel = True
         self.media.flush()
 
     async def _submit(self, text: str) -> None:
@@ -585,6 +650,11 @@ class OmniVoiceSession(VoiceSession):
                 return
 
     async def _release_transport(self) -> None:
+        # Sending and receiving stop before the socket closes under them.
+        current = asyncio.current_task()
+        for task in self._tasks:
+            if task is not current:
+                task.cancel()
         ws, self._ws = self._ws, None
         if ws is not None:
             with contextlib.suppress(Exception):

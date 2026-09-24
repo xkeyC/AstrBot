@@ -191,13 +191,18 @@ class MumblePlatformAdapter(Platform):
         self.voice_backend = str(cfg.get("mumble_voice_backend") or "codex_realtime")
         from astrbot.core.voice.omni import OmniOptions
 
+        try:
+            silence_bias = float(cfg.get("mumble_omni_silence_bias"))
+        except (TypeError, ValueError):
+            silence_bias = OmniOptions.silence_bias
         self.omni_options = OmniOptions(
             url=str(cfg.get("mumble_omni_url") or OmniOptions.url).strip(),
             ref_audio=str(cfg.get("mumble_omni_ref_audio") or "").strip(),
-            silence_bias=float(
-                cfg.get("mumble_omni_silence_bias", OmniOptions.silence_bias)
+            silence_bias=silence_bias,
+            # Empty on purpose means no acknowledgement.
+            tool_filler=str(
+                cfg.get("mumble_omni_tool_filler", OmniOptions.tool_filler) or ""
             ),
-            tool_filler=str(cfg.get("mumble_omni_tool_filler") or ""),
             asr_dir=str(cfg.get("mumble_omni_asr_dir") or "").strip(),
         )
         self.voice_sessions: dict[str, Any] = {}  # key -> VoiceSession

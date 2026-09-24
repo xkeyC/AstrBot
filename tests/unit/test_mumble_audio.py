@@ -198,3 +198,17 @@ def test_mixer_jitter_buffer():
     assert mixer.pull() is None  # ran dry: buffers up again
     mixer.feed(1, packets[5], True)  # the end of the transmission
     assert mixer.pull() is not None  # no waiting once it ended
+
+
+def test_media_playout_buffer_and_flush():
+    from astrbot.core.platform.sources.mumble.audio import (
+        MAX_QUEUED_FRAMES,
+        MumbleMedia,
+    )
+
+    assert MumbleMedia(lambda f, t: None).outbound.max_queued == MAX_QUEUED_FRAMES
+    media = MumbleMedia(lambda f, t: None, buffer_seconds=120)
+    assert media.outbound.max_queued == 6000  # 20 ms frames
+    media.outbound._queue.extend([(b"x", True)] * 10)
+    media.flush()
+    assert not media.outbound._queue

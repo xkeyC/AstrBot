@@ -281,3 +281,117 @@ async def test_send_units_with_voice_flags_transcripts_and_speech():
     assert second["voiced"] is False and second["transcript"] == "小乐，几点了"
     assert "say" not in second
     assert session.last_transcript_at > 0
+
+
+def test_speakable_bounds_long_answers():
+    text = "第一句话。" * 200
+    out = omni.speakable(text)
+    assert len(out) <= omni.MAX_SPOKEN_CHARS and out.endswith("。")
+
+
+@pytest.mark.asyncio
+async def test_string_arguments_are_understood():
+    session = make_session()
+    session._on_tool_call(
+        {"name": "backend_task", "arguments": '{"task": "查天气"}', "heard": "x"}
+    )
+    session._on_tool_call({"name": "backend_task", "arguments": "查新闻", "heard": "y"})
+    session._on_tool_call({"name": "backend_task", "arguments": 3, "heard": "z"})
+    await asyncio.gather(*session._tasks)
+    texts = [t["input"][0]["text"] for t in session._engine.turns]
+    assert "查天气" in texts[0] and "查新闻" in texts[1] and "z" in texts[2]
+
+
+@pytest.mark.asyncio
+async def test_a_bad_event_is_skipped_not_fatal():
+    session = make_session()
+    session._ws = FakeWs(
+        [
+            {"type": "response.output.delta", "kind": "audio"},  # no audio
+            audio_event(0.5),
+        ]
+    )
+    await session._receive()
+    assert session._track._queue.qsize() == 1  # the good one still played
+
+
+@pytest.mark.asyncio
+async def test_a_cut_cancels_pending_speech_and_holds_new_speech():
+    session = make_session()
+    session._say = ["旧答案"]
+    session._cut()
+    assert session._say == [] and session._say_cancel
+    assert session.media.calls == ["flush"]
+    session._ws = FakeWs()
+    session._say.append("好的，我查一下。")
+    send = asyncio.create_task(session._send(FakeUtterances([(False, None)] * 3)))
+    await asyncio.wait_for(session._ws.wait_sent(1), 5)
+    first = session._ws.sent[0]["input"]
+    assert first["say_cancel"] is True and "say" not in first  # held back
+    session._cut_until = 0.0
+    await asyncio.wait_for(session._ws.wait_sent(2), 5)
+    send.cancel()
+    assert session._ws.sent[1]["input"]["say"] == "好的，我查一下。"
+
+
+@pytest.mark.asyncio
+async def test_send_failure_closes_the_session():
+    class Broken:
+        def feed(self, unit):
+            raise RuntimeError("asr broke")
+
+    session = make_session()
+    session._ws = FakeWs()
+    await session._send(Broken())
+    assert session.closing
+
+
+def test_utterance_pieces_join_with_a_space_between_words():
+    class Vad:
+        def __init__(self, segments):
+            self.segments = segments
+
+        def accept_waveform(self, samples):
+            pass
+
+        def is_speech_detected(self):
+            return False
+
+        def empty(self):
+            return not self.segments
+
+        @property
+        def front(self):
+            return self.segments[0]
+
+        def pop(self):
+            self.segments.pop(0)
+
+    class Segment:
+        def __init__(self, start, text):
+            self.start, self.samples, self.text = start, [0.0] * 8000, text
+
+    class Recognizer:
+        def create_stream(self):
+            class Stream:
+                def accept_waveform(inner, rate, samples):
+                    pass
+
+            return Stream()
+
+        def decode_stream(self, stream):
+            stream.result = type("R", (), {"text": self.next})()
+
+    utt = omni.Utterances.__new__(omni.Utterances)
+    utt._recognizer = Recognizer()
+    utt._last_text, utt._last_end = "", -(10**9)
+    unit = np.zeros(16000, np.float32)
+    for start, text, want in (
+        (0, "hello", "hello"),
+        (16000, "how are you", "hello how are you"),
+        (32000, "小乐", "hello how are you小乐"),
+        (200000, "你好", "你好"),  # long after: a new utterance
+    ):
+        utt._vad = Vad([Segment(start, text)])
+        utt._recognizer.next = text
+        assert utt.feed(unit) == (False, want)
