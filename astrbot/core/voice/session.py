@@ -166,6 +166,8 @@ class VoiceOptions:
     aliases: list[str]
     voice: str = ""
     model: str = ""
+    # Appended to the voice model's prompt unless the paired chat's persona
+    # has a voice persona.
     extra_prompt: str = ""
     # Realtime media over the peer's ICE-TCP candidate even without a proxy:
     # no packet loss on lossy paths, at the cost of latency spikes (which a
@@ -327,6 +329,12 @@ class VoiceSession:
         raise asyncio.TimeoutError
 
     async def _start(self) -> None:
+        # The voice persona of the paired chat's persona, or the platform's
+        # extra prompt, completes the voice model's instructions.
+        extra = await self.chat.voice_persona() or self.options.extra_prompt
+        self._check_open()
+        if extra:
+            self.prompt = f"{self.prompt}\n\n{extra}"
         await self._open_agent()
         await self._connect()
 

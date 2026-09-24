@@ -193,13 +193,14 @@ def router_config(name: str, aliases: list[str], group: bool, bias: float) -> di
     }
 
 
-def duplex_prompt(name: str, extra: str, speaker: str = "") -> str:
-    prompt = (
+def duplex_prompt(name: str, speaker: str = "") -> str:
+    """The omni model's system prompt; the session appends the voice persona
+    (or the platform's extra prompt) when it starts."""
+    return (
         DUPLEX_PRIVATE_PROMPT.format(name=name, speaker=speaker)
         if speaker
         else DUPLEX_GROUP_PROMPT.format(name=name)
     )
-    return f"{prompt}\n{extra}" if extra else prompt
 
 
 def takes_floor(text: str, names: list[str] | None = None) -> bool:

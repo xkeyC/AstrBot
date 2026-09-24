@@ -60,6 +60,9 @@ class FakeChat:
     def busy(self) -> bool:
         return self.is_busy
 
+    async def voice_persona(self) -> str:
+        return ""
+
     async def ask(self, body: str) -> str | None:
         self.asked.append(body)
         return self.answer
@@ -129,9 +132,8 @@ def test_router_config_group_and_private():
 
 
 def test_duplex_prompt():
-    assert "多人语音频道" in omni.duplex_prompt("小乐", "")
-    one = omni.duplex_prompt("小乐", "说话温柔一点", "alice")
-    assert "alice" in one and one.endswith("说话温柔一点")
+    assert "多人语音频道" in omni.duplex_prompt("小乐")
+    assert "alice" in omni.duplex_prompt("小乐", "alice")
 
 
 def test_speakable_strips_markup():

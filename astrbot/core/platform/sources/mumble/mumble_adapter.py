@@ -500,10 +500,10 @@ class MumblePlatformAdapter(Platform):
         from .voice import channel_prompt, whisper_prompt
 
         local = self.voice_backend == "minicpm_omni"
-        name, extra = self.voice_options.name, self.voice_options.extra_prompt
+        name = self.voice_options.name
         if key == SERVER_SESSION:
             prompt = (
-                omni.duplex_prompt(name, extra)
+                omni.duplex_prompt(name)
                 if local
                 else channel_prompt(self.voice_options)
             )
@@ -516,7 +516,7 @@ class MumblePlatformAdapter(Platform):
             if len(whispers) >= MAX_WHISPER_SESSIONS:
                 return None
             prompt = (
-                omni.duplex_prompt(name, extra, user.name)
+                omni.duplex_prompt(name, user.name)
                 if local
                 else whisper_prompt(self.voice_options, user.name)
             )

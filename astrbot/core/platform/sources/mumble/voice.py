@@ -24,16 +24,12 @@ def channel_prompt(options: VoiceOptions) -> str:
         if aliases
         else f' "{options.name}"'
     )
+    # The voice persona or the platform's extra prompt is appended by the
+    # session when it starts.
     prompt = CHANNEL_PROMPT.format(name=options.name, aliases=alias_text)
-    prompt += "\n\n" + time_prompt()
-    if options.extra_prompt:
-        prompt += "\n\n" + options.extra_prompt
-    return prompt
+    return prompt + "\n\n" + time_prompt()
 
 
 def whisper_prompt(options: VoiceOptions, speaker: str) -> str:
     prompt = WHISPER_PROMPT.format(name=options.name, speaker=speaker)
-    prompt += "\n\n" + time_prompt()
-    if options.extra_prompt:
-        prompt += "\n\n" + options.extra_prompt
-    return prompt
+    return prompt + "\n\n" + time_prompt()

@@ -62,3 +62,45 @@ def test_busy_follows_the_chats_active_turn(monkeypatch):
     assert not chat.busy()
     monkeypatch.setitem(native.ACTIVE_TURNS, "qq:FriendMessage:1", object())
     assert chat.busy()
+
+
+class FakeConversations:
+    async def get_curr_conversation_id(self, umo):
+        return "c1"
+
+    async def get_conversation(self, umo, conversation_id):
+        class Conversation:
+            persona_id = "pirate"
+
+        return Conversation()
+
+
+class FakePersonas:
+    def __init__(self) -> None:
+        self.asked = None
+
+    async def resolve_selected_persona(self, **kwargs):
+        self.asked = kwargs
+        persona = {"name": "pirate", "voice_prompt": "  Speak like a pirate.  "}
+        return "pirate", persona, None, False
+
+
+@pytest.mark.asyncio
+async def test_voice_persona_comes_from_the_chats_persona(monkeypatch):
+    ctx = FakeContext()
+    ctx.conversation_manager = FakeConversations()
+    ctx.persona_manager = FakePersonas()
+    monkeypatch.setattr(star_context, "_current", ctx)
+    chat = VoiceChat(umo="qq:FriendMessage:42", private=True)
+    assert await chat.voice_persona() == "Speak like a pirate."
+    assert ctx.persona_manager.asked["conversation_persona_id"] == "pirate"
+    assert ctx.persona_manager.asked["umo"] == "qq:FriendMessage:42"
+
+
+@pytest.mark.asyncio
+async def test_no_voice_persona_when_it_cannot_be_resolved(monkeypatch):
+    ctx = FakeContext()  # no managers: resolution fails
+    monkeypatch.setattr(star_context, "_current", ctx)
+    assert (
+        await VoiceChat(umo="qq:FriendMessage:42", private=True).voice_persona() == ""
+    )

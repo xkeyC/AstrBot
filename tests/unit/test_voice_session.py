@@ -69,11 +69,15 @@ class FakeChat:
         self.asked: list[str] = []
         self.answer: str | None = "It is three."
         self.is_busy = False
+        self.persona = ""
         self.release = asyncio.Event()
         self.release.set()
 
     def busy(self) -> bool:
         return self.is_busy
+
+    async def voice_persona(self) -> str:
+        return self.persona
 
     async def ask(self, body: str) -> str | None:
         self.asked.append(body)
@@ -371,3 +375,30 @@ def test_close_stops_the_media(engine):
 
     asyncio.run(run())
     assert media.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_the_voice_persona_completes_the_prompt(engine, monkeypatch):
+    for persona, extra, expected in (
+        ("Speak like a pirate.", "platform extra", "p\n\nSpeak like a pirate."),
+        ("", "platform extra", "p\n\nplatform extra"),
+        ("", "", "p"),
+    ):
+        session = VoiceSession(
+            key="k",
+            scope_id="s",
+            prompt="p",
+            options=VoiceOptions(name="n", aliases=[], extra_prompt=extra),
+            media=MumbleMedia(lambda frame, end: None),
+            on_closed=lambda s: None,
+            chat=FakeChat(),
+        )
+        session.chat.persona = persona
+
+        async def stop_here():
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr(session, "_open_agent", stop_here)
+        with pytest.raises(RuntimeError):
+            await session._start()
+        assert session.prompt == expected

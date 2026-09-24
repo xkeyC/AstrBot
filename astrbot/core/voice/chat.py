@@ -59,6 +59,42 @@ class VoiceChat:
 
         return self.umo in ACTIVE_TURNS
 
+    async def voice_persona(self) -> str:
+        """The voice persona of the chat's active persona: short instructions
+        for the voice model, or empty when there are none.
+
+        The persona is resolved as for the chat's turns (a persona forced on
+        the session, else the conversation's, else the configured default).
+        """
+        from astrbot.core.star.context import current_context
+
+        ctx = current_context()
+        if ctx is None:
+            return ""
+        try:
+            conversation_id = await ctx.conversation_manager.get_curr_conversation_id(
+                self.umo
+            )
+            conversation = (
+                await ctx.conversation_manager.get_conversation(
+                    self.umo, conversation_id
+                )
+                if conversation_id
+                else None
+            )
+            _, persona, _, _ = await ctx.persona_manager.resolve_selected_persona(
+                umo=self.umo,
+                conversation_persona_id=conversation.persona_id
+                if conversation
+                else None,
+                platform_name=self.umo.split(":", 1)[0],
+                provider_settings=ctx.get_config(umo=self.umo),
+            )
+        except Exception as exc:  # noqa: BLE001 - the platform default applies
+            logger.warning("Voice: persona of %s not resolved: %s", self.umo, exc)
+            return ""
+        return str((persona or {}).get("voice_prompt") or "").strip()
+
     async def ask(self, body: str) -> str | None:
         """Runs ``body`` as a turn of the chat and returns the answer.
 
