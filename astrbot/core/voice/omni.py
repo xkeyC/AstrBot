@@ -56,9 +56,19 @@ BARGE_IN_SECONDS = 1.5
 # A task handed off within this long of the last one gets no second
 # acknowledgement (one request often arrives as two utterances).
 FILLER_GAP_SECONDS = 8.0
-# Utterances that only show the speaker is listening; they do not take the
-# floor from the bot.
-BACKCHANNEL = set("嗯啊哦噢哎诶唉呃额对好是行")
+# Utterances made only of these show the speaker is listening; they do not
+# take the floor from the bot (longest first when matching).
+BACKCHANNELS = sorted(
+    {
+        *"嗯啊哦噢哎诶唉呃额对好是行哈嘿呵嗷",
+        *("好的", "是的", "对的", "好吧", "行吧", "明白", "明白了", "知道了"),
+        *("可以", "没错", "没问题", "有道理", "原来如此", "这样啊"),
+        *("ok", "okay", "yeah", "yes", "yep", "yup", "uh", "huh", "um", "mm"),
+        *("hmm", "mhm", "right", "sure", "gotit", "isee", "cool", "nice"),
+    },
+    key=len,
+    reverse=True,
+)
 
 # An agent answer longer than this is cut (it is read aloud at ~5 characters
 # a second, and all of it goes into the duplex model's short context).
@@ -198,12 +208,18 @@ def takes_floor(text: str, names: list[str] | None = None) -> bool:
 
     Returns:
         With ``names``, whether one of them is said; otherwise whether it is
-        more than a backchannel ("嗯", "对对", "好的", a cough).
+        more than backchannels ("嗯", "对对", "好的", "okay", laughter, a cough).
     """
     if names is not None:
-        return any(name and name in text for name in names)
-    core = [ch for ch in text if ch.isalnum() and ch not in BACKCHANNEL]
-    return len(core) >= 3
+        lowered = text.lower()
+        return any(name and name.lower() in lowered for name in names)
+    rest = "".join(ch for ch in text.lower() if ch.isalnum())
+    while rest:
+        word = next((w for w in BACKCHANNELS if rest.startswith(w)), None)
+        if word is None:
+            return len(rest) >= 2
+        rest = rest[len(word) :]
+    return False
 
 
 def speakable(text: str) -> str:
@@ -355,15 +371,16 @@ class PcmTrack(MediaStreamTrack):
         return frame
 
 
-_ref_audio_cache: dict[tuple[str, float], np.ndarray] = {}
+_ref_audio_cache: dict[tuple[str, int, int], np.ndarray] = {}
 
 
 def _load_ref_audio(path: str) -> np.ndarray:
     """The first REF_AUDIO_SECONDS of a recording, 16 kHz mono float32
     (decoded once per file version)."""
-    key = (path, os.path.getmtime(path))
-    if key in _ref_audio_cache:
-        return _ref_audio_cache[key]
+    stat = os.stat(path)
+    key = (path, stat.st_size, stat.st_mtime_ns)
+    if (cached := _ref_audio_cache.get(key)) is not None:
+        return cached
     limit = int(REF_AUDIO_SECONDS * IN_RATE)
     resampler = av.AudioResampler(format="flt", layout="mono", rate=IN_RATE)
     chunks, total = [], 0
@@ -374,6 +391,9 @@ def _load_ref_audio(path: str) -> np.ndarray:
                 total += chunks[-1].size
             if total >= limit:
                 break
+        else:
+            for out in resampler.resample(None):  # the resampler's tail
+                chunks.append(out.to_ndarray().reshape(-1))
     audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
     audio = audio[:limit].astype(np.float32)
     _ref_audio_cache.clear()  # one reference voice at a time is typical
@@ -414,6 +434,8 @@ class OmniVoiceSession(VoiceSession):
         self._task_at = 0.0
         # When the speech handed to the media so far ends playing, roughly.
         self._playing_until = 0.0
+        # The server is producing speech (audio or text since its last listen).
+        self._server_speaking = False
 
     async def _connect(self) -> None:
         import websockets
@@ -584,6 +606,8 @@ class OmniVoiceSession(VoiceSession):
         if kind == "response.output.delta":
             delta = event.get("kind")
             now = time.monotonic()
+            if delta in ("audio", "text"):
+                self._server_speaking = True
             if delta == "audio" and now >= self._cut_until:
                 samples = np.frombuffer(base64.b64decode(event["audio"]), np.float32)
                 self._track.put(samples)
@@ -592,16 +616,20 @@ class OmniVoiceSession(VoiceSession):
                 )
             elif delta == "text":
                 said.append(event.get("text") or "")
-            elif (
-                delta == "listen"
-                and not self.group
-                and now < self._playing_until
-                and now - self._voiced_at < BARGE_IN_SECONDS
-            ):
-                # One to one: the model stopped because the speaker talked
-                # over it; what it had still to say goes too (answers waiting
-                # to be spoken are kept: a backchannel may have stopped it).
-                self._cut()
+            elif delta == "listen":
+                stopped = self._server_speaking
+                self._server_speaking = False
+                if (
+                    stopped
+                    and not self.group
+                    and now < self._playing_until
+                    and now - self._voiced_at < BARGE_IN_SECONDS
+                ):
+                    # One to one: the model stopped speaking because the
+                    # speaker talked over it; what it had still to say goes
+                    # too (answers waiting to be spoken are kept: a
+                    # backchannel may have stopped it).
+                    self._cut()
         elif kind == "response.done" and said:
             logger.debug(
                 "%s omni voice %s said: %s", self.label, self.key, "".join(said)
@@ -655,7 +683,10 @@ class OmniVoiceSession(VoiceSession):
                 server has not said yet, answers waiting here): the speaker
                 talked over the bot and moved on.
         """
-        self._cut_until = time.monotonic() + CUT_SECONDS
+        if self._server_speaking:
+            # Still producing it: what arrives in a moment is from it too.
+            # (Otherwise the next audio is a new reply, not to be dropped.)
+            self._cut_until = time.monotonic() + CUT_SECONDS
         self._playing_until = 0.0
         if pending:
             self._say.clear()

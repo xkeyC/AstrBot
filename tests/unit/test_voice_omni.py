@@ -318,6 +318,7 @@ async def test_a_bad_event_is_skipped_not_fatal():
 @pytest.mark.asyncio
 async def test_a_cut_cancels_pending_speech_and_holds_new_speech():
     session = make_session()
+    session._server_speaking = True  # what arrives next is from the cut speech
     session._say = ["结果"]
     session._cut()  # a router stop keeps what is still to be spoken
     assert session._say == ["结果"] and not session._say_cancel
@@ -401,13 +402,24 @@ def test_utterance_pieces_join_with_a_space_between_words():
 
 
 def test_takes_floor():
-    for text in ("嗯", "嗯嗯。", "对对对", "好的", "是啊", "咳"):
+    for text in ("嗯", "嗯嗯。", "对对对", "好的", "是啊", "咳", "哈哈哈"):
         assert not omni.takes_floor(text), text
-    for text in ("别说了", "等一下，我问个事", "stop talking"):
+    for text in (
+        "明白了",
+        "没错没错",
+        "可以可以",
+        "Okay.",
+        "yeah yeah",
+        "uh huh",
+        "mm-hmm",
+    ):
+        assert not omni.takes_floor(text), text
+    for text in ("别说了", "等一下，我问个事", "stop talking", "停下"):
         assert omni.takes_floor(text), text
-    names = ["小乐", "晓乐"]
+    names = ["小乐", "晓乐", "", None]
     assert not omni.takes_floor("老王你别说了", names)
     assert omni.takes_floor("晓乐，别说了", names)
+    assert omni.takes_floor("hey JARVIS stop", ["Jarvis"])
 
 
 @pytest.mark.asyncio
@@ -496,3 +508,27 @@ async def test_a_close_during_start_leaves_no_connection(monkeypatch):
         await session._connect()
     assert Server.closed
     assert session._tasks == [] and not session.ready
+
+
+@pytest.mark.asyncio
+async def test_listen_cuts_only_when_speech_stops():
+    for events, cut in (
+        # Speech ended long ago, its audio still playing: a listen (every
+        # unit while listening) is no barge-in.
+        ([{"type": "response.output.delta", "kind": "listen"}], False),
+        # Speaking, then listening while the speaker talks: cut.
+        ([audio_event(2.0), {"type": "response.output.delta", "kind": "listen"}], True),
+    ):
+        session = make_session(group=False)
+        session._voiced_at = omni.time.monotonic()
+        session._playing_until = omni.time.monotonic() + 30
+        session._ws = FakeWs(events)
+        await session._receive()
+        assert ("flush" in session.media.calls) is cut
+
+
+def test_a_cut_after_the_server_finished_keeps_the_next_reply():
+    session = make_session()
+    session._server_speaking = False
+    session._cut(pending=True)
+    assert session._cut_until == 0.0  # the next audio is a new reply
