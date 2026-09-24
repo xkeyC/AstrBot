@@ -7776,6 +7776,9 @@
           },
           "custom_error_message": {
             "type": "string"
+          },
+          "voice_prompt": {
+            "type": "string"
           }
         },
         "additionalProperties": true

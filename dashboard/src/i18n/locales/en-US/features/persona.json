@@ -26,6 +26,8 @@
     "systemPrompt": "System Prompt",
     "customErrorMessage": "Custom Error Reply Message (Optional)",
     "customErrorMessageHelp": "When this persona's LLM request fails (for example, connection failures), this error reply is sent first. Leave empty to use the default error message.",
+    "voicePrompt": "Voice Persona (Optional)",
+    "voicePromptHelp": "Optional. Short instructions for the model that listens and speaks in voice conversations (speaking style, how to address people, tone, etc.). Leave empty to use the platform's default voice prompt; background tasks still use the full persona above.",
     "presetDialogs": "Preset Dialogs",
     "presetDialogsHelp": "Add some preset dialogs to help the bot better understand the role settings. The number of dialogs must be even (users and assistants take turns).",
     "userMessage": "User Message",

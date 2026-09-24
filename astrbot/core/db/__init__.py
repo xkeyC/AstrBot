@@ -449,6 +449,7 @@ class BaseDatabase(abc.ABC):
         tools: list[str] | None = None,
         skills: list[str] | None = None,
         custom_error_message: str | None = None,
+        voice_prompt: str | None = None,
         folder_id: str | None = None,
         sort_order: int = 0,
     ) -> Persona:
@@ -461,6 +462,7 @@ class BaseDatabase(abc.ABC):
             tools: Optional list of tool names (None means all tools, [] means no tools)
             skills: Optional list of skill names (None means all skills, [] means no skills)
             custom_error_message: Optional persona-level fallback error message
+            voice_prompt: Optional short instructions for the voice model
             folder_id: Optional folder ID to place the persona in (None means root)
             sort_order: Sort order within the folder (default 0)
         """
@@ -485,6 +487,7 @@ class BaseDatabase(abc.ABC):
         tools: list[str] | None | object = NOT_GIVEN,
         skills: list[str] | None | object = NOT_GIVEN,
         custom_error_message: str | None | object = NOT_GIVEN,
+        voice_prompt: str | None | object = NOT_GIVEN,
     ) -> Persona | None:
         """Update a persona record.
 
@@ -495,6 +498,7 @@ class BaseDatabase(abc.ABC):
             tools: Tool names, None for all tools, or NOT_GIVEN to leave unchanged.
             skills: Skill names, None for all skills, or NOT_GIVEN to leave unchanged.
             custom_error_message: Custom fallback message, None to clear, or NOT_GIVEN to leave unchanged.
+            voice_prompt: Voice model instructions, None to clear, or NOT_GIVEN to leave unchanged.
 
         Returns:
             Updated persona, or None when no fields were updated.

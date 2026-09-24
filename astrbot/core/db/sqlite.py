@@ -95,6 +95,7 @@ class SQLiteDatabase(BaseDatabase):
             await self._ensure_persona_folder_columns(conn)
             await self._ensure_persona_skills_column(conn)
             await self._ensure_persona_custom_error_message_column(conn)
+            await self._ensure_persona_voice_prompt_column(conn)
             await self._ensure_platform_message_history_checkpoint_column(conn)
             await self._ensure_chatui_project_workspace_columns(conn)
             await self._ensure_conversation_indexes(conn)
@@ -164,6 +165,20 @@ class SQLiteDatabase(BaseDatabase):
         if "custom_error_message" not in columns:
             await conn.execute(
                 text("ALTER TABLE personas ADD COLUMN custom_error_message TEXT")
+            )
+
+    async def _ensure_persona_voice_prompt_column(self, conn) -> None:
+        """Ensure the personas table has the voice_prompt column.
+
+        Args:
+            conn: Active SQLAlchemy connection used during SQLite initialization.
+        """
+        result = await conn.execute(text("PRAGMA table_info(personas)"))
+        columns = {row[1] for row in result.fetchall()}
+
+        if "voice_prompt" not in columns:
+            await conn.execute(
+                text("ALTER TABLE personas ADD COLUMN voice_prompt TEXT")
             )
 
     async def _ensure_platform_message_history_checkpoint_column(self, conn) -> None:
@@ -1219,6 +1234,7 @@ class SQLiteDatabase(BaseDatabase):
         tools=None,
         skills=None,
         custom_error_message=None,
+        voice_prompt=None,
         folder_id=None,
         sort_order=0,
     ):
@@ -1233,6 +1249,7 @@ class SQLiteDatabase(BaseDatabase):
                     tools=tools,
                     skills=skills,
                     custom_error_message=custom_error_message,
+                    voice_prompt=voice_prompt,
                     folder_id=folder_id,
                     sort_order=sort_order,
                 )
@@ -1265,6 +1282,7 @@ class SQLiteDatabase(BaseDatabase):
         tools=NOT_GIVEN,
         skills=NOT_GIVEN,
         custom_error_message=NOT_GIVEN,
+        voice_prompt=NOT_GIVEN,
     ):
         """Update a persona's system prompt or begin dialogs."""
         async with self.get_db() as session:
@@ -1282,6 +1300,8 @@ class SQLiteDatabase(BaseDatabase):
                     values["skills"] = skills
                 if custom_error_message is not NOT_GIVEN:
                     values["custom_error_message"] = custom_error_message
+                if voice_prompt is not NOT_GIVEN:
+                    values["voice_prompt"] = voice_prompt
                 if not values:
                     return None
                 query = query.values(**values)

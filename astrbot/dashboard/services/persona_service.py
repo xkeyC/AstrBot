@@ -49,8 +49,11 @@ class PersonaService:
         begin_dialogs = payload.get("begin_dialogs", [])
         tools = payload.get("tools")
         skills = payload.get("skills")
-        custom_error_message = self._normalize_custom_error_message(
-            payload.get("custom_error_message")
+        custom_error_message = self._normalize_optional_text(
+            payload.get("custom_error_message"), "自定义报错回复信息必须是字符串"
+        )
+        voice_prompt = self._normalize_optional_text(
+            payload.get("voice_prompt"), "语音人格必须是字符串"
         )
         folder_id = payload.get("folder_id")
         sort_order = payload.get("sort_order", 0)
@@ -69,6 +72,7 @@ class PersonaService:
             tools=tools,
             skills=skills,
             custom_error_message=custom_error_message,
+            voice_prompt=voice_prompt,
             folder_id=folder_id,
             sort_order=sort_order,
         )
@@ -89,13 +93,19 @@ class PersonaService:
         skills = payload.get("skills")
         has_custom_error_message = "custom_error_message" in payload
         custom_error_message = payload.get("custom_error_message")
+        has_voice_prompt = "voice_prompt" in payload
+        voice_prompt = payload.get("voice_prompt")
 
         if not persona_id:
             raise PersonaServiceError("缺少必要参数: persona_id")
 
         if has_custom_error_message:
-            custom_error_message = self._normalize_custom_error_message(
-                custom_error_message
+            custom_error_message = self._normalize_optional_text(
+                custom_error_message, "自定义报错回复信息必须是字符串"
+            )
+        if has_voice_prompt:
+            voice_prompt = self._normalize_optional_text(
+                voice_prompt, "语音人格必须是字符串"
             )
 
         if begin_dialogs is not None:
@@ -112,6 +122,8 @@ class PersonaService:
             update_kwargs["skills"] = skills
         if has_custom_error_message:
             update_kwargs["custom_error_message"] = custom_error_message
+        if has_voice_prompt:
+            update_kwargs["voice_prompt"] = voice_prompt
 
         await self.persona_mgr.update_persona(**update_kwargs)
         return {"message": "人格更新成功"}
@@ -243,6 +255,7 @@ class PersonaService:
             if empty_lists_for_tools
             else persona.skills,
             "custom_error_message": persona.custom_error_message,
+            "voice_prompt": persona.voice_prompt,
             "folder_id": persona.folder_id,
             "sort_order": persona.sort_order,
             "created_at": persona.created_at.isoformat()
@@ -266,10 +279,22 @@ class PersonaService:
         }
 
     @staticmethod
-    def _normalize_custom_error_message(value):
+    def _normalize_optional_text(value, type_error: str):
+        """Strip an optional text field, turning blank strings into None.
+
+        Args:
+            value: Raw field value from the request payload.
+            type_error: Error message raised when the value is not a string.
+
+        Returns:
+            The stripped string, or None when the value is missing or blank.
+
+        Raises:
+            PersonaServiceError: If the value is neither None nor a string.
+        """
         if value is not None:
             if not isinstance(value, str):
-                raise PersonaServiceError("自定义报错回复信息必须是字符串")
+                raise PersonaServiceError(type_error)
             return value.strip() or None
         return None
 

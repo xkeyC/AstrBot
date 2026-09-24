@@ -486,6 +486,7 @@ export type PersonaRequest = {
     tools?: Array<(string)>;
     skills?: Array<(string)>;
     custom_error_message?: string;
+    voice_prompt?: string;
     [key: string]: unknown | string;
 };
 

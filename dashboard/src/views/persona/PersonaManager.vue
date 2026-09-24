@@ -234,6 +234,13 @@
             }}</pre>
           </div>
 
+          <div v-if="viewingPersona.voice_prompt" class="mb-4">
+            <h4 class="text-h6 mb-2">{{ tm("form.voicePrompt") }}</h4>
+            <pre class="system-prompt-content">{{
+              viewingPersona.voice_prompt
+            }}</pre>
+          </div>
+
           <div
             v-if="
               viewingPersona.begin_dialogs &&
@@ -516,6 +523,7 @@ interface Persona {
   persona_id: string;
   system_prompt: string;
   custom_error_message?: string | null;
+  voice_prompt?: string | null;
   begin_dialogs?: string[] | null;
   tools?: string[] | null;
   skills?: string[] | null;

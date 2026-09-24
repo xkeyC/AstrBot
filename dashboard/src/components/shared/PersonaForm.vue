@@ -59,6 +59,17 @@
                 clearable
                 class="mb-4"
               />
+
+              <v-textarea
+                v-model="personaForm.voice_prompt"
+                :label="tm('form.voicePrompt')"
+                :hint="tm('form.voicePromptHelp')"
+                variant="outlined"
+                rows="4"
+                persistent-hint
+                clearable
+                class="mb-4"
+              />
             </v-col>
 
             <v-col cols="12" md="6" class="persona-panels-col">
@@ -221,6 +232,7 @@ const personaForm = reactive({
   persona_id: "",
   system_prompt: "",
   custom_error_message: "",
+  voice_prompt: "",
   begin_dialogs: [],
   tools: null,
   skills: null,
@@ -255,6 +267,7 @@ function initializeForm(persona = null) {
     persona_id: persona?.persona_id || "",
     system_prompt: persona?.system_prompt || "",
     custom_error_message: persona?.custom_error_message || "",
+    voice_prompt: persona?.voice_prompt || "",
     begin_dialogs: [...(persona?.begin_dialogs || [])],
     tools:
       persona?.tools === null || !persona ? null : [...(persona.tools || [])],

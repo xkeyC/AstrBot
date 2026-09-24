@@ -14,6 +14,7 @@ DEFAULT_PERSONALITY = Personality(
     tools=None,
     skills=None,
     custom_error_message=None,
+    voice_prompt=None,
     _begin_dialogs_processed=[],
     _mood_imitation_dialogs_processed="",
 )
@@ -158,6 +159,7 @@ class PersonaManager:
         tools: list[str] | None | object = NOT_GIVEN,
         skills: list[str] | None | object = NOT_GIVEN,
         custom_error_message: str | None | object = NOT_GIVEN,
+        voice_prompt: str | None | object = NOT_GIVEN,
     ):
         """更新指定 persona 的信息。tools 参数为 None 时表示使用所有工具，空列表表示不使用任何工具"""
         existing_persona = await self.db.get_persona_by_id(persona_id)
@@ -170,6 +172,8 @@ class PersonaManager:
             update_kwargs["skills"] = skills
         if custom_error_message is not NOT_GIVEN:
             update_kwargs["custom_error_message"] = custom_error_message
+        if voice_prompt is not NOT_GIVEN:
+            update_kwargs["voice_prompt"] = voice_prompt
 
         persona = await self.db.update_persona(
             persona_id,
@@ -336,6 +340,7 @@ class PersonaManager:
         tools: list[str] | None = None,
         skills: list[str] | None = None,
         custom_error_message: str | None = None,
+        voice_prompt: str | None = None,
         folder_id: str | None = None,
         sort_order: int = 0,
     ) -> Persona:
@@ -347,6 +352,8 @@ class PersonaManager:
             begin_dialogs: 预设对话列表
             tools: 工具列表，None 表示使用所有工具，空列表表示不使用任何工具
             skills: Skills 列表，None 表示使用所有 Skills，空列表表示不使用任何 Skills
+            custom_error_message: 可选的自定义报错回复信息
+            voice_prompt: 可选的语音人格（语音模型使用的精简指令）
             folder_id: 所属文件夹 ID，None 表示根目录
             sort_order: 排序顺序
         """
@@ -359,6 +366,7 @@ class PersonaManager:
             tools=tools,
             skills=skills,
             custom_error_message=custom_error_message,
+            voice_prompt=voice_prompt,
             folder_id=folder_id,
             sort_order=sort_order,
         )
@@ -394,6 +402,7 @@ class PersonaManager:
             tools=source_persona.tools,
             skills=source_persona.skills,
             custom_error_message=source_persona.custom_error_message,
+            voice_prompt=source_persona.voice_prompt,
             folder_id=source_persona.folder_id,
             sort_order=source_persona.sort_order,
         )
@@ -421,6 +430,7 @@ class PersonaManager:
                 "tools": persona.tools,
                 "skills": persona.skills,
                 "custom_error_message": persona.custom_error_message,
+                "voice_prompt": persona.voice_prompt,
             }
             for persona in self.personas
         ]
@@ -478,6 +488,7 @@ class PersonaManager:
             tools=selected_default_persona["tools"] or None,
             skills=selected_default_persona["skills"] or None,
             custom_error_message=selected_default_persona["custom_error_message"],
+            voice_prompt=selected_default_persona["voice_prompt"],
         )
 
         return v3_persona_config, personas_v3, selected_default_persona

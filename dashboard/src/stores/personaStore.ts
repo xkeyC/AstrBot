@@ -20,6 +20,7 @@ export interface Persona {
   persona_id: string;
   system_prompt: string;
   custom_error_message: string | null;
+  voice_prompt: string | null;
   begin_dialogs: string[];
   tools: string[] | null;
   skills: string[] | null;

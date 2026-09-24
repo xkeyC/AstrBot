@@ -483,6 +483,7 @@ class FakePersonaManager:
         tools: list[str] | None = None,
         skills: list[str] | None = None,
         custom_error_message: str | None = None,
+        voice_prompt: str | None = None,
         folder_id: str | None = None,
         sort_order: int = 0,
     ) -> SimpleNamespace:
@@ -493,6 +494,7 @@ class FakePersonaManager:
             tools=tools,
             skills=skills,
             custom_error_message=custom_error_message,
+            voice_prompt=voice_prompt,
             folder_id=folder_id,
             sort_order=sort_order,
             created_at=None,
@@ -542,7 +544,10 @@ class FakePersonaManager:
     async def update_persona(self, persona_id: str, **kwargs) -> None:
         persona = self.personas[persona_id]
         for key, value in kwargs.items():
-            if key in ("tools", "skills", "custom_error_message") or value is not None:
+            if (
+                key in ("tools", "skills", "custom_error_message", "voice_prompt")
+                or value is not None
+            ):
                 setattr(persona, key, value)
 
     async def delete_persona(self, persona_id: str) -> None:
@@ -3878,6 +3883,67 @@ async def test_v1_persona_create_preserves_explicit_empty_tools_and_skills(
     persona = fake_core_lifecycle.persona_mgr.personas[persona_id]
     assert persona.tools == []
     assert persona.skills == []
+
+
+@pytest.mark.asyncio
+async def test_v1_persona_voice_prompt_round_trip(
+    asgi_client: httpx.AsyncClient,
+    fake_core_lifecycle,
+):
+    persona_id = "persona-voice"
+    headers = _jwt_headers()
+
+    create_response = await asgi_client.post(
+        "/api/v1/personas",
+        json={
+            "persona_id": persona_id,
+            "system_prompt": "Full persona.",
+            "custom_error_message": "  Sorry.  ",
+            "voice_prompt": "  Speak softly.  ",
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 200
+    created = create_response.json()["data"]["persona"]
+    assert created["voice_prompt"] == "Speak softly."
+    assert created["custom_error_message"] == "Sorry."
+
+    detail_response = await asgi_client.get(
+        "/api/v1/personas/by-id",
+        params={"persona_id": persona_id},
+        headers=headers,
+    )
+    assert detail_response.status_code == 200
+    assert detail_response.json()["data"]["voice_prompt"] == "Speak softly."
+
+    persona = fake_core_lifecycle.persona_mgr.personas[persona_id]
+
+    # Omitting the field leaves it unchanged.
+    response = await asgi_client.put(
+        "/api/v1/personas/by-id",
+        json={"persona_id": persona_id, "system_prompt": "Updated persona."},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert persona.voice_prompt == "Speak softly."
+
+    response = await asgi_client.put(
+        "/api/v1/personas/by-id",
+        json={"persona_id": persona_id, "voice_prompt": " Be brief. "},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert persona.voice_prompt == "Be brief."
+
+    # A blank value clears the field.
+    response = await asgi_client.put(
+        "/api/v1/personas/by-id",
+        json={"persona_id": persona_id, "voice_prompt": "   "},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert persona.voice_prompt is None
+    assert persona.custom_error_message == "Sorry."
 
 
 @pytest.mark.asyncio

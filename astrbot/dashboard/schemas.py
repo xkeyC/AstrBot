@@ -337,6 +337,7 @@ class PersonaRequest(OpenModel):
     tools: list[str] | None = None
     skills: list[str] | None = None
     custom_error_message: str | None = None
+    voice_prompt: str | None = None
     folder_id: str | None = None
     sort_order: int | None = None
 
