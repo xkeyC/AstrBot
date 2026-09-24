@@ -135,7 +135,7 @@ ROUTER_GROUP = """你是语音助手"{name}"的决策模块。你收到的是多
 ROUTER_PRIVATE = """你是语音助手"{name}"的决策模块。{name}正在和一个人一对一语音聊天，你收到的是对方最新一句话的转写（可能有识别错误）。
 
 根据这句话选择一种处理方式：
-- 没有需要回应的内容（只有"嗯""啊"之类的语气词、咳嗽、背景声音）：调用 silence。
+- 没有需要回应的内容（只有"嗯""啊"之类的语气词、咳嗽、背景声音），或者是在和别人说话（叫的是别人的名字）：调用 silence。
 {tasks}
 
 示例：
@@ -144,8 +144,21 @@ ROUTER_PRIVATE = """你是语音助手"{name}"的决策模块。{name}正在和�
 "帮我把这首歌加到收藏" -> backend_task，task："把当前播放的歌曲加入收藏"
 "你觉得猫可爱还是狗可爱？" -> reply
 "三十七乘以四等于多少？" -> reply（能直接算出来）
+"那明天要带伞吗？"（后台信息里有"明天小雨"）-> reply（已经知道）
+"查到了吗？" -> backend_task，task："询问进度：查询比特币价格"
+"老王，你那边打完了没有？" -> silence（在和老王说话）
 
 {tools}"""
+# One to one the router also sees the context notes (results the model
+# already knows): what they answer is a reply, and a progress question goes
+# to the backend, whose real status is spoken (a progress note makes the
+# model invent results).
+ROUTER_CONTEXT_RULES = """但如果"{name}已经知道的后台信息"里已经有回答这句话需要的内容，就调用 reply，不要再交给后台。问后台任务进度的（"好了吗""查到了吗"）调用 backend_task，task 写"询问进度："加上那个任务。后台信息只用来判断能不能直接回答，不要因为有后台信息就选 backend_task。"""
+ROUTER_PRIVATE_INPUT = """{name}已经知道的后台信息：
+{{context}}
+对方刚说：{{heard}}"""
+# Router tasks asking about progress start with this.
+PROGRESS_TASK = "询问进度"
 
 # Spoken while a task waits for the paired chat's turn, and when it fails.
 BUSY_SPEECH = "我这边还在忙前面的事，稍等一下。"
@@ -172,12 +185,13 @@ def router_config(name: str, aliases: list[str], group: bool, bias: float) -> di
         else "没有需要回应的内容，保持沉默。",
     )
     template = ROUTER_GROUP if group else ROUTER_PRIVATE
-    system = template.format(
-        name=name,
-        aliases=alias_text,
-        tasks=ROUTER_TASKS.format(name=name),
-        tools=tools,
-    )
+    tasks = ROUTER_TASKS.format(name=name)
+    if not group:
+        tasks = tasks.replace(
+            "这些一律用 backend_task。",
+            "这些一律用 backend_task。" + ROUTER_CONTEXT_RULES.format(name=name),
+        )
+    system = template.format(name=name, aliases=alias_text, tasks=tasks, tools=tools)
     return {
         "tools": ["silence", "reply", "backend_task"],
         # Unaddressed chatter still reads as a question to the model: the
@@ -189,7 +203,10 @@ def router_config(name: str, aliases: list[str], group: bool, bias: float) -> di
         # Utterances end with the transcripts sent from here (Utterances).
         "client_transcripts": True,
         "transcribe_prompt": "请仔细听这段音频片段，并将其内容逐字记录。",
-        "user_template": "{heard}",
+        "user_template": "{heard}" if group else ROUTER_PRIVATE_INPUT.format(name=name),
+        # Stands for {context} while there are no notes; never empty (an
+        # empty one halves the router's backend_task accuracy).
+        "context_empty": "（无）",
         "system": system,
     }
 
@@ -275,6 +292,20 @@ async def _asr_models(asr_dir: str) -> Path:
         )
         partial.replace(path)
     return directory
+
+
+# Model loads by directory; shared, and not cancelled with the session that
+# started them (a first download may take longer than a caller waits).
+_loads: dict[str, asyncio.Task] = {}
+
+
+def _recognizer(asr_dir: str) -> asyncio.Future:
+    """The (shared) load of ``asr_dir``'s models, awaited shielded."""
+    task = _loads.get(asr_dir)
+    if task is None or (task.done() and (task.cancelled() or task.exception())):
+        task = asyncio.create_task(_load_recognizer(asr_dir))
+        _loads[asr_dir] = task
+    return asyncio.shield(task)
 
 
 async def _load_recognizer(asr_dir: str):
@@ -442,6 +473,8 @@ class OmniVoiceSession(VoiceSession):
         self._track = PcmTrack()
         self._say: list[str] = []
         self._say_cancel = False
+        # Context notes for the next unit: (text, announce).
+        self._notes: list[tuple[str, bool]] = []
         self._cut_until = 0.0
         self._speaking_for = 0.0  # how long the speaker has been talking
         self._barge_until = 0.0  # the model stopped: talked over if speech goes on
@@ -456,9 +489,10 @@ class OmniVoiceSession(VoiceSession):
     async def _connect(self) -> None:
         import websockets
 
-        # A first use downloads the models (~240 MB); a close stops that.
+        # A first use downloads the models (~240 MB); it goes on if this
+        # session is closed meanwhile, for the next one.
         recognizer, vad_model = await self._wait_open(
-            _load_recognizer(self.omni.asr_dir), 1800
+            _recognizer(self.omni.asr_dir), 1800
         )
         utterances = Utterances(recognizer, vad_model)
         payload: dict = {
@@ -532,7 +566,8 @@ class OmniVoiceSession(VoiceSession):
         """
         if not self.ready or self._closed:
             raise RuntimeError("voice session is not ready")
-        self._ask(OPENING_BODY.format(purpose=text))
+        # The answer is the words to open with: spoken as given.
+        self._ask(OPENING_BODY.format(purpose=text), self._say_answer, keep=False)
 
     async def _open_agent(self) -> None:
         """Nothing to open: tasks go to the paired chat, and the omni server
@@ -597,6 +632,12 @@ class OmniVoiceSession(VoiceSession):
             if self._say and now >= self._cut_until and now >= self._barge_until:
                 request["say"] = " ".join(self._say)
                 self._say.clear()
+            if self._notes:
+                # Written into the model's context (not spoken) once it is not
+                # speaking; with announce it then tells them in its own words.
+                request["context"] = "\n".join(text for text, _ in self._notes)
+                request["announce"] = any(announce for _, announce in self._notes)
+                self._notes.clear()
             await self._ws.send(json.dumps({"type": "input.append", "input": request}))
 
     async def _receive(self) -> None:
@@ -651,6 +692,14 @@ class OmniVoiceSession(VoiceSession):
             said.clear()
         elif kind == "response.tool_call":
             self._on_tool_call(event)
+        elif kind == "response.context":
+            logger.debug(
+                "%s omni voice %s: context note written (%s tokens, announce=%s)",
+                self.label,
+                self.key,
+                event.get("tokens"),
+                event.get("announce"),
+            )
         elif kind == "session.closed":
             self._request_close(f"omni session closed: {event.get('reason')}")
 
@@ -684,7 +733,11 @@ class OmniVoiceSession(VoiceSession):
             return
         now = time.monotonic()
         task = str(arguments.get("task") or heard)
-        busy = self._ask(TASK_BODY.format(heard=heard or task, task=task))
+        body = TASK_BODY.format(heard=heard or task, task=task)
+        # A progress answer is spoken as given: in a context note the model
+        # would make up the result.
+        progress = task.startswith(PROGRESS_TASK)
+        busy = self._ask(body, self._say_answer if progress else None)
         # One acknowledgement for a request that came in pieces: none for a
         # piece following the last one closely.
         if now - self._task_at > FILLER_GAP_SECONDS:
@@ -729,7 +782,18 @@ class OmniVoiceSession(VoiceSession):
         self.media.flush()
 
     async def _tell(self, answer: str | None) -> None:
-        """Speaks a request's answer (None: it failed)."""
+        """Gives the model a request's answer as a context note it tells in
+        its own words (None: it failed, said as such)."""
+        if answer is None or not answer.strip():
+            await self._say_answer(answer)
+            return
+        logger.info("%s omni voice %s: chat answered: %s", self.label, self.key, answer)
+        self._notes.append((answer.strip(), True))
+
+    async def _say_answer(self, answer: str | None) -> None:
+        """Speaks an answer as given (the opening words, a progress status)."""
+        if self._closed:
+            return
         if answer is None:
             text = FAILED_SPEECH
         else:
@@ -738,14 +802,10 @@ class OmniVoiceSession(VoiceSession):
         self._say.append(text)
 
     async def note(self, text: str) -> None:
-        """A result that reached the chat later (see ``VoiceSession.note``).
-
-        The hook for a context note the duplex model decides on (whether and
-        how to tell it); until the server takes such notes it is spoken
-        verbatim, like an answer.
-        """
-        if not self._closed and (spoken := speakable(text)):
-            self._say.append(spoken)
+        """A result that reached the chat later (see ``VoiceSession.note``):
+        a context note the model tells in its own words when nobody talks."""
+        if not self._closed and text.strip():
+            self._notes.append((text.strip(), True))
 
     async def _release_transport(self) -> None:
         # Sending and receiving stop before the socket closes under them.

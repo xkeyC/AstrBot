@@ -163,8 +163,10 @@ async def test_backend_task_is_handed_off_with_a_filler():
         }
     )
     await settle()
-    # The filler, then the paired chat's answer.
-    assert session._say == ["好的，我查一下。", "答案"]
+    # The filler is said; the paired chat's answer becomes a context note
+    # the model tells in its own words.
+    assert session._say == ["好的，我查一下。"]
+    assert session._notes == [("答案", True)]
     assert session.media.calls == ["flush"]  # its own answer was made up
     (text,) = session.chat.asked
     assert "查询当前时间" in text and "小乐，现在几点了？" in text
@@ -176,7 +178,8 @@ async def test_a_busy_chat_is_announced_instead_of_the_filler():
     session.chat.is_busy = True
     session._on_tool_call({"name": "backend_task", "arguments": {"task": "查天气"}})
     await settle()
-    assert session._say == [omni.BUSY_SPEECH, "答案"]
+    assert session._say == [omni.BUSY_SPEECH]
+    assert session._notes == [("答案", True)]
 
 
 @pytest.mark.asyncio
@@ -205,7 +208,7 @@ async def test_no_filler_when_not_configured():
     session = make_session(filler="")
     session._on_tool_call({"name": "backend_task", "arguments": {}, "heard": "查天气"})
     await settle()
-    assert session._say == ["答案"]
+    assert session._say == [] and session._notes == [("答案", True)]
     assert "查天气" in session.chat.asked[0]
 
 
@@ -253,17 +256,29 @@ async def test_barge_in_cuts_only_one_to_one():
 @pytest.mark.asyncio
 async def test_chat_answers_are_spoken():
     session = make_session()
-    session.chat.answer = "现在是**下午三点**。"
-    await session._tell(session.chat.answer)
+    await session._tell("现在是下午三点。")
     await session._tell("")  # done, nothing to say
-    assert session._say == ["现在是下午三点。", omni.DONE_SPEECH]
+    await session._tell(None)  # failed
+    assert session._notes == [("现在是下午三点。", True)]
+    assert session._say == [omni.DONE_SPEECH, omni.FAILED_SPEECH]
 
 
 @pytest.mark.asyncio
-async def test_a_note_is_spoken_until_the_server_takes_notes():
+async def test_a_progress_answer_is_spoken_as_given():
+    session = make_session(filler="")
+    session.chat.answer = "还在查，大约**十秒**。"
+    session._on_tool_call(
+        {"name": "backend_task", "arguments": {"task": "询问进度：查询比特币价格"}}
+    )
+    await settle()
+    assert session._say == ["还在查，大约十秒。"] and session._notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_later_result_is_a_context_note_to_announce():
     session = make_session()
-    await session.note("**备份**完成了")
-    assert session._say == ["备份完成了"]
+    await session.note("备份完成了")
+    assert session._notes == [("备份完成了", True)] and session._say == []
 
 
 @pytest.mark.asyncio
@@ -501,7 +516,8 @@ async def test_one_acknowledgement_for_a_request_in_two_pieces():
     for heard in ("帮我查天气", "北京的"):
         session._on_tool_call({"name": "backend_task", "arguments": {"task": heard}})
     await settle()
-    assert session._say == ["好的，我查一下。", "答案", "答案"]
+    assert session._say == ["好的，我查一下。"]
+    assert session._notes == [("答案", True), ("答案", True)]
     assert len(session.chat.asked) == 2
 
 
@@ -698,3 +714,50 @@ async def test_answers_wait_while_a_barge_in_may_be_decided():
     await asyncio.wait_for(session._ws.wait_sent(2), 5)
     send.cancel()
     assert session._ws.sent[1]["input"]["say"] == "答案"
+
+
+def test_private_router_sees_the_context_notes():
+    private = omni.router_config("小乐", [], False, 0.0)
+    assert "{context}" in private["user_template"]
+    assert "{heard}" in private["user_template"]
+    assert private["context_empty"] == "（无）"
+    assert "询问进度" in private["system"]
+    group = omni.router_config("小乐", [], True, 4.0)
+    assert group["user_template"] == "{heard}"
+
+
+@pytest.mark.asyncio
+async def test_a_model_load_is_shared_and_outlives_its_caller(monkeypatch):
+    started = []
+    gate = asyncio.Event()
+
+    async def load(asr_dir):
+        started.append(asr_dir)
+        await gate.wait()
+        return "recognizer", "vad"
+
+    monkeypatch.setattr(omni, "_load_recognizer", load)
+    monkeypatch.setattr(omni, "_loads", {})
+    waiter = asyncio.ensure_future(omni._recognizer("d"))
+    await asyncio.sleep(0)
+    waiter.cancel()  # the session gave up (closed, timed out)
+    gate.set()
+    assert await omni._recognizer("d") == ("recognizer", "vad")
+    assert started == ["d"]  # one load, not restarted
+
+
+@pytest.mark.asyncio
+async def test_an_omni_session_takes_results_reaching_its_chat(monkeypatch):
+    session = make_session()
+
+    async def nothing():
+        return None
+
+    monkeypatch.setattr(session, "_open_agent", nothing)
+    monkeypatch.setattr(session, "_connect", nothing)
+    await session._start()
+    assert chat_module.VOICE_SESSIONS[session.chat.umo] is session
+    session.ready = True
+    assert await chat_module.announce(session.chat.umo, "备份完成了")
+    assert session._notes == [("备份完成了", True)]
+    chat_module.VOICE_SESSIONS.pop(session.chat.umo)

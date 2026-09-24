@@ -209,7 +209,7 @@ async def test_a_handoff_is_answered_by_the_chat_and_spoken(engine):
     await settle()
     (body,) = session.chat.asked
     assert "look up the time" in body and "what time is it" in body
-    assert engine.rt.calls == ["speech:It is three."]
+    assert engine.rt.calls == ['speech:Answer to "look up the time": It is three.']
 
 
 @pytest.mark.asyncio
@@ -227,7 +227,10 @@ async def test_a_busy_chat_is_announced_and_requests_keep_their_order(engine):
     session.chat.release.set()
     await settle()
     assert [b.split("Task: ")[1] for b in session.chat.asked] == ["first", "second"]
-    assert engine.rt.calls[2:] == ["speech:It is three."] * 2
+    assert engine.rt.calls[2:] == [
+        'speech:Answer to "first": It is three.',
+        'speech:Answer to "second": It is three.',
+    ]
 
 
 @pytest.mark.asyncio

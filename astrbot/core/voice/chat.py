@@ -121,9 +121,12 @@ class VoiceChat:
         self._open += 1
 
         async def run() -> None:
+            answer = None
             try:
                 async with self._order:
                     answer = await self.ask(body)
+            except Exception as exc:  # noqa: BLE001 - answered as failed
+                logger.warning("Voice: request to %s failed: %s", self.umo, exc)
             finally:
                 self._open -= 1
             await on_answer(answer)
@@ -177,6 +180,7 @@ class VoiceChat:
             return ""
         try:
             event = self._event(ctx, "")
+            # The rules as the chat's turns read them (codex_request).
             policy = policy_for_event(event, astrbot_config.get(CONFIG_KEY) or [])
             if policy.persona_id:
                 event.set_selected_persona(policy.persona_id)
@@ -224,15 +228,16 @@ class VoiceChat:
             logger.warning("Voice: no core context, a request is not answered")
             return None
         sender_name = self.sender_name if self.private else VOICE_SENDER_NAME
+        text = body
+        while "</voice_request>" in text:
+            text = text.replace("</voice_request>", "")
         prompt = REQUEST_PROMPT.format(
-            via=_attribute(self.via),
-            speaker=_attribute(sender_name),
-            body=body.replace("</voice_request>", ""),
+            via=_attribute(self.via), speaker=_attribute(sender_name), body=text
         )
-        # The event carries what was asked (a task created now quotes it);
-        # the turn gets it wrapped.
-        event = self._event(ctx, body)
         try:
+            # The event carries what was asked (a task created now quotes
+            # it); the turn gets it wrapped.
+            event = self._event(ctx, body)
             answer = await run_turn_in_session(
                 ctx, event, ctx.get_config(umo=self.umo), prompt
             )

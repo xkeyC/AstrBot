@@ -347,6 +347,9 @@ class VoiceSession:
             self.prompt = f"{self.prompt}\n\n{extra}"
         await self._open_agent()
         await self._connect()
+        self._check_open()
+        # Results reaching the chat later are given to this conversation.
+        VOICE_SESSIONS[self.chat.umo] = self
 
     async def _open_agent(self) -> None:
         """Opens (or resumes) the thread carrying the realtime conversation
@@ -479,7 +482,6 @@ class VoiceSession:
         self.media.start()
         self.started_at = time.monotonic()
         self.ready = True
-        VOICE_SESSIONS[self.chat.umo] = self
         logger.info(
             "%s voice session %s started in %.1fs (thread %s)",
             self.label,
@@ -561,27 +563,43 @@ class VoiceSession:
         )
         task = str(handoff.get("input_transcript") or heard)
         logger.info("%s voice %s: handoff %r", self.label, self.key, task)
-        if self._ask(TASK_BODY.format(heard=heard or task, task=task)):
+
+        async def tell(answer: str | None) -> None:
+            # A later handoff may be pending by now: say what this answers.
+            if answer:
+                answer = f'Answer to "{task}": {answer}'
+            await self._tell(answer)
+
+        if self._ask(TASK_BODY.format(heard=heard or task, task=task), tell):
             self._spawn(self._speak(BUSY_SPEECH), "busy")
 
-    def _ask(self, body: str) -> bool:
+    def _ask(self, body: str, tell=None, keep: bool = True) -> bool:
         """Hands ``body`` to the paired chat (in order, outliving this
-        session); the answer comes to ``_answered``.
+        session); the answer goes to ``tell`` (default ``_tell``).
+
+        Args:
+            body: The request.
+            tell: Gets the answer while this conversation is on.
+            keep: Deliver the answer elsewhere if the conversation ended
+                (not for words only meant for it, like an opening).
 
         Returns:
             Whether it waits behind other work.
         """
         self._pending += 1
-        return self.chat.request(body, self._answered)
+        tell = tell or self._tell
 
-    async def _answered(self, answer: str | None) -> None:
-        self._pending -= 1
-        self.last_answer_at = time.monotonic()
-        if self._closed:
-            # The conversation ended meanwhile: the answer is not lost.
-            await deliver(self.chat.umo, answer or "")
-            return
-        await self._tell(answer)
+        async def answered(answer: str | None) -> None:
+            self._pending -= 1
+            self.last_answer_at = time.monotonic()
+            if self._closed:
+                # The conversation ended meanwhile: the answer is not lost.
+                if keep:
+                    await deliver(self.chat.umo, answer or "")
+                return
+            await tell(answer)
+
+        return self.chat.request(body, answered)
 
     async def _tell(self, answer: str | None) -> None:
         """Gives the voice model a request's answer (None: it failed)."""
@@ -684,12 +702,13 @@ class VoiceSession:
         if engine is not None and thread_id is not None and not self._thread_released:
             self._thread_released = True
             pump = engine.pumps.get(thread_id)
-            if (
-                pump is not None
-                and pump.route is not None
-                and pump.route.events is self._events_queue
-            ):
+            route = pump.route if pump is not None else None
+            if route is not None and route.events is self._events_queue:
                 pump.close_turn()
+            elif route is not None:
+                # A newer session of this key resumed the thread meanwhile
+                # (a quick call back): it is theirs now.
+                return
             # Unload the thread; the next session resumes it from its rollout.
             async with engine.session_lock(self.scope_id):
                 await engine.forget_thread(thread_id)
