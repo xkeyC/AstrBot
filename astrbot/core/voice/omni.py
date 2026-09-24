@@ -101,6 +101,7 @@ ROUTER_GROUP = """你是语音助手"{name}"的决策模块。你收到的是多
 "{name}，帮我把这首歌加到收藏" -> backend_task，task："把当前播放的歌曲加入收藏"
 "{name}，你觉得猫可爱还是狗可爱？" -> reply
 "{name}，用英语怎么说谢谢？" -> reply
+"{name}，三十七乘以四等于多少？" -> reply（能直接算出来）
 
 {tools}"""
 
@@ -115,6 +116,7 @@ ROUTER_PRIVATE = """你是语音助手"{name}"的决策模块。{name}正在和�
 "今天几号？" -> backend_task，task："查询今天的日期"
 "帮我把这首歌加到收藏" -> backend_task，task："把当前播放的歌曲加入收藏"
 "你觉得猫可爱还是狗可爱？" -> reply
+"三十七乘以四等于多少？" -> reply（能直接算出来）
 
 {tools}"""
 
@@ -372,7 +374,8 @@ class OmniVoiceSession(VoiceSession):
             "config": {
                 "listen_prob_scale": 1.0,
                 "force_listen_count": 0,
-                "length_penalty": 1.6,
+                # Longer answers run on past the next question.
+                "length_penalty": 1.2,
                 "max_new_speak_tokens_per_chunk": 20,
                 "router": router_config(
                     self.options.name,
