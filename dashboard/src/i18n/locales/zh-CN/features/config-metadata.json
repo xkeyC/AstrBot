@@ -794,10 +794,6 @@
         "description": "语音附加提示词",
         "hint": "追加给实时语音模型的说明，例如说话风格。"
       },
-      "mumble_voice_agent_instructions": {
-        "description": "语音 Agent 指令",
-        "hint": "可选。替换语音 Agent 线程（处理语音中交办的任务）的系统指令。"
-      },
       "mumble_voice_idle_timeout": {
         "description": "语音待机时间",
         "hint": "连续多少秒没有识别到语音就进入待机（断开实时语音），检测到新的人声时自动恢复。闭麦超过 1 分钟也会断开。"

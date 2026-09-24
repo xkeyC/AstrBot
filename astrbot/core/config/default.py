@@ -560,7 +560,6 @@ CONFIG_METADATA_2 = {
                         "mumble_voice_voice": "",
                         "mumble_voice_model": "",
                         "mumble_voice_prompt": "",
-                        "mumble_voice_agent_instructions": "",
                         "mumble_voice_idle_timeout": 300,
                         "mumble_voice_backend": "codex_realtime",
                         "mumble_omni_url": "ws://127.0.0.1:19060/backend",
@@ -940,11 +939,6 @@ CONFIG_METADATA_2 = {
                         "description": "语音附加提示词",
                         "type": "text",
                         "hint": "追加给实时语音模型的说明，例如说话风格。",
-                    },
-                    "mumble_voice_agent_instructions": {
-                        "description": "语音 Agent 指令",
-                        "type": "text",
-                        "hint": "可选。替换语音 Agent 线程（处理语音中交办的任务）的系统指令。",
                     },
                     "mumble_voice_idle_timeout": {
                         "description": "语音待机时间",

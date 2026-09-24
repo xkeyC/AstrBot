@@ -49,21 +49,20 @@ class FakeMedia:
         self.calls.append("flush")
 
 
-class FakeEngine:
+class FakeChat:
+    """The paired chat: records requests, answers each with ``answer``."""
+
     def __init__(self) -> None:
-        self.turns: list[dict] = []
-        self.pumps: dict = {}
-        self.forgotten: list[str] = []
+        self.asked: list[str] = []
+        self.answer: str | None = "答案"
+        self.is_busy = False
 
-    def session_lock(self, _scope):
-        return asyncio.Lock()
+    def busy(self) -> bool:
+        return self.is_busy
 
-    async def forget_thread(self, thread_id):
-        self.forgotten.append(thread_id)
-
-    async def submit_turn(self, thread_id, request):
-        self.turns.append(request)
-        return {"status": "started", "turn_id": "turn"}
+    async def ask(self, body: str) -> str | None:
+        self.asked.append(body)
+        return self.answer
 
 
 class FakeWs:
@@ -103,9 +102,8 @@ def make_session(
         options=VoiceOptions(name="小乐", aliases=["晓乐"]),
         media=FakeMedia(),
         on_closed=lambda _s: None,
+        chat=FakeChat(),
     )
-    session._engine = FakeEngine()
-    session._thread_id = "t1"
     return session
 
 
@@ -153,12 +151,29 @@ async def test_backend_task_is_handed_off_with_a_filler():
         }
     )
     await asyncio.gather(*session._tasks)
-    assert session._say == ["好的，我查一下。"]
+    # The filler, then the paired chat's answer.
+    assert session._say == ["好的，我查一下。", "答案"]
     assert session.media.calls == ["flush"]  # its own answer was made up
-    (turn,) = session._engine.turns
-    assert turn["mode"] == "start_or_steer"
-    text = turn["input"][0]["text"]
+    (text,) = session.chat.asked
     assert "查询当前时间" in text and "小乐，现在几点了？" in text
+
+
+@pytest.mark.asyncio
+async def test_a_busy_chat_is_announced_instead_of_the_filler():
+    session = make_session()
+    session.chat.is_busy = True
+    session._on_tool_call({"name": "backend_task", "arguments": {"task": "查天气"}})
+    await asyncio.gather(*session._tasks)
+    assert session._say == [omni.BUSY_SPEECH, "答案"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_request_is_said_to_have_failed():
+    session = make_session(filler="")
+    session.chat.answer = None  # stopped, failed
+    session._on_tool_call({"name": "backend_task", "arguments": {"task": "查天气"}})
+    await asyncio.gather(*session._tasks)
+    assert session._say == [omni.FAILED_SPEECH]
 
 
 @pytest.mark.asyncio
@@ -178,8 +193,8 @@ async def test_no_filler_when_not_configured():
     session = make_session(filler="")
     session._on_tool_call({"name": "backend_task", "arguments": {}, "heard": "查天气"})
     await asyncio.gather(*session._tasks)
-    assert session._say == []
-    assert "查天气" in session._engine.turns[0]["input"][0]["text"]
+    assert session._say == ["答案"]
+    assert "查天气" in session.chat.asked[0]
 
 
 @pytest.mark.asyncio
@@ -224,20 +239,10 @@ async def test_barge_in_cuts_only_one_to_one():
 
 
 @pytest.mark.asyncio
-async def test_agent_answers_are_spoken():
+async def test_chat_answers_are_spoken():
     session = make_session()
-    session._events_queue = asyncio.Queue()
-    for msg in (
-        {"type": "agent_message", "phase": "commentary", "message": "正在搜索"},
-        {
-            "type": "agent_message",
-            "phase": "final_answer",
-            "message": "现在是**下午三点**。",
-        },
-        {"type": "_pump_closed"},
-    ):
-        session._events_queue.put_nowait(msg)
-    await session._agent_events()
+    session.chat.answer = "现在是**下午三点**。"
+    await session._submit("几点了")
     assert session._say == ["现在是下午三点。"]
 
 
@@ -248,8 +253,9 @@ async def test_say_asks_the_agent_for_an_opening():
         await session.say("提醒他开会")
     session.ready = True
     await session.say("提醒他开会")
-    text = session._engine.turns[0]["input"][0]["text"]
-    assert "提醒他开会" in text and "first words" in text
+    (text,) = session.chat.asked
+    assert "提醒他开会" in text and "just started" in text
+    assert session._say == ["答案"]
 
 
 class FakeUtterances:
@@ -299,7 +305,7 @@ async def test_string_arguments_are_understood():
     session._on_tool_call({"name": "backend_task", "arguments": "查新闻", "heard": "y"})
     session._on_tool_call({"name": "backend_task", "arguments": 3, "heard": "z"})
     await asyncio.gather(*session._tasks)
-    texts = [t["input"][0]["text"] for t in session._engine.turns]
+    texts = session.chat.asked
     assert "查天气" in texts[0] and "查新闻" in texts[1] and "z" in texts[2]
 
 
@@ -474,8 +480,8 @@ async def test_one_acknowledgement_for_a_request_in_two_pieces():
     for heard in ("帮我查天气", "北京的"):
         session._on_tool_call({"name": "backend_task", "arguments": {"task": heard}})
     await asyncio.gather(*session._tasks)
-    assert session._say == ["好的，我查一下。"]
-    assert len(session._engine.turns) == 2
+    assert session._say == ["好的，我查一下。", "答案", "答案"]
+    assert len(session.chat.asked) == 2
 
 
 def test_reference_audio_is_decoded_once_and_trimmed(tmp_path, monkeypatch):

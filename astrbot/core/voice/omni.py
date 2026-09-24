@@ -34,6 +34,7 @@ from aiortc.mediastreams import MediaStreamError
 from astrbot import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from .chat import OPENING_BODY, TASK_BODY
 from .session import VoiceSession
 
 IN_RATE = 16000  # the server's input: 1 s units of 16 kHz float32
@@ -146,13 +147,9 @@ ROUTER_PRIVATE = """你是语音助手"{name}"的决策模块。{name}正在和�
 
 {tools}"""
 
-# What the voice agent thread receives for the bot to speak first.
-OPENING_PROMPT = """Open the conversation now; your answer is read aloud as the bot's first words.
-Purpose: {text}"""
-# What the voice agent thread receives for a task.
-TASK_PROMPT = """A voice request to handle now; your answer is read aloud.
-What was said: {heard}
-Task: {task}"""
+# Spoken while a task waits for the paired chat's turn, and when it fails.
+BUSY_SPEECH = "我这边还在忙前面的事，稍等一下。"
+FAILED_SPEECH = "这件事没能办成。"
 
 
 @dataclass
@@ -428,8 +425,6 @@ class OmniVoiceSession(VoiceSession):
     when it starts, and the platform tries again later.
     """
 
-    NEEDS_REALTIME = False
-
     def __init__(self, *args, omni: OmniOptions, group: bool, **kwargs) -> None:
         """
         Args:
@@ -516,28 +511,31 @@ class OmniVoiceSession(VoiceSession):
         self._spawn(self.media.play(self._track), "outbound")
         self._spawn(self._receive(), "receive")
         self._spawn(self._send(utterances), "send")
-        self._spawn(self._agent_events(), "agent")
         self.media.start()
         self.started_at = time.monotonic()
         self.ready = True
         logger.info(
-            "%s omni voice session %s started in %.1fs (thread %s)",
+            "%s omni voice session %s started in %.1fs",
             self.label,
             self.key,
             self.started_at - self.created_at,
-            self._thread_id,
         )
 
     async def say(self, text: str) -> None:
         """Has the bot speak first about ``text`` (e.g. why it placed a call):
-        the voice agent words it, the model speaks it.
+        the paired chat words it, the model speaks it.
 
         Raises:
             RuntimeError: The session is not ready.
         """
-        if not self.ready or self._closed or self._engine is None:
+        if not self.ready or self._closed:
             raise RuntimeError("voice session is not ready")
-        await self._submit(OPENING_PROMPT.format(text=text))
+        await self._submit(OPENING_BODY.format(purpose=text))
+
+    async def _open_agent(self) -> None:
+        """Nothing to open: tasks go to the paired chat, and the omni server
+        is not a Codex realtime conversation."""
+        self._check_open()
 
     async def _send(self, utterances: Utterances) -> None:
         """Sends the input in real-time units of one second."""
@@ -683,12 +681,15 @@ class OmniVoiceSession(VoiceSession):
         if name in ("", "reply", "silence"):
             return
         now = time.monotonic()
-        if self.omni.tool_filler and now - self._task_at > FILLER_GAP_SECONDS:
+        if self.chat.busy():
+            self._say.append(BUSY_SPEECH)
+        elif self.omni.tool_filler and now - self._task_at > FILLER_GAP_SECONDS:
             self._say.append(self.omni.tool_filler)
         self._task_at = now
         task = str(arguments.get("task") or heard)
-        text = TASK_PROMPT.format(heard=heard or task, task=task)
-        self._spawn(self._submit(text), "task")
+        self._spawn(
+            self._submit(TASK_BODY.format(heard=heard or task, task=task)), "task"
+        )
 
     def _check_barge_in(self) -> None:
         """One to one: the model stopped speaking and the speaker went on
@@ -724,57 +725,15 @@ class OmniVoiceSession(VoiceSession):
             self._say_cancel = True
         self.media.flush()
 
-    async def _submit(self, text: str) -> None:
-        """Gives the voice agent thread a request; its answer is spoken by
-        ``_agent_events``. A request while another runs joins that turn."""
-        try:
-            result = await self._engine.submit_turn(
-                self._thread_id,
-                {
-                    "input": [{"type": "text", "text": text, "text_elements": []}],
-                    "mode": "start_or_steer",
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 - reported, the voice goes on
-            logger.warning(
-                "%s omni voice %s: request not submitted: %s",
-                self.label,
-                self.key,
-                exc,
-            )
+    async def _submit(self, body: str) -> None:
+        """Has the paired chat answer ``body`` (queued with its messages), and
+        speaks the answer."""
+        answer = await self.chat.ask(body)
+        if self._closed:
             return
-        if result.get("status") == "not_submitted":
-            logger.warning(
-                "%s omni voice %s: request not accepted: %s",
-                self.label,
-                self.key,
-                result.get("reason"),
-            )
-
-    async def _agent_events(self) -> None:
-        """Speaks the voice agent's answers."""
-        while True:
-            msg = await self._events_queue.get()
-            kind = msg.get("type")
-            if kind == "agent_message" and msg.get("phase") in (None, "final_answer"):
-                if text := speakable(msg.get("message") or ""):
-                    logger.info(
-                        "%s omni voice %s: agent answered: %s",
-                        self.label,
-                        self.key,
-                        text,
-                    )
-                    self._say.append(text)
-            elif kind == "error":
-                logger.warning(
-                    "%s omni voice %s: agent error: %s",
-                    self.label,
-                    self.key,
-                    msg.get("message"),
-                )
-            elif kind == "_pump_closed":
-                self._request_close("voice thread closed")
-                return
+        text = speakable(answer or "") or FAILED_SPEECH
+        logger.info("%s omni voice %s: chat answered: %s", self.label, self.key, text)
+        self._say.append(text)
 
     async def _release_transport(self) -> None:
         # Sending and receiving stop before the socket closes under them.

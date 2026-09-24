@@ -185,7 +185,6 @@ class MumblePlatformAdapter(Platform):
             voice=str(cfg.get("mumble_voice_voice") or ""),
             model=str(cfg.get("mumble_voice_model") or ""),
             extra_prompt=str(cfg.get("mumble_voice_prompt") or ""),
-            agent_instructions=str(cfg.get("mumble_voice_agent_instructions") or ""),
         )
         # Voice backend: Codex realtime, or a local MiniCPM-o server (omni).
         self.voice_backend = str(cfg.get("mumble_voice_backend") or "codex_realtime")
@@ -494,6 +493,7 @@ class MumblePlatformAdapter(Platform):
 
     def _start_voice(self, key: str, user: User):
         from astrbot.core.voice import omni
+        from astrbot.core.voice.chat import VoiceChat
         from astrbot.core.voice.session import VoiceSession
 
         from .audio import MumbleMedia
@@ -544,12 +544,23 @@ class MumblePlatformAdapter(Platform):
             on_closed=self._voice_closed,
             label="Mumble",
             thread_key="mumble_voice_thread",
-            # The chat the voice conversation belongs to: the server group,
-            # or the whisperer's private chat.
-            memory_scope=(
-                f"{self.meta().id}:{MessageType.GROUP_MESSAGE.value}:{SERVER_SESSION}"
+            # The chat that runs what is asked by voice: the server group (as
+            # the fixed voice user, a member: speakers cannot be told apart),
+            # or the whisperer's private chat (as the whisperer).
+            chat=(
+                VoiceChat(
+                    umo=f"{self.meta().id}:{MessageType.GROUP_MESSAGE.value}:{SERVER_SESSION}",
+                    private=False,
+                    via="Mumble voice channel",
+                )
                 if key == SERVER_SESSION
-                else f"{self.meta().id}:{MessageType.FRIEND_MESSAGE.value}:{user_key(user)}"
+                else VoiceChat(
+                    umo=f"{self.meta().id}:{MessageType.FRIEND_MESSAGE.value}:{user_key(user)}",
+                    private=True,
+                    sender_id=user_key(user),
+                    sender_name=user.name,
+                    via="Mumble whisper",
+                )
             ),
         )
         self.voice_sessions[key] = session

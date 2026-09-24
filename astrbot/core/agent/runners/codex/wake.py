@@ -86,6 +86,25 @@ async def run_in_session_thread(
     ctx: Any, event: Any, cfg: dict, prompt: str, delivery_session_str: str
 ) -> bool:
     """Run one Codex turn with ``prompt`` in the event session's thread."""
+    text = await run_turn_in_session(ctx, event, cfg, prompt)
+    if text is None:
+        return False
+    if text and delivery_session_str:
+        await ctx.send_message(delivery_session_str, MessageChain().message(text))
+    return True
+
+
+async def run_turn_in_session(
+    ctx: Any, event: Any, cfg: dict, prompt: str
+) -> str | None:
+    """Runs one Codex turn with ``prompt`` in the event session's thread, as
+    a message of that chat would (same session lock: it queues behind turns
+    running there, and they behind it).
+
+    Returns:
+        The final answer (possibly empty), or None when the turn was stopped
+        or produced no assistant answer.
+    """
     from astrbot.core.agent.runners.codex.codex_agent_runner import CodexAgentRunner
     from astrbot.core.astr_agent_context import AgentContextWrapper, AstrAgentContext
     from astrbot.core.astr_agent_hooks import MAIN_AGENT_HOOKS
@@ -127,14 +146,11 @@ async def run_in_session_thread(
     if runner.was_aborted():
         # Stopped: nothing to deliver. A background command's caller then
         # reports its result plainly, so the result itself is not lost.
-        return False
+        return None
     resp = runner.get_final_llm_resp()
     if resp is None or resp.role != "assistant":
-        return False
-    text = (resp.completion_text or "").strip()
-    if text and delivery_session_str:
-        await ctx.send_message(delivery_session_str, MessageChain().message(text))
-    return True
+        return None
+    return (resp.completion_text or "").strip()
 
 
 def build_background_prompt(task_result: dict, original_message: str) -> str:

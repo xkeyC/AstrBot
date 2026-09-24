@@ -18,6 +18,9 @@ class FakeRuntime:
     async def realtime_append_text(self, thread_id, text):
         self.calls.append(f"text:{text}")
 
+    async def realtime_append_speech(self, thread_id, text):
+        self.calls.append(f"speech:{text}")
+
     async def realtime_stop(self, thread_id):
         self.calls.append("stop")
 
@@ -61,6 +64,23 @@ class FakeEngine:
         self.forgotten.append(thread_id)
 
 
+class FakeChat:
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+        self.answer: str | None = "It is three."
+        self.is_busy = False
+        self.release = asyncio.Event()
+        self.release.set()
+
+    def busy(self) -> bool:
+        return self.is_busy
+
+    async def ask(self, body: str) -> str | None:
+        self.asked.append(body)
+        await self.release.wait()
+        return self.answer
+
+
 class FakeSp:
     async def get_async(self, **_kwargs):
         return {}
@@ -74,7 +94,7 @@ def engine(monkeypatch):
     gate = asyncio.Event()
     engine = FakeEngine(gate)
 
-    async def codex_engine(realtime=True):
+    async def codex_engine():
         return engine
 
     monkeypatch.setattr(voice, "_codex_engine", codex_engine)
@@ -91,6 +111,7 @@ def make_session(closed: list) -> VoiceSession:
         options=VoiceOptions(name="Jarvis", aliases=[]),
         media=MumbleMedia(lambda frame, end: None),
         on_closed=closed.append,
+        chat=FakeChat(),
     )
 
 
@@ -132,37 +153,72 @@ async def test_start_failure_is_reported_once(engine, monkeypatch):
     assert closed == [session]
 
 
-def test_voice_thread_config_follows_runner_limits(monkeypatch):
-    monkeypatch.setattr(voice, "_runner_config", lambda: {"memory_enabled": False})
-    config = voice.voice_thread_config("mumble:GroupMessage:server")
-    assert config == {
-        "model_tool_mode": "direct",
-        "features.apps": False,
-        "features.memories": False,
-        "features.image_generation": False,
-        "agents.enabled": False,
-        "features.multi_agent_v2": False,
-        "include_environment_context": True,
+@pytest.mark.asyncio
+async def test_the_voice_thread_only_carries_the_conversation(engine):
+    captured = {}
+
+    async def open_thread(state, params):
+        captured.update(params)
+        return {"thread_id": "t1", "rollout_path": None}, True
+
+    engine.open_thread = open_thread
+    session = make_session([])
+    await session._open_agent()
+    assert captured["dynamic_tools"] == []
+    assert captured["no_environment"] is True
+    config = captured["config"]
+    assert config["realtime.host_routes_handoffs"] is True
+    assert config["features.memories"] is False
+
+
+def handoff(text: str) -> dict:
+    return {
+        "handoff_id": "h1",
+        "item_id": "i1",
+        "input_transcript": text,
+        "active_transcript": [
+            {"role": "user", "text": "what time is it"},
+            {"role": "assistant", "text": "let me check"},
+        ],
     }
 
 
-def test_voice_thread_reads_paired_and_global_memories(monkeypatch):
-    monkeypatch.setattr(
-        voice,
-        "_runner_config",
-        lambda: {"memory_enabled": True, "memory_auto_consolidate": False},
-    )
-    config = voice.voice_thread_config("mumble:FriendMessage:abc")
-    assert config["features.memories"] is True
-    assert config["memories.scope_key"] == "mumble:FriendMessage:abc"
-    # Reads global memories, never writes or deletes them.
-    assert config["memories.may_write_global"] is False
-    assert config["memories.may_delete"] is False
-    # No turn scopes: nothing shared is writable, whoever speaks.
-    assert config["memories.turn_scopes"] is False
-    assert config["memories.auto_consolidate"] is False
-    assert config["features.apps"] is False
-    assert config["agents.enabled"] is False
+@pytest.mark.asyncio
+async def test_a_handoff_is_answered_by_the_chat_and_spoken(engine):
+    session = make_session([])
+    session._engine, session._thread_id = engine, "t1"
+    await session._handoff(handoff("look up the time"))
+    (body,) = session.chat.asked
+    assert "look up the time" in body and "what time is it" in body
+    assert engine.rt.calls == ["speech:It is three."]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_chat_is_announced_and_requests_keep_their_order(engine):
+    session = make_session([])
+    session._engine, session._thread_id = engine, "t1"
+    session.chat.is_busy = True
+    session.chat.release.clear()
+    first = asyncio.create_task(session._handoff(handoff("first")))
+    await asyncio.sleep(0)
+    session.chat.is_busy = False
+    second = asyncio.create_task(session._handoff(handoff("second")))
+    await asyncio.sleep(0)
+    # Both waiting are told so: the chat is busy, then the first one.
+    assert engine.rt.calls == [f"speech:{voice.BUSY_SPEECH}"] * 2
+    session.chat.release.set()
+    await asyncio.gather(first, second)
+    assert [b.split("Task: ")[1] for b in session.chat.asked] == ["first", "second"]
+    assert engine.rt.calls[2:] == ["speech:It is three."] * 2
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_handoff_is_said_to_have_failed(engine):
+    session = make_session([])
+    session._engine, session._thread_id = engine, "t1"
+    session.chat.answer = None
+    await session._handoff(handoff("x"))
+    assert engine.rt.calls == [f"speech:{voice.FAILED_SPEECH}"]
 
 
 @pytest.mark.asyncio
@@ -306,6 +362,7 @@ def test_close_stops_the_media(engine):
         options=VoiceOptions(name="n", aliases=[]),
         media=media,
         on_closed=lambda s: None,
+        chat=FakeChat(),
     )
 
     async def run():

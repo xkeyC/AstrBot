@@ -1,11 +1,11 @@
 """Full-duplex voice through Codex realtime over WebRTC.
 
-Each voice conversation has its own Codex thread (the "voice agent"), apart
-from the chat threads, persisted per conversation key and resumed the next
-time. It gets what an ordinary member of its paired chat gets there (tools,
-execution environment, approvals; see ``tools``). The realtime model listens
-and speaks; tasks it hands off run on that thread and its results are fed
-back to the model by Codex.
+The realtime model listens and speaks. What it hands off runs as a turn of
+the paired chat (see ``chat``): the chat's own thread, context, persona,
+tools and memory, queued with the chat's text messages; the answer comes back
+to be spoken. The realtime conversation itself is carried by a thread of its
+own (Codex attaches realtime to a thread), persisted per conversation key; it
+has no tools and runs no turns.
 
 The platform supplies the audio as a ``VoiceMedia``: Mumble mixes Opus
 streams, a phone bridge carries raw PCM (see ``pcm``).
@@ -35,6 +35,7 @@ from astrbot import logger
 from astrbot.core import astrbot_config, sp
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from .chat import TASK_BODY, VoiceChat
 from .icetcp import IceTcpRelay, replace_candidates, tcp_candidates
 
 VOICE_THREAD_KEY = "voice_thread"
@@ -50,28 +51,21 @@ REALTIME_VOICES = (
     "sol",
     "cove",
 )
-# Per-thread overrides of the voice agent, on top of the runner's engine
-# config (model, provider, effort, web search, sandbox, approvals and
-# agents.enabled=false all come from there, as for chat threads).
+# Overrides of the thread carrying a realtime conversation, on top of the
+# runner's engine config. It runs no turns: handoffs go to the paired chat.
 VOICE_THREAD_CONFIG = {
-    # Tools are sent directly: no code mode, so no code-mode host needed.
-    "model_tool_mode": "direct",
-    # ChatGPT apps (connectors) would expose the account's connected data.
+    # Codex reports handoffs (HandoffRequested) and starts no turn for them.
+    "realtime.host_routes_handoffs": True,
     "features.apps": False,
-    # Memories: off unless the runner enables them; see VoiceSession._start.
     "features.memories": False,
-    # Nothing could deliver a generated image from a voice conversation.
     "features.image_generation": False,
-    # No sub-agents, whatever thread_config says (multi_agent_v2 would take
-    # precedence over agents.enabled).
     "agents.enabled": False,
     "features.multi_agent_v2": False,
-    # Chat turns carry their send time in AstrBot's message metadata; voice
-    # handoffs carry nothing, so let Codex state today's date and timezone
-    # every turn. Without it the model searches for "latest" news as of its
-    # training data.
-    "include_environment_context": True,
 }
+# Told to the realtime model while a request waits for the chat's turn, and
+# when one cannot be answered. It words them for the listener.
+BUSY_SPEECH = "Still busy with an earlier request; this one is next, the answer follows as soon as it is done."
+FAILED_SPEECH = "That request could not be completed."
 SDP_TIMEOUT = 30.0
 CONNECT_TIMEOUT = 15.0
 # Pause between WebRTC connecting and handing the model the audio kept
@@ -81,10 +75,7 @@ READY_DELAY = 0.5
 # How long a close waits for a start in progress to reach a safe point.
 CLOSE_WAIT = 10.0
 
-VOICE_AGENT_INSTRUCTIONS = """You are the backend of {name}, a voice assistant.
-Requests reach you from the voice model, which reads your answers aloud.
-Answer in plain spoken language: short, no Markdown, no tables, no code blocks
-unless asked, and in the language of the request."""
+VOICE_THREAD_INSTRUCTIONS = """This thread only carries a realtime voice conversation; requests are handled elsewhere."""
 
 # Appended to every realtime prompt: the realtime model has no clock of its own.
 TIME_PROMPT = """Today is {date} ({weekday}), time zone {timezone}; the current time was {time} when this conversation started. Your own knowledge is older than that: anything about current events, news, prices, weather, schedules or other recent or changing information must be delegated to the backend, never answered from memory."""
@@ -176,7 +167,6 @@ class VoiceOptions:
     voice: str = ""
     model: str = ""
     extra_prompt: str = ""
-    agent_instructions: str = ""
     # Realtime media over the peer's ICE-TCP candidate even without a proxy:
     # no packet loss on lossy paths, at the cost of latency spikes (which a
     # playout buffer absorbs). With a proxy, media always takes TCP.
@@ -189,42 +179,17 @@ def _runner_config() -> dict:
     return normalize_agent_runner(astrbot_config.get("agent_runner"))["config"]
 
 
-async def _codex_engine(realtime: bool = True):
-    """The Codex engine the chat runner uses: same runtime, same account.
-
-    Args:
-        realtime: Whether the binding must support Codex realtime.
-    """
+async def _codex_engine():
+    """The Codex engine the chat runner uses: same runtime, same account."""
     from astrbot.core.agent.runners.codex.codex_agent_runner import engine_options
     from astrbot.core.agent.runners.codex.native import CodexEngine
 
     engine = await CodexEngine.get(engine_options(_runner_config()))
-    if realtime and not hasattr(engine.rt, "realtime_start"):
+    if not hasattr(engine.rt, "realtime_start"):
         raise RuntimeError(
             "codex_astrbot binding has no realtime support; update codex-astrbot"
         )
     return engine
-
-
-def voice_thread_config(memory_scope: str | None) -> dict:
-    """Thread overrides for a voice agent whose paired chat is ``memory_scope``.
-
-    With memories enabled on the runner, the voice agent reads the global
-    memories and those of its paired chat (the UMO of the server group or of
-    the whisperer's private chat), like that chat's own thread does, but may
-    never write global memories or delete any.
-    """
-    from astrbot.core.agent.runners.codex.codex_agent_runner import (
-        memory_thread_config,
-    )
-
-    config = dict(VOICE_THREAD_CONFIG)
-    cfg = _runner_config()
-    if cfg.get("memory_enabled") and memory_scope:
-        # No turn scopes: nothing global is writable and nothing can be
-        # deleted, whoever speaks.
-        config.update(memory_thread_config(cfg, memory_scope, None, turn_scopes=False))
-    return config
 
 
 class _SessionClosed(Exception):
@@ -232,7 +197,7 @@ class _SessionClosed(Exception):
 
 
 class VoiceSession:
-    """One realtime conversation bound to its own voice agent thread.
+    """One realtime conversation, its tasks run by the paired chat.
 
     Lifecycle: ``launch()`` starts it in the background; ``close()`` may be
     called at any time, from any path (standby, mute, disconnect, a failure),
@@ -240,12 +205,10 @@ class VoiceSession:
     and then releases whatever it had created, so nothing outlives the
     session (in particular no realtime call keeps running unowned).
 
-    Another voice model replaces the transport (``_connect``,
-    ``_release_transport``, ``say``) and keeps the voice agent thread.
+    Another voice model replaces the transport (``_open_agent``,
+    ``_connect``, ``_release_transport``, ``say``) and hands its tasks to
+    the same chat.
     """
-
-    # Whether the Codex binding must support realtime (the transport here).
-    NEEDS_REALTIME = True
 
     def __init__(
         self,
@@ -255,7 +218,7 @@ class VoiceSession:
         options: VoiceOptions,
         media: VoiceMedia,
         on_closed: Callable[[VoiceSession], None],
-        memory_scope: str | None = None,
+        chat: VoiceChat,
         label: str = "voice",
         thread_key: str = VOICE_THREAD_KEY,
     ) -> None:
@@ -267,8 +230,7 @@ class VoiceSession:
             options: Voice settings of the platform.
             media: The platform's audio in and out.
             on_closed: Called once the session has ended, for any reason.
-            memory_scope: UMO of the paired chat, whose memories (with the
-                global ones) and member tools the voice agent gets.
+            chat: The paired chat, which runs what the voice model hands off.
             label: Names the session in logs and task names, e.g. ``Mumble``.
             thread_key: Storage key of the persisted voice thread.
         """
@@ -276,7 +238,9 @@ class VoiceSession:
         self.scope_id = scope_id
         self.prompt = prompt
         self.options = options
-        self.memory_scope = memory_scope
+        self.chat = chat
+        # Handoffs are answered in order.
+        self._handoff_lock = asyncio.Lock()
         self.media = media
         self.label = label
         self.thread_key = thread_key
@@ -369,41 +333,21 @@ class VoiceSession:
     async def _open_agent(self) -> None:
         """Opens (or resumes) the voice agent thread and routes its events to
         ``self._events_queue``."""
-        engine = await _codex_engine(self.NEEDS_REALTIME)
+        engine = await _codex_engine()
         self._check_open()
         self._engine = engine
         state = await sp.get_async(
             scope="umo", scope_id=self.scope_id, key=self.thread_key, default={}
         )
         self._check_open()
-        runner_cfg = _runner_config()
-        tools = None
-        if self.memory_scope:
-            from .tools import voice_agent_tools
-
-            tools = await voice_agent_tools(self.memory_scope, runner_cfg)
-            self._check_open()
-        if runner_cfg.get("cwd"):
-            workspace = Path(str(runner_cfg["cwd"]))
-        elif self.memory_scope:
-            from astrbot.core.agent.runners.codex.codex_agent_runner import (
-                _default_cwd,
-            )
-
-            # The paired chat's workspace, as its own thread uses.
-            workspace = Path(_default_cwd(self.memory_scope))
-        else:
-            workspace = Path(get_astrbot_data_path()) / "voice"
+        workspace = Path(get_astrbot_data_path()) / "voice"
         workspace.mkdir(parents=True, exist_ok=True)
         params = {
             "cwd": str(workspace),
-            "base_instructions": (
-                self.options.agent_instructions
-                or VOICE_AGENT_INSTRUCTIONS.format(name=self.options.name)
-            ),
-            "dynamic_tools": tools.dynamic_tools if tools else [],
-            "no_environment": not (tools and tools.native_exec),
-            "config": voice_thread_config(self.memory_scope),
+            "base_instructions": VOICE_THREAD_INSTRUCTIONS,
+            "dynamic_tools": [],
+            "no_environment": True,
+            "config": dict(VOICE_THREAD_CONFIG),
         }
         # Opening and unloading this key's thread are serialised: a session
         # closed while its open was still running unloads the thread before
@@ -437,10 +381,7 @@ class VoiceSession:
         self._check_open()
         # This thread only ever carries the voice conversation, so its pump
         # route stays open for the whole session and sees every event.
-        events = engine.pump(self._thread_id).open_turn(
-            tools.tool_handler if tools else None,
-            tools.approval_handler if tools else None,
-        )
+        events = engine.pump(self._thread_id).open_turn(None, None)
         self._events_queue = events
 
     async def _connect(self) -> None:
@@ -471,6 +412,8 @@ class VoiceSession:
             "transport": {"type": "webrtc", "sdp": pc.localDescription.sdp},
             # Subscription (AVAS) calls only accept the frameless protocol.
             "version": "v3",
+            # The answers come from the paired chat and are spoken here.
+            "client_managed_handoffs": True,
             "include_startup_context": False,
             "prompt": self.prompt,
         }
@@ -569,6 +512,8 @@ class VoiceSession:
                         answer.set_exception(RuntimeError(str(payload["Error"])))
                 elif isinstance(payload, dict) and "InputTranscriptDelta" in payload:
                     self.last_transcript_at = time.monotonic()
+                elif isinstance(payload, dict) and "HandoffRequested" in payload:
+                    self._spawn(self._handoff(payload["HandoffRequested"]), "handoff")
                 elif isinstance(payload, dict) and "InputTranscriptDone" in payload:
                     self.last_transcript_at = time.monotonic()
                     logger.debug(
@@ -583,6 +528,38 @@ class VoiceSession:
                 self._realtime_requested = False
                 self._request_close("voice thread closed")
                 return
+
+    async def _handoff(self, handoff: dict) -> None:
+        """Has the paired chat answer a handoff, and the model speak it."""
+        heard = next(
+            (
+                str(entry.get("text") or "")
+                for entry in reversed(handoff.get("active_transcript") or [])
+                if entry.get("role") == "user"
+            ),
+            "",
+        )
+        task = str(handoff.get("input_transcript") or heard)
+        logger.info("%s voice %s: handoff %r", self.label, self.key, task)
+        if self.chat.busy() or self._handoff_lock.locked():
+            await self._speak(BUSY_SPEECH)
+        async with self._handoff_lock:
+            if self._closed:
+                return
+            answer = await self.chat.ask(
+                TASK_BODY.format(heard=heard or task, task=task)
+            )
+        if not self._closed:
+            await self._speak(answer or FAILED_SPEECH)
+
+    async def _speak(self, text: str) -> None:
+        """Has the realtime model say ``text`` (a backend answer)."""
+        if self._engine is None or self._thread_id is None or self._closed:
+            return
+        try:
+            await self._engine.rt.realtime_append_speech(self._thread_id, text)
+        except Exception as exc:  # noqa: BLE001 - the conversation goes on
+            logger.warning("%s voice %s: speech failed: %s", self.label, self.key, exc)
 
     @property
     def closing(self) -> bool:

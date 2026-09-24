@@ -781,10 +781,6 @@
         "description": "Extra Voice Prompt",
         "hint": "Extra instructions for the realtime voice model, e.g. speaking style."
       },
-      "mumble_voice_agent_instructions": {
-        "description": "Voice Agent Instructions",
-        "hint": "Optional replacement for the system instructions of the voice agent thread, which handles tasks handed off from voice."
-      },
       "mumble_voice_idle_timeout": {
         "description": "Voice Standby Timeout",
         "hint": "Seconds without recognised speech before voice goes on standby (realtime disconnected); new speech resumes it automatically. Muting for over a minute also disconnects."
