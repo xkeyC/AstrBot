@@ -60,11 +60,12 @@ FILLER_GAP_SECONDS = 8.0
 # take the floor from the bot (longest first when matching).
 BACKCHANNELS = sorted(
     {
-        *"嗯啊哦噢哎诶唉呃额对好是行哈嘿呵嗷",
+        *"嗯啊哦噢哎诶唉呃额对好是行哈嘿呵嗷哼呀啦嘛呢咳",
         *("好的", "是的", "对的", "好吧", "行吧", "明白", "明白了", "知道了"),
         *("可以", "没错", "没问题", "有道理", "原来如此", "这样啊"),
         *("ok", "okay", "yeah", "yes", "yep", "yup", "uh", "huh", "um", "mm"),
         *("hmm", "mhm", "right", "sure", "gotit", "isee", "cool", "nice"),
+        *("haha", "hehe", "lol"),
     },
     key=len,
     reverse=True,
@@ -217,7 +218,7 @@ def takes_floor(text: str, names: list[str] | None = None) -> bool:
     while rest:
         word = next((w for w in BACKCHANNELS if rest.startswith(w)), None)
         if word is None:
-            return len(rest) >= 2
+            return True  # "可以吗", "是我", "别说了"...
         rest = rest[len(word) :]
     return False
 
@@ -434,7 +435,9 @@ class OmniVoiceSession(VoiceSession):
         self._task_at = 0.0
         # When the speech handed to the media so far ends playing, roughly.
         self._playing_until = 0.0
-        # The server is producing speech (audio or text since its last listen).
+        # The server is producing speech: text since its last listen. (Text
+        # and listens arrive in order; audio comes from the TTS thread and
+        # often after the listen that ended it.)
         self._server_speaking = False
 
     async def _connect(self) -> None:
@@ -606,7 +609,7 @@ class OmniVoiceSession(VoiceSession):
         if kind == "response.output.delta":
             delta = event.get("kind")
             now = time.monotonic()
-            if delta in ("audio", "text"):
+            if delta == "text":
                 self._server_speaking = True
             if delta == "audio" and now >= self._cut_until:
                 samples = np.frombuffer(base64.b64decode(event["audio"]), np.float32)
@@ -628,8 +631,9 @@ class OmniVoiceSession(VoiceSession):
                     # One to one: the model stopped speaking because the
                     # speaker talked over it; what it had still to say goes
                     # too (answers waiting to be spoken are kept: a
-                    # backchannel may have stopped it).
-                    self._cut()
+                    # backchannel may have stopped it). Its audio is still
+                    # arriving.
+                    self._cut(arriving=True)
         elif kind == "response.done" and said:
             logger.debug(
                 "%s omni voice %s said: %s", self.label, self.key, "".join(said)
@@ -664,7 +668,8 @@ class OmniVoiceSession(VoiceSession):
             # The model was still talking when this utterance came, and it
             # talks straight into what it hears: what it has not said yet is
             # likely a reply to chatter (silence) or a made-up answer (task).
-            self._cut()
+            # It was producing that speech, so its audio is still arriving.
+            self._cut(arriving=True)
         if name in ("", "reply", "silence"):
             return
         now = time.monotonic()
@@ -675,15 +680,17 @@ class OmniVoiceSession(VoiceSession):
         text = TASK_PROMPT.format(heard=heard or task, task=task)
         self._spawn(self._submit(text), "task")
 
-    def _cut(self, pending: bool = False) -> None:
+    def _cut(self, pending: bool = False, arriving: bool | None = None) -> None:
         """Drops the speech being played and the rest of it still arriving.
 
         Args:
             pending: Also drop what is still to be spoken (forced speech the
                 server has not said yet, answers waiting here): the speaker
                 talked over the bot and moved on.
+            arriving: Whether audio of the cut speech is still to arrive
+                (default: while the server is producing speech).
         """
-        if self._server_speaking:
+        if self._server_speaking if arriving is None else arriving:
             # Still producing it: what arrives in a moment is from it too.
             # (Otherwise the next audio is a new reply, not to be dropped.)
             self._cut_until = time.monotonic() + CUT_SECONDS
