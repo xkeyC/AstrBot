@@ -53,6 +53,13 @@ PLAYOUT_BUFFER_SECONDS = 120.0
 CUT_SECONDS = 0.6
 # The speaker counts as talking over the bot this long after speech.
 BARGE_IN_SECONDS = 1.5
+# A task handed off within this long of the last one gets no second
+# acknowledgement (one request often arrives as two utterances).
+FILLER_GAP_SECONDS = 8.0
+# Utterances that only show the speaker is listening; they do not take the
+# floor from the bot.
+BACKCHANNEL = set("嗯啊哦噢哎诶唉呃额对好是行")
+
 # An agent answer longer than this is cut (it is read aloud at ~5 characters
 # a second, and all of it goes into the duplex model's short context).
 MAX_SPOKEN_CHARS = 400
@@ -180,6 +187,23 @@ def duplex_prompt(name: str, extra: str, speaker: str = "") -> str:
         else DUPLEX_GROUP_PROMPT.format(name=name)
     )
     return f"{prompt}\n{extra}" if extra else prompt
+
+
+def takes_floor(text: str, names: list[str] | None = None) -> bool:
+    """Whether an utterance over the bot's speech means to stop it.
+
+    Args:
+        text: The transcript.
+        names: For a group: only an utterance naming the bot counts.
+
+    Returns:
+        With ``names``, whether one of them is said; otherwise whether it is
+        more than a backchannel ("嗯", "对对", "好的", a cough).
+    """
+    if names is not None:
+        return any(name and name in text for name in names)
+    core = [ch for ch in text if ch.isalnum() and ch not in BACKCHANNEL]
+    return len(core) >= 3
 
 
 def speakable(text: str) -> str:
@@ -331,18 +355,30 @@ class PcmTrack(MediaStreamTrack):
         return frame
 
 
+_ref_audio_cache: dict[tuple[str, float], np.ndarray] = {}
+
+
 def _load_ref_audio(path: str) -> np.ndarray:
-    """The first REF_AUDIO_SECONDS of a recording, 16 kHz mono float32."""
+    """The first REF_AUDIO_SECONDS of a recording, 16 kHz mono float32
+    (decoded once per file version)."""
+    key = (path, os.path.getmtime(path))
+    if key in _ref_audio_cache:
+        return _ref_audio_cache[key]
+    limit = int(REF_AUDIO_SECONDS * IN_RATE)
     resampler = av.AudioResampler(format="flt", layout="mono", rate=IN_RATE)
-    chunks = []
+    chunks, total = [], 0
     with av.open(path) as container:
         for frame in container.decode(audio=0):
             for out in resampler.resample(frame):
                 chunks.append(out.to_ndarray().reshape(-1))
-    for out in resampler.resample(None):
-        chunks.append(out.to_ndarray().reshape(-1))
+                total += chunks[-1].size
+            if total >= limit:
+                break
     audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
-    return audio[: int(REF_AUDIO_SECONDS * IN_RATE)].astype(np.float32)
+    audio = audio[:limit].astype(np.float32)
+    _ref_audio_cache.clear()  # one reference voice at a time is typical
+    _ref_audio_cache[key] = audio
+    return audio
 
 
 # ---------------------------------------------------------------- session
@@ -375,6 +411,7 @@ class OmniVoiceSession(VoiceSession):
         self._say_cancel = False
         self._cut_until = 0.0
         self._voiced_at = 0.0
+        self._task_at = 0.0
         # When the speech handed to the media so far ends playing, roughly.
         self._playing_until = 0.0
 
@@ -406,7 +443,9 @@ class OmniVoiceSession(VoiceSession):
             },
         }
         if self.omni.ref_audio:
-            ref = await asyncio.to_thread(_load_ref_audio, self.omni.ref_audio)
+            ref = await self._wait_open(
+                asyncio.to_thread(_load_ref_audio, self.omni.ref_audio), 60
+            )
             payload["voice"] = {"ref_audio": base64.b64encode(ref.tobytes()).decode()}
         self._ws = await self._wait_open(
             websockets.connect(
@@ -419,10 +458,19 @@ class OmniVoiceSession(VoiceSession):
             ),
             20,
         )
-        await self._ws.send(json.dumps({"type": "session.init", "payload": payload}))
-        reply = json.loads(await self._wait_open(self._ws.recv(), INIT_TIMEOUT))
-        if reply.get("type") != "session.created":
-            raise RuntimeError(f"omni server refused the session: {reply}")
+        try:
+            await self._ws.send(
+                json.dumps({"type": "session.init", "payload": payload})
+            )
+            reply = json.loads(await self._wait_open(self._ws.recv(), INIT_TIMEOUT))
+            if reply.get("type") != "session.created":
+                raise RuntimeError(f"omni server refused the session: {reply}")
+            # A close that gave up waiting for this start has released
+            # everything already: nothing may be started after it.
+            self._check_open()
+        except BaseException:
+            await self._release_transport()
+            raise
         self._phase("omni session created")
         self._spawn(self.media.play(self._track), "outbound")
         self._spawn(self._receive(), "receive")
@@ -488,9 +536,15 @@ class OmniVoiceSession(VoiceSession):
                     logger.debug(
                         "%s omni voice %s heard: %s", self.label, self.key, transcript
                     )
-                    if not self.group and time.monotonic() < self._playing_until:
-                        # One to one: a whole sentence over the bot's answer
-                        # (forced speech, which the model does not stop for).
+                    names = None
+                    if self.group:
+                        names = [self.options.name, *self.options.aliases]
+                    if time.monotonic() < self._playing_until and takes_floor(
+                        transcript, names
+                    ):
+                        # Talked over (forced speech is not stopped by the
+                        # model): one to one anything but a backchannel, in
+                        # a group only when the bot is named.
                         self._cut(pending=True)
             if self._say_cancel:
                 request["say_cancel"] = True
@@ -545,8 +599,9 @@ class OmniVoiceSession(VoiceSession):
                 and now - self._voiced_at < BARGE_IN_SECONDS
             ):
                 # One to one: the model stopped because the speaker talked
-                # over it; what is still buffered goes too.
-                self._cut(pending=True)
+                # over it; what it had still to say goes too (answers waiting
+                # to be spoken are kept: a backchannel may have stopped it).
+                self._cut()
         elif kind == "response.done" and said:
             logger.debug(
                 "%s omni voice %s said: %s", self.label, self.key, "".join(said)
@@ -584,8 +639,10 @@ class OmniVoiceSession(VoiceSession):
             self._cut()
         if name in ("", "reply", "silence"):
             return
-        if self.omni.tool_filler:
+        now = time.monotonic()
+        if self.omni.tool_filler and now - self._task_at > FILLER_GAP_SECONDS:
             self._say.append(self.omni.tool_filler)
+        self._task_at = now
         task = str(arguments.get("task") or heard)
         text = TASK_PROMPT.format(heard=heard or task, task=task)
         self._spawn(self._submit(text), "task")

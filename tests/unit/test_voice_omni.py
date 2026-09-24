@@ -398,3 +398,101 @@ def test_utterance_pieces_join_with_a_space_between_words():
         utt._vad = Vad([Segment(start, text)])
         utt._recognizer.next = text
         assert utt.feed(unit) == (False, want)
+
+
+def test_takes_floor():
+    for text in ("嗯", "嗯嗯。", "对对对", "好的", "是啊", "咳"):
+        assert not omni.takes_floor(text), text
+    for text in ("别说了", "等一下，我问个事", "stop talking"):
+        assert omni.takes_floor(text), text
+    names = ["小乐", "晓乐"]
+    assert not omni.takes_floor("老王你别说了", names)
+    assert omni.takes_floor("晓乐，别说了", names)
+
+
+@pytest.mark.asyncio
+async def test_talking_over_the_bot_needs_more_than_a_backchannel():
+    for group, text, cut in (
+        (False, "嗯", False),
+        (False, "等一下，先别说", True),
+        (True, "等一下，先别说", False),  # a group: others talk anyway
+        (True, "小乐，先别说", True),
+    ):
+        session = make_session(group=group)
+        session._ws = FakeWs()
+        session._say = ["排队的答案"]
+        session._playing_until = omni.time.monotonic() + 30
+        send = asyncio.create_task(session._send(FakeUtterances([(False, text)])))
+        await asyncio.wait_for(session._ws.wait_sent(1), 5)
+        send.cancel()
+        assert ("flush" in session.media.calls) is cut, (group, text)
+        assert (session._ws.sent[0]["input"].get("say_cancel") is True) is cut
+
+
+@pytest.mark.asyncio
+async def test_a_listen_cut_keeps_waiting_answers():
+    session = make_session(group=False)
+    session._say = ["答案"]
+    session._voiced_at = omni.time.monotonic()
+    session._ws = FakeWs(
+        [audio_event(2.0), {"type": "response.output.delta", "kind": "listen"}]
+    )
+    await session._receive()
+    assert "flush" in session.media.calls
+    assert session._say == ["答案"] and not session._say_cancel
+
+
+@pytest.mark.asyncio
+async def test_one_acknowledgement_for_a_request_in_two_pieces():
+    session = make_session()
+    for heard in ("帮我查天气", "北京的"):
+        session._on_tool_call({"name": "backend_task", "arguments": {"task": heard}})
+    await asyncio.gather(*session._tasks)
+    assert session._say == ["好的，我查一下。"]
+    assert len(session._engine.turns) == 2
+
+
+def test_reference_audio_is_decoded_once_and_trimmed(tmp_path, monkeypatch):
+    import wave
+
+    path = tmp_path / "ref.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(np.zeros(44100 * 30, np.int16).tobytes())  # 30 s
+    audio = omni._load_ref_audio(str(path))
+    assert audio.shape == (int(omni.REF_AUDIO_SECONDS * omni.IN_RATE),)
+    monkeypatch.setattr(omni.av, "open", lambda *_: pytest.fail("decoded again"))
+    assert omni._load_ref_audio(str(path)) is audio
+
+
+@pytest.mark.asyncio
+async def test_a_close_during_start_leaves_no_connection(monkeypatch):
+    import websockets
+
+    class Server(FakeWs):
+        closed = False
+
+        async def recv(self):
+            session._request_close("closed while starting")  # e.g. standby
+            await asyncio.sleep(0)
+            return json.dumps({"type": "session.created"})
+
+        async def close(self):
+            Server.closed = True
+
+    async def load(_dir):
+        return object(), None
+
+    async def connect(*_args, **_kwargs):
+        return Server()
+
+    monkeypatch.setattr(omni, "_load_recognizer", load)
+    monkeypatch.setattr(omni, "Utterances", lambda *_: None)
+    monkeypatch.setattr(websockets, "connect", connect)
+    session = make_session()
+    with pytest.raises(Exception):  # the start stops: closed meanwhile
+        await session._connect()
+    assert Server.closed
+    assert session._tasks == [] and not session.ready
