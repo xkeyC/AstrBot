@@ -23,6 +23,7 @@ import ipaddress
 import re
 import socket
 import struct
+from collections.abc import Callable
 from urllib.parse import unquote, urlsplit
 
 from astrbot import logger
@@ -152,13 +153,21 @@ async def open_proxied_tcp(
 class IceTcpRelay(asyncio.DatagramProtocol):
     """A local UDP port that relays to the peer's ICE-TCP candidate."""
 
-    def __init__(self, proxy_url: str, candidates: list[tuple[str, int]]) -> None:
+    def __init__(
+        self,
+        proxy_url: str,
+        candidates: list[tuple[str, int]],
+        on_lost: Callable[[], None] | None = None,
+    ) -> None:
         """
         Args:
             proxy_url: Proxy for the TCP connection; empty connects directly.
             candidates: The peer's ICE-TCP candidates, tried in order.
+            on_lost: Called once if the TCP connection drops (not on
+                ``close``): WebRTC does not notice, as consent checks are off.
         """
         self.proxy_url = proxy_url
+        self.on_lost = on_lost
         self.candidates = candidates
         self.port = 0
         self._transport: asyncio.DatagramTransport | None = None
@@ -181,7 +190,7 @@ class IceTcpRelay(asyncio.DatagramProtocol):
             except (OSError, ConnectionError, asyncio.TimeoutError) as exc:
                 last_error = exc
                 logger.warning(
-                    "Voice: ICE-TCP %s:%s %s failed: %s",
+                    "Voice: ICE-TCP %s:%s %s failed: %r",
                     host,
                     port,
                     "via proxy" if self.proxy_url else "direct",
@@ -196,7 +205,7 @@ class IceTcpRelay(asyncio.DatagramProtocol):
             self._reader_task = asyncio.create_task(self._read(reader))
             break
         else:
-            raise ConnectionError(f"no ICE-TCP candidate reachable: {last_error}")
+            raise ConnectionError(f"no ICE-TCP candidate reachable: {last_error!r}")
         transport, _ = await loop.create_datagram_endpoint(
             lambda: self, local_addr=("0.0.0.0", 0)
         )
@@ -222,6 +231,8 @@ class IceTcpRelay(asyncio.DatagramProtocol):
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             if not self._closed:
                 logger.warning("Voice: ICE-TCP media connection closed")
+                if self.on_lost is not None:
+                    self.on_lost()
         finally:
             self.close()
 

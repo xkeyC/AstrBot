@@ -493,7 +493,11 @@ class VoiceSession:
                 raise RuntimeError(
                     "media over TCP, but the peer offered no ICE-TCP candidate"
                 )
-            self._relay = IceTcpRelay(proxy, candidates)
+            self._relay = IceTcpRelay(
+                proxy,
+                candidates,
+                on_lost=lambda: self._request_close("media connection lost"),
+            )
             port = await self._wait_open(self._relay.start(), CONNECT_TIMEOUT)
             sdp = replace_candidates(sdp, _local_address(), port)
             self._phase("media relay over TCP ready")

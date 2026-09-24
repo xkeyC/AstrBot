@@ -14,8 +14,11 @@ from collections.abc import Callable
 from typing import Protocol
 
 import av
+import numpy as np
 from aiortc import MediaStreamTrack
 from aiortc.mediastreams import MediaStreamError
+
+from astrbot import logger
 
 SAMPLE_RATE = 48000
 FRAME_SAMPLES = 960  # 20 ms
@@ -35,6 +38,8 @@ FRAME_SECONDS = FRAME_SAMPLES / SAMPLE_RATE
 PREBUFFER_FRAMES = 10  # 200 ms
 # Sent at once when a stretch starts, to fill the far side's small buffer.
 LEAD_FRAMES = 3  # 60 ms
+# Chunks quieter than this (int16 RMS) are silence (as in Mumble's outbound).
+SILENCE_RMS = 120
 
 
 class FrameSource(Protocol):
@@ -85,22 +90,35 @@ class PcmMedia:
     """
 
     def __init__(
-        self, send: Callable[[bytes], None], buffer_seconds: float = 0
+        self,
+        send: Callable[[bytes], None],
+        buffer_seconds: float = 0,
+        trim_silence: bool = False,
     ) -> None:
         """
         Args:
             send: Receives the bot's voice, 16-bit mono PCM at 48 kHz, in
                 20 ms chunks.
-            buffer_seconds: Playout buffer for a model that delivers its
-                speech ahead of time (a local model); 0 passes the audio on
-                as it arrives (a realtime peer already paces it).
+            buffer_seconds: Playout buffer (upper bound of the speech queued
+                ahead); 0 passes the audio on as it arrives.
+            trim_silence: Drop silent chunks while more than the prebuffer is
+                queued. For a realtime peer, which sends silence all along:
+                otherwise the backlog of one stall stays as added latency
+                until the call ends. Not for a model that delivers speech
+                ahead of time (its pauses would be cut out).
         """
         self._send = send
         self._queue: deque[bytes] | None = (
-            deque(maxlen=int(buffer_seconds / FRAME_SECONDS))
-            if buffer_seconds
+            deque(
+                maxlen=max(
+                    int(buffer_seconds / FRAME_SECONDS),
+                    PREBUFFER_FRAMES + LEAD_FRAMES,
+                )
+            )
+            if buffer_seconds > 0
             else None
         )
+        self._trim_silence = trim_silence
         self._buffer = bytearray()
         self._playing = False
         # Until the model listens, inbound audio is kept, not handed out.
@@ -153,8 +171,14 @@ class PcmMedia:
                         continue
                     if self._queue is None:
                         self._send(chunk)
-                    else:
-                        self._queue.append(chunk)  # oldest dropped when full
+                        continue
+                    if self._trim_silence and len(self._queue) > PREBUFFER_FRAMES:
+                        samples = np.frombuffer(chunk, dtype=np.int16).astype(
+                            np.float32
+                        )
+                        if float(np.sqrt(np.mean(samples * samples))) < SILENCE_RMS:
+                            continue  # a backlog drains in the pauses
+                    self._queue.append(chunk)  # oldest dropped when full
             ended.set()
             if pacer is not None:
                 await pacer  # plays out what is queued
@@ -195,17 +219,20 @@ class PcmMedia:
                     continue
                 playing, waiting_since = True, None
                 next_at = now - LEAD_FRAMES * FRAME_SECONDS
-            if not queue:
-                playing = False  # ran dry: buffer up again
-                continue
             wait = next_at - loop.time()
             if wait > 0:
                 await asyncio.sleep(wait)
             elif wait < -1.0:
                 next_at = loop.time()  # the loop stalled: resync, don't burst
             next_at += FRAME_SECONDS
-            if queue:
+            if not queue:
+                # Nothing by the time the next chunk is due: buffer up again.
+                playing = False
+                continue
+            try:
                 self._send(queue.popleft())
+            except Exception:  # noqa: BLE001 - one lost chunk, playing goes on
+                logger.exception("Voice: sending the bot's audio failed")
 
     def start(self) -> None:
         self.holding = False
