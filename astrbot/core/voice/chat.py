@@ -46,7 +46,6 @@ REQUEST_PROMPT = """<voice_request via="{via}" speaker="{speaker}">
 TASK_BODY = """What was said: {heard}
 Task: {task}"""
 
-OPENING_BODY = """The voice conversation just started. Give the words to open it with. Purpose: {purpose}"""
 
 # Voice conversations open now, by the UMO of their paired chat.
 VOICE_SESSIONS: dict[str, VoiceSession] = {}
@@ -212,7 +211,7 @@ class VoiceChat:
         """Runs ``body`` as a turn of the chat and returns the answer.
 
         Args:
-            body: The request (see TASK_BODY, OPENING_BODY).
+            body: The request (see TASK_BODY).
 
         Returns:
             The answer (empty when the turn ended without one), or None when

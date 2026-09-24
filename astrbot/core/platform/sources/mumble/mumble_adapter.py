@@ -186,24 +186,6 @@ class MumblePlatformAdapter(Platform):
             model=str(cfg.get("mumble_voice_model") or ""),
             extra_prompt=str(cfg.get("mumble_voice_prompt") or ""),
         )
-        # Voice backend: Codex realtime, or a local MiniCPM-o server (omni).
-        self.voice_backend = str(cfg.get("mumble_voice_backend") or "codex_realtime")
-        from astrbot.core.voice.omni import OmniOptions
-
-        try:
-            silence_bias = float(cfg.get("mumble_omni_silence_bias"))
-        except (TypeError, ValueError):
-            silence_bias = OmniOptions.silence_bias
-        self.omni_options = OmniOptions(
-            url=str(cfg.get("mumble_omni_url") or OmniOptions.url).strip(),
-            ref_audio=str(cfg.get("mumble_omni_ref_audio") or "").strip(),
-            silence_bias=silence_bias,
-            # Empty on purpose means no acknowledgement.
-            tool_filler=str(
-                cfg.get("mumble_omni_tool_filler", OmniOptions.tool_filler) or ""
-            ),
-            asr_dir=str(cfg.get("mumble_omni_asr_dir") or "").strip(),
-        )
         self.voice_sessions: dict[str, Any] = {}  # key -> VoiceSession
         self.whisper_targets: dict[str, int] = {}  # user key -> voice target id
         self.muted = False
@@ -492,21 +474,14 @@ class MumblePlatformAdapter(Platform):
             session.media.mixer.feed(speaker, data, terminator)
 
     def _start_voice(self, key: str, user: User):
-        from astrbot.core.voice import omni
         from astrbot.core.voice.chat import VoiceChat
         from astrbot.core.voice.session import VoiceSession
 
         from .audio import MumbleMedia
         from .voice import channel_prompt, whisper_prompt
 
-        local = self.voice_backend == "minicpm_omni"
-        name = self.voice_options.name
         if key == SERVER_SESSION:
-            prompt = (
-                omni.duplex_prompt(name)
-                if local
-                else channel_prompt(self.voice_options)
-            )
+            prompt = channel_prompt(self.voice_options)
 
             def send(frame: bytes, terminator: bool) -> None:
                 self._send_voice(frame, AudioTarget.NORMAL, terminator)
@@ -515,11 +490,7 @@ class MumblePlatformAdapter(Platform):
             whispers = [k for k in self.voice_sessions if k != SERVER_SESSION]
             if len(whispers) >= MAX_WHISPER_SESSIONS:
                 return None
-            prompt = (
-                omni.duplex_prompt(name, user.name)
-                if local
-                else whisper_prompt(self.voice_options, user.name)
-            )
+            prompt = whisper_prompt(self.voice_options, user.name)
             target = self._whisper_target(user)
             if target is None:
                 return None
@@ -527,20 +498,12 @@ class MumblePlatformAdapter(Platform):
             def send(frame: bytes, terminator: bool) -> None:
                 self._send_voice(frame, target, terminator)
 
-        backend = {}
-        if local:
-            backend = {"omni": self.omni_options, "group": key == SERVER_SESSION}
-        session = (omni.OmniVoiceSession if local else VoiceSession)(
-            **backend,
+        session = VoiceSession(
             key=key,
             scope_id=f"{self.meta().id}:voice:{key}",
             prompt=prompt,
             options=self.voice_options,
-            media=MumbleMedia(
-                send,
-                self._voice_bitrate(),
-                buffer_seconds=omni.PLAYOUT_BUFFER_SECONDS if local else 0,
-            ),
+            media=MumbleMedia(send, self._voice_bitrate()),
             on_closed=self._voice_closed,
             label="Mumble",
             thread_key="mumble_voice_thread",

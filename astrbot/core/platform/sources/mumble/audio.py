@@ -373,24 +373,14 @@ class OutboundVoice:
 class MumbleMedia:
     """A voice session's audio in Mumble (``astrbot.core.voice.VoiceMedia``)."""
 
-    def __init__(
-        self,
-        send: Callable[[bytes, bool], None],
-        bitrate: int = 64000,
-        buffer_seconds: float = 0,
-    ):
+    def __init__(self, send: Callable[[bytes, bool], None], bitrate: int = 64000):
         """
         Args:
             send: Sends one Opus frame to Mumble: ``(frame, terminator)``.
             bitrate: Opus bitrate of the bot's voice.
-            buffer_seconds: Playout buffer when the model delivers its speech
-                ahead of time (a local model); 0 keeps the default 3 s, meant
-                to bound latency with a realtime peer.
         """
         self.mixer = InboundMixer()
         self.outbound = OutboundVoice(send, bitrate)
-        if buffer_seconds:
-            self.outbound.max_queued = int(buffer_seconds / FRAME_SECONDS)
         self.track = FrameTrack(self.mixer)
 
     async def play(self, track: MediaStreamTrack) -> None:

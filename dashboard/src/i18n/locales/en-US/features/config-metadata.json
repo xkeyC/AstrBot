@@ -785,34 +785,6 @@
         "description": "Voice Standby Timeout",
         "hint": "Seconds without recognised speech before voice goes on standby (realtime disconnected); new speech resumes it automatically. Muting for over a minute also disconnects."
       },
-      "mumble_voice_backend": {
-        "description": "Voice Backend",
-        "hint": "Codex realtime: needs the Codex Agent runner signed in to a ChatGPT subscription that includes voice. Local MiniCPM-o: connects to your own llama.cpp-omni server (astrbot-omni branch); the full-duplex conversation runs locally, and lookups and actions are handed by the model's tool calls to the voice agent thread (Codex).",
-        "labels": [
-          "Codex realtime",
-          "Local MiniCPM-o"
-        ]
-      },
-      "mumble_omni_url": {
-        "description": "MiniCPM-o Server URL",
-        "hint": "WebSocket URL of llama-omni-server, e.g. ws://127.0.0.1:19060/backend. The server serves one voice conversation at a time: first come, first served; others are not answered."
-      },
-      "mumble_omni_ref_audio": {
-        "description": "Reference Audio (Voice Clone)",
-        "hint": "Optional. Path of a local audio file (wav, mp3, ...); the bot speaks with its voice. Only the first 10 seconds are used; 5 to 10 seconds of clear speech work best. Empty uses the default voice."
-      },
-      "mumble_omni_silence_bias": {
-        "description": "Channel Silence Bias",
-        "hint": "How readily channel speech is taken as not meant for the bot (logit bias of the silence tool). Higher answers less; default 4. Whispers are not affected."
-      },
-      "mumble_omni_tool_filler": {
-        "description": "Task Acknowledgement",
-        "hint": "Optional. What the bot says when it hands a task to the backend, e.g. \"OK, let me check.\" Empty says nothing."
-      },
-      "mumble_omni_asr_dir": {
-        "description": "Speech Recognition Models",
-        "hint": "Optional. Directory of the SenseVoice and Silero VAD models, downloaded from HuggingFace when missing (set HF_ENDPOINT for a mirror). Empty uses data/models/sensevoice."
-      },
       "type": {
         "description": "Adapter Type"
       },

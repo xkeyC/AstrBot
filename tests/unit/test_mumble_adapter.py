@@ -269,33 +269,3 @@ def test_departed_speaker_state_is_dropped(adapter):
     adapter._on_user_removed(adapter.client.users[2], {})
     assert list(adapter._preroll[SERVER_SESSION]) == [(0.0, 3, b"b", False)]
     assert "whisper:abc123" not in adapter._preroll
-
-
-def test_omni_settings_parse_leniently(tmp_path):
-    cert, key = ensure_certificate(tmp_path, "bot")
-    base = {
-        "id": "mumble_test",
-        "mumble_host": "localhost",
-        "mumble_certfile": cert,
-        "mumble_keyfile": key,
-    }
-    adapter = MumblePlatformAdapter(
-        {**base, "mumble_omni_silence_bias": ""}, {}, asyncio.Queue()
-    )
-    # A cleared field does not stop the adapter; defaults apply.
-    assert adapter.voice_backend == "codex_realtime"
-    assert adapter.omni_options.silence_bias == 4.0
-    assert adapter.omni_options.tool_filler == "好的，我查一下。"
-    adapter = MumblePlatformAdapter(
-        {
-            **base,
-            "mumble_voice_backend": "minicpm_omni",
-            "mumble_omni_silence_bias": "2.5",
-            "mumble_omni_tool_filler": "",
-        },
-        {},
-        asyncio.Queue(),
-    )
-    assert adapter.voice_backend == "minicpm_omni"
-    assert adapter.omni_options.silence_bias == 2.5
-    assert adapter.omni_options.tool_filler == ""  # no acknowledgement
