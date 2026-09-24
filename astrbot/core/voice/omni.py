@@ -51,8 +51,13 @@ REF_AUDIO_SECONDS = 10.0
 PLAYOUT_BUFFER_SECONDS = 120.0
 # Audio still arriving for speech that was just cut is dropped this long.
 CUT_SECONDS = 0.6
-# The speaker counts as talking over the bot this long after speech.
+# After the model stops speaking, speech this long (as the VAD reports it,
+# with its 0.6 s hangover) within BARGE_IN_SECONDS means it was talked over;
+# a short "嗯" stays under it.
+BARGE_IN_SPEECH = 1.2
 BARGE_IN_SECONDS = 1.5
+# One character left after backchannels that still takes the floor.
+FLOOR_WORDS = set("停不别等喂")
 # A task handed off within this long of the last one gets no second
 # acknowledgement (one request often arrives as two utterances).
 FILLER_GAP_SECONDS = 8.0
@@ -214,15 +219,15 @@ def takes_floor(text: str, names: list[str] | None = None) -> bool:
     if names is not None:
         lowered = text.lower()
         return any(name and name.lower() in lowered for name in names)
-    if text.rstrip().endswith(("?", "？")):
-        return True  # a question: "可以吗？", "真的？"
+    question = text.rstrip().endswith(("?", "？"))
     rest = "".join(ch for ch in text.lower() if ch.isalnum())
     while rest:
         word = next((w for w in BACKCHANNELS if rest.startswith(w)), None)
         if word is None:
-            # Two characters or more ("别说了", "停下"), or a question
-            # ("可以吗"); one left over is a particle ("对吧", "OK的", "哇").
-            return len(rest) >= 2 or "吗" in rest
+            # Two characters or more ("别说了", "停下"), a question ("可以吗",
+            # "真的？") or a one-word command ("停"); one character else is a
+            # particle ("对吧", "OK的", "哇").
+            return len(rest) >= 2 or "吗" in rest or question or rest in FLOOR_WORDS
         rest = rest[len(word) :]
     return False
 
@@ -308,6 +313,8 @@ class Utterances:
         config.sample_rate = IN_RATE
         self._vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=30)
         self._recognizer = recognizer
+        # Seconds the current speech has gone on (0 when there is none).
+        self.speaking_for = 0.0
         self._last_text = ""
         self._last_end = -(10**9)  # sample where the last utterance ended
 
@@ -321,7 +328,11 @@ class Utterances:
         voiced = False
         for i in range(0, len(unit), 512):
             self._vad.accept_waveform(unit[i : i + 512])
-            voiced = voiced or self._vad.is_speech_detected()
+            if self._vad.is_speech_detected():
+                voiced = True
+                self.speaking_for += len(unit[i : i + 512]) / IN_RATE
+            else:
+                self.speaking_for = 0.0
         text = None
         while not self._vad.empty():
             start = self._vad.front.start
@@ -435,8 +446,8 @@ class OmniVoiceSession(VoiceSession):
         self._say: list[str] = []
         self._say_cancel = False
         self._cut_until = 0.0
-        self._voiced_at = 0.0
-        self._voiced_units = 0  # voiced units in a row
+        self._speaking_for = 0.0  # how long the speaker has been talking
+        self._barge_until = 0.0  # the model stopped: talked over if speech goes on
         self._task_at = 0.0
         # When the speech handed to the media so far ends playing, roughly.
         self._playing_until = 0.0
@@ -552,14 +563,13 @@ class OmniVoiceSession(VoiceSession):
                 continue
             unit, buffer = buffer[:IN_RATE], buffer[IN_RATE:]
             voiced, transcript = await asyncio.to_thread(utterances.feed, unit)
+            self._speaking_for = getattr(utterances, "speaking_for", 0.0)
+            self._check_barge_in()
             unit = unit + rng.normal(0, DITHER, IN_RATE).astype(np.float32)
             request: dict = {
                 "audio": base64.b64encode(unit.astype(np.float32).tobytes()).decode(),
                 "voiced": voiced,
             }
-            self._voiced_units = self._voiced_units + 1 if voiced else 0
-            if voiced:
-                self._voiced_at = time.monotonic()
             if transcript is not None:
                 request["transcript"] = transcript
                 if transcript:
@@ -626,22 +636,12 @@ class OmniVoiceSession(VoiceSession):
             elif delta == "text":
                 said.append(event.get("text") or "")
             elif delta == "listen":
-                stopped = self._server_speaking
+                if self._server_speaking and not self.group:
+                    # The model stopped speaking: if the speaker keeps
+                    # talking, it was talked over (see _check_barge_in).
+                    self._barge_until = now + BARGE_IN_SECONDS
+                    self._check_barge_in()
                 self._server_speaking = False
-                if (
-                    stopped
-                    and not self.group
-                    and now < self._playing_until
-                    and now - self._voiced_at < BARGE_IN_SECONDS
-                    # Speech going on for a while, not a backchannel.
-                    and self._voiced_units >= 2
-                ):
-                    # One to one: the model stopped speaking because the
-                    # speaker talked over it; what it had still to say goes
-                    # too (answers waiting to be spoken are kept: a
-                    # backchannel may have stopped it). Its audio is still
-                    # arriving.
-                    self._cut(arriving=True)
         elif kind == "response.done" and said:
             logger.debug(
                 "%s omni voice %s said: %s", self.label, self.key, "".join(said)
@@ -687,6 +687,20 @@ class OmniVoiceSession(VoiceSession):
         task = str(arguments.get("task") or heard)
         text = TASK_PROMPT.format(heard=heard or task, task=task)
         self._spawn(self._submit(text), "task")
+
+    def _check_barge_in(self) -> None:
+        """One to one: the model stopped speaking and the speaker went on
+        talking (not a backchannel): what it had still to say is dropped
+        (answers waiting to be spoken are kept). Its audio is still
+        arriving."""
+        now = time.monotonic()
+        if (
+            now < self._barge_until
+            and now < self._playing_until
+            and self._speaking_for >= BARGE_IN_SPEECH
+        ):
+            self._barge_until = 0.0
+            self._cut(arriving=True)
 
     def _cut(self, pending: bool = False, arriving: bool | None = None) -> None:
         """Drops the speech being played and the rest of it still arriving.

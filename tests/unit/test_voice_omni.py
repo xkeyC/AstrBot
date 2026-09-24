@@ -210,8 +210,7 @@ async def test_receive_plays_audio_and_drops_it_after_a_cut():
 async def test_barge_in_cuts_only_one_to_one():
     for group, cut in ((False, True), (True, False)):
         session = make_session(group=group)
-        session._voiced_at = omni.time.monotonic()
-        session._voiced_units = 2
+        session._speaking_for = 2.0
         session._ws = FakeWs(
             [
                 {"type": "response.output.delta", "kind": "text", "text": "说"},
@@ -456,8 +455,7 @@ async def test_talking_over_the_bot_needs_more_than_a_backchannel():
 async def test_a_listen_cut_keeps_waiting_answers():
     session = make_session(group=False)
     session._say = ["答案"]
-    session._voiced_at = omni.time.monotonic()
-    session._voiced_units = 2
+    session._speaking_for = 2.0
     session._ws = FakeWs(
         [
             {"type": "response.output.delta", "kind": "text", "text": "说"},
@@ -543,8 +541,7 @@ async def test_listen_cuts_only_when_speech_stops():
         ),
     ):
         session = make_session(group=False)
-        session._voiced_at = omni.time.monotonic()
-        session._voiced_units = 2
+        session._speaking_for = 2.0
         session._playing_until = omni.time.monotonic() + 30
         session._ws = FakeWs(events)
         await session._receive()
@@ -561,8 +558,7 @@ def test_a_cut_after_the_server_finished_keeps_the_next_reply():
 @pytest.mark.asyncio
 async def test_barge_in_drops_the_late_audio_of_the_cut_speech():
     session = make_session(group=False)
-    session._voiced_at = omni.time.monotonic()
-    session._voiced_units = 2
+    session._speaking_for = 2.0
     session._ws = FakeWs(
         [
             {"type": "response.output.delta", "kind": "text", "text": "我给你讲"},
@@ -579,8 +575,7 @@ async def test_barge_in_drops_the_late_audio_of_the_cut_speech():
 @pytest.mark.asyncio
 async def test_late_audio_does_not_mark_the_server_speaking():
     session = make_session(group=False)
-    session._voiced_at = omni.time.monotonic()
-    session._voiced_units = 2
+    session._speaking_for = 2.0
     session._ws = FakeWs(
         [
             {"type": "response.output.delta", "kind": "text", "text": "答完了"},
@@ -589,30 +584,27 @@ async def test_late_audio_does_not_mark_the_server_speaking():
             {"type": "response.output.delta", "kind": "listen"},  # next unit
         ]
     )
-    session._voiced_at = 0.0  # nobody spoke over the first listen
     events = session._ws.events
     session._ws.events = events[:2]
     await session._receive()
     session._closed = False  # keep going with the same session
-    session._voiced_at = omni.time.monotonic()  # the speaker starts replying
-    session._voiced_units = 2
+    session._speaking_for = 2.0
     session._ws.events = events[2:]
     await session._receive()
     assert "flush" not in session.media.calls  # the answer's tail plays out
 
 
 def test_takes_floor_one_character_left_is_a_particle():
-    for text in ("好嘞", "欸", "哇", "对吧", "是吧", "OK的", "mhmm", "然后呢"):
+    for text in ("好嘞", "欸", "哇", "对吧", "是吧", "OK的", "mhmm", "然后呢", "嗯？"):
         assert not omni.takes_floor(text), text
-    for text in ("可以吗", "真的？", "哦是吗"):
+    for text in ("可以吗", "真的？", "哦是吗", "停", "嗯，不", "喂"):
         assert omni.takes_floor(text), text
 
 
 @pytest.mark.asyncio
 async def test_a_backchannel_at_the_end_of_an_answer_keeps_its_tail():
     session = make_session(group=False)
-    session._voiced_at = omni.time.monotonic()
-    session._voiced_units = 1  # a short "嗯"
+    session._speaking_for = 0.8  # a short "嗯" (with the VAD hangover)
     session._ws = FakeWs(
         [
             {"type": "response.output.delta", "kind": "text", "text": "答完了"},
@@ -622,3 +614,45 @@ async def test_a_backchannel_at_the_end_of_an_answer_keeps_its_tail():
     )
     await session._receive()
     assert "flush" not in session.media.calls
+
+
+@pytest.mark.asyncio
+async def test_barge_in_decided_when_speech_goes_on_after_the_listen():
+    session = make_session(group=False)
+    session._speaking_for = 0.5  # just started talking when the model stopped
+    session._ws = FakeWs(
+        [
+            {"type": "response.output.delta", "kind": "text", "text": "我给你讲"},
+            audio_event(3.0),
+            {"type": "response.output.delta", "kind": "listen"},
+        ]
+    )
+    await session._receive()
+    assert "flush" not in session.media.calls  # not yet
+    session._speaking_for = 1.5  # ... and keeps talking
+    session._check_barge_in()
+    assert "flush" in session.media.calls
+
+
+def test_utterances_measure_how_long_speech_goes_on():
+    class Vad:
+        def __init__(self, speech):
+            self.speech, self.n = speech, 0
+
+        def accept_waveform(self, samples):
+            self.n += 1
+
+        def is_speech_detected(self):
+            return self.speech(self.n)
+
+        def empty(self):
+            return True
+
+    utt = omni.Utterances.__new__(omni.Utterances)
+    utt.speaking_for = 0.0
+    utt._vad = Vad(lambda n: True)
+    utt.feed(np.zeros(16000, np.float32))
+    assert utt.speaking_for == pytest.approx(1.0)
+    utt._vad = Vad(lambda n: n < 10)  # stops after 10 windows
+    utt.feed(np.zeros(16000, np.float32))
+    assert utt.speaking_for == 0.0
