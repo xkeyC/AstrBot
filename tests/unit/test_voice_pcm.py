@@ -1,3 +1,4 @@
+import asyncio
 import fractions
 
 import av
@@ -75,3 +76,20 @@ async def test_play_resamples_to_48k_mono_20ms_chunks():
     sent.clear()
     await media.play(ToneTrack(5))
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_playout_buffer_paces_speech_and_flush_drops_it(monkeypatch):
+    monkeypatch.setattr(pcm, "FRAME_SECONDS", 0.005)  # a fast clock
+    sent = []
+    media = PcmMedia(sent.append, buffer_seconds=10)
+    task = asyncio.create_task(media.play(ToneTrack(50)))  # 1 s, delivered at once
+    for _ in range(200):
+        if sent:
+            break
+        await asyncio.sleep(0.005)
+    # Paced: only the lead and a few frames went out right away.
+    assert 0 < len(sent) < 40
+    media.flush()
+    await asyncio.wait_for(task, 5)
+    assert len(sent) < 45  # the flushed rest was never sent

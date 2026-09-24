@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import fractions
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Protocol
 
@@ -26,6 +27,10 @@ JITTER_FRAMES = 2  # 40 ms
 # what is said while the session is still connecting is kept; it drains
 # during the next pause.
 MAX_BACKLOG_BYTES = SAMPLE_RATE * 2 * 10
+FRAME_SECONDS = FRAME_SAMPLES / SAMPLE_RATE
+# With a playout buffer, each stretch of speech starts with this much sent at
+# once, so the receiving side's own buffer never runs dry on jitter.
+LEAD_FRAMES = 5  # 100 ms
 
 
 class FrameSource(Protocol):
@@ -71,16 +76,27 @@ class PcmMedia:
     """A voice session's audio as raw PCM (``astrbot.core.voice.VoiceMedia``).
 
     The platform calls ``feed`` with what the other side says, in chunks of
-    any size, and gets the bot's voice through ``send`` as it arrives.
+    any size, and gets the bot's voice through ``send``: as it arrives, or,
+    with a playout buffer, at real-time pace so ``flush`` can still drop it.
     """
 
-    def __init__(self, send: Callable[[bytes], None]) -> None:
+    def __init__(
+        self, send: Callable[[bytes], None], buffer_seconds: float = 0
+    ) -> None:
         """
         Args:
             send: Receives the bot's voice, 16-bit mono PCM at 48 kHz, in
-                20 ms chunks as WebRTC delivers them.
+                20 ms chunks.
+            buffer_seconds: Playout buffer for a model that delivers its
+                speech ahead of time (a local model); 0 passes the audio on
+                as it arrives (a realtime peer already paces it).
         """
         self._send = send
+        self._queue: deque[bytes] | None = (
+            deque(maxlen=int(buffer_seconds / FRAME_SECONDS))
+            if buffer_seconds
+            else None
+        )
         self._buffer = bytearray()
         self._playing = False
         # Until the model listens, inbound audio is kept, not handed out.
@@ -114,18 +130,57 @@ class PcmMedia:
     async def play(self, track: MediaStreamTrack) -> None:
         resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
         buffer = bytearray()
+        ended = asyncio.Event()
+        pacer = (
+            asyncio.create_task(self._pace(ended)) if self._queue is not None else None
+        )
+        try:
+            while True:
+                try:
+                    frame = await track.recv()
+                except MediaStreamError:
+                    break
+                for resampled in resampler.resample(frame):
+                    buffer += bytes(resampled.planes[0])[: resampled.samples * 2]
+                while len(buffer) >= FRAME_BYTES:
+                    chunk = bytes(buffer[:FRAME_BYTES])
+                    del buffer[:FRAME_BYTES]
+                    if self.muted:
+                        continue
+                    if self._queue is None:
+                        self._send(chunk)
+                    else:
+                        self._queue.append(chunk)  # oldest dropped when full
+            ended.set()
+            if pacer is not None:
+                await pacer  # plays out what is queued
+        finally:
+            if pacer is not None:
+                pacer.cancel()
+
+    async def _pace(self, ended: asyncio.Event) -> None:
+        """Sends queued speech at real-time pace, one 20 ms chunk at a time,
+        until the queue is empty after ``ended`` is set."""
+        loop = asyncio.get_running_loop()
+        queue = self._queue
+        assert queue is not None
+        next_at = 0.0
         while True:
-            try:
-                frame = await track.recv()
-            except MediaStreamError:
-                return
-            for resampled in resampler.resample(frame):
-                buffer += bytes(resampled.planes[0])[: resampled.samples * 2]
-            while len(buffer) >= FRAME_BYTES:
-                chunk = bytes(buffer[:FRAME_BYTES])
-                del buffer[:FRAME_BYTES]
-                if not self.muted:
-                    self._send(chunk)
+            if not queue:
+                if ended.is_set() or self.muted:
+                    return
+                await asyncio.sleep(FRAME_SECONDS)
+                # A new stretch of speech: send a short lead at once.
+                next_at = loop.time() - LEAD_FRAMES * FRAME_SECONDS
+                continue
+            wait = next_at - loop.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            elif wait < -1.0:
+                next_at = loop.time()  # the loop stalled: resync, don't burst
+            next_at += FRAME_SECONDS
+            if queue:
+                self._send(queue.popleft())
 
     def start(self) -> None:
         self.holding = False
@@ -133,6 +188,9 @@ class PcmMedia:
     def stop(self) -> None:
         self.muted = True
         self._buffer.clear()
+        self.flush()
 
     def flush(self) -> None:
-        """Nothing to drop: audio goes to ``send`` as it arrives."""
+        """Drops the bot's speech not sent yet (only a playout buffer has any)."""
+        if self._queue is not None:
+            self._queue.clear()
