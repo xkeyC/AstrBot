@@ -80,6 +80,12 @@ BACKCHANNELS = sorted(
 # An agent answer longer than this is cut (it is read aloud at ~5 characters
 # a second, and all of it goes into the duplex model's short context).
 MAX_SPOKEN_CHARS = 400
+# A context note is written into the model in one go, before the next unit:
+# a long one stalls the conversation (and the router only sees its tail).
+MAX_NOTE_CHARS = 800
+# Said while a progress question's task is still running (in the chat's
+# queue, where the question would only be answered after it).
+STILL_WORKING_SPEECH = "还在处理，好了马上告诉你。"
 
 ASR_FILES = {
     "model.int8.onnx": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
@@ -149,14 +155,20 @@ ROUTER_PRIVATE = """你是语音助手"{name}"的决策模块。{name}正在和�
 "老王，你那边打完了没有？" -> silence（在和老王说话）
 
 {tools}"""
-# One to one the router also sees the context notes (results the model
-# already knows): what they answer is a reply, and a progress question goes
-# to the backend, whose real status is spoken (a progress note makes the
-# model invent results).
+# The router also sees the context notes (results the model already knows):
+# what they answer is a reply, and a progress question goes to the backend,
+# whose real status is spoken (a progress note makes the model invent
+# results). In a group only one short sentence: longer rules or examples
+# there tipped the router toward silence (router_eval: 15-16/19 against 18/19
+# for the old prompt and for this one).
 ROUTER_CONTEXT_RULES = """但如果"{name}已经知道的后台信息"里已经有回答这句话需要的内容，就调用 reply，不要再交给后台。问后台任务进度的（"好了吗""查到了吗"）调用 backend_task，task 写"询问进度："加上那个任务。后台信息只用来判断能不能直接回答，不要因为有后台信息就选 backend_task。"""
+ROUTER_GROUP_CONTEXT_RULES = """后台信息里已有答案的，调用 reply；问任务进度的，调用 backend_task，task 写"询问进度："加上那个任务。"""
 ROUTER_PRIVATE_INPUT = """{name}已经知道的后台信息：
 {{context}}
 对方刚说：{{heard}}"""
+ROUTER_GROUP_INPUT = """{name}已经知道的后台信息：
+{{context}}
+频道里刚有人说：{{heard}}"""
 # Router tasks asking about progress start with this.
 PROGRESS_TASK = "询问进度"
 
@@ -185,12 +197,11 @@ def router_config(name: str, aliases: list[str], group: bool, bias: float) -> di
         else "没有需要回应的内容，保持沉默。",
     )
     template = ROUTER_GROUP if group else ROUTER_PRIVATE
-    tasks = ROUTER_TASKS.format(name=name)
-    if not group:
-        tasks = tasks.replace(
-            "这些一律用 backend_task。",
-            "这些一律用 backend_task。" + ROUTER_CONTEXT_RULES.format(name=name),
-        )
+    rules = ROUTER_GROUP_CONTEXT_RULES if group else ROUTER_CONTEXT_RULES
+    tasks = ROUTER_TASKS.format(name=name).replace(
+        "这些一律用 backend_task。",
+        "这些一律用 backend_task。" + rules.format(name=name),
+    )
     system = template.format(name=name, aliases=alias_text, tasks=tasks, tools=tools)
     return {
         "tools": ["silence", "reply", "backend_task"],
@@ -203,7 +214,9 @@ def router_config(name: str, aliases: list[str], group: bool, bias: float) -> di
         # Utterances end with the transcripts sent from here (Utterances).
         "client_transcripts": True,
         "transcribe_prompt": "请仔细听这段音频片段，并将其内容逐字记录。",
-        "user_template": "{heard}" if group else ROUTER_PRIVATE_INPUT.format(name=name),
+        "user_template": (ROUTER_GROUP_INPUT if group else ROUTER_PRIVATE_INPUT).format(
+            name=name
+        ),
         # Stands for {context} while there are no notes; never empty (an
         # empty one halves the router's backend_task accuracy).
         "context_empty": "（无）",
@@ -248,16 +261,17 @@ def takes_floor(text: str, names: list[str] | None = None) -> bool:
     return False
 
 
-def speakable(text: str) -> str:
-    """Plain spoken text from an agent answer (no Markdown, links or code)."""
+def speakable(text: str, limit: int = MAX_SPOKEN_CHARS) -> str:
+    """Plain spoken text from an agent answer (no Markdown, links or code),
+    cut at a sentence end within ``limit`` characters."""
     text = re.sub(r"```.*?```", "", text, flags=re.S)
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[*_`#>|]+", "", text)
     text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > MAX_SPOKEN_CHARS:
-        cut = max(text.rfind(p, 0, MAX_SPOKEN_CHARS) for p in "。！？.!?")
-        text = text[: cut + 1 if cut > 0 else MAX_SPOKEN_CHARS]
+    if len(text) > limit:
+        cut = max(text.rfind(p, 0, limit) for p in "。！？.!?")
+        text = text[: cut + 1 if cut > 0 else limit]
     return text
 
 
@@ -737,7 +751,19 @@ class OmniVoiceSession(VoiceSession):
         # A progress answer is spoken as given: in a context note the model
         # would make up the result.
         progress = task.startswith(PROGRESS_TASK)
-        busy = self._ask(body, self._say_answer if progress else None)
+        if progress and self.chat.busy():
+            # Asked in the queue it would only be answered after the task it
+            # asks about, and repeat its result: the honest status is that
+            # it is still running.
+            self._say.append(STILL_WORKING_SPEECH)
+            self._task_at = now
+            return
+        busy = self._ask(
+            body,
+            self._say_answer if progress else None,
+            # A status is stale once the call is over: not posted.
+            keep=not progress,
+        )
         # One acknowledgement for a request that came in pieces: none for a
         # piece following the last one closely.
         if now - self._task_at > FILLER_GAP_SECONDS:
@@ -787,8 +813,9 @@ class OmniVoiceSession(VoiceSession):
         if answer is None or not answer.strip():
             await self._say_answer(answer)
             return
-        logger.info("%s omni voice %s: chat answered: %s", self.label, self.key, answer)
-        self._notes.append((answer.strip(), True))
+        note = speakable(answer, MAX_NOTE_CHARS)
+        logger.info("%s omni voice %s: chat answered: %s", self.label, self.key, note)
+        self._notes.append((note, True))
 
     async def _say_answer(self, answer: str | None) -> None:
         """Speaks an answer as given (the opening words, a progress status)."""
@@ -804,8 +831,8 @@ class OmniVoiceSession(VoiceSession):
     async def note(self, text: str) -> None:
         """A result that reached the chat later (see ``VoiceSession.note``):
         a context note the model tells in its own words when nobody talks."""
-        if not self._closed and text.strip():
-            self._notes.append((text.strip(), True))
+        if not self._closed and (note := speakable(text, MAX_NOTE_CHARS)):
+            self._notes.append((note, True))
 
     async def _release_transport(self) -> None:
         # Sending and receiving stop before the socket closes under them.

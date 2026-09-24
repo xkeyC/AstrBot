@@ -701,16 +701,16 @@ class VoiceSession:
                 task.cancel()
         if engine is not None and thread_id is not None and not self._thread_released:
             self._thread_released = True
-            pump = engine.pumps.get(thread_id)
-            route = pump.route if pump is not None else None
-            if route is not None and route.events is self._events_queue:
-                pump.close_turn()
-            elif route is not None:
-                # A newer session of this key resumed the thread meanwhile
-                # (a quick call back): it is theirs now.
-                return
-            # Unload the thread; the next session resumes it from its rollout.
+            # Under the lock a newer session of this key opens the thread with
+            # (and takes its route right after): seen here, it is left to it.
             async with engine.session_lock(self.scope_id):
+                pump = engine.pumps.get(thread_id)
+                route = pump.route if pump is not None else None
+                if route is not None and route.events is not self._events_queue:
+                    return  # resumed by a quick call back: theirs now
+                if route is not None:
+                    pump.close_turn()
+                # Unload the thread; the next session resumes it from its rollout.
                 await engine.forget_thread(thread_id)
 
 

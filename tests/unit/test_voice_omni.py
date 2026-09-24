@@ -723,7 +723,27 @@ def test_private_router_sees_the_context_notes():
     assert private["context_empty"] == "（无）"
     assert "询问进度" in private["system"]
     group = omni.router_config("小乐", [], True, 4.0)
-    assert group["user_template"] == "{heard}"
+    assert "{context}" in group["user_template"] and "频道" in group["user_template"]
+    # One short sentence of rules in a group (more tipped it to silence).
+    assert omni.ROUTER_GROUP_CONTEXT_RULES in group["system"]
+    assert "明天小雨" not in group["system"]
+
+
+@pytest.mark.asyncio
+async def test_a_progress_question_while_its_task_runs_is_answered_here():
+    session = make_session(filler="")
+    session.chat.is_busy = True
+    session._on_tool_call(
+        {"name": "backend_task", "arguments": {"task": "询问进度：查询比特币价格"}}
+    )
+    await settle()
+    assert session._say == [omni.STILL_WORKING_SPEECH]
+    assert session.chat.asked == []  # not queued behind the task it asks about
+
+
+def test_notes_are_cleaned_and_bounded():
+    note = omni.speakable("**结果**：" + "很长的一句话。" * 300, omni.MAX_NOTE_CHARS)
+    assert "*" not in note and len(note) <= omni.MAX_NOTE_CHARS
 
 
 @pytest.mark.asyncio
