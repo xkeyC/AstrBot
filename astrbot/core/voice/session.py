@@ -390,6 +390,11 @@ class VoiceSession:
                 self._thread_released = True
                 await engine.forget_thread(self._thread_id)
                 raise _SessionClosed
+            # Taken under the lock: an older session of this key releasing
+            # the thread sees it is ours and leaves it (see _release). This
+            # thread only ever carries the voice conversation, so its pump
+            # route stays open for the whole session and sees every event.
+            self._events_queue = engine.pump(self._thread_id).open_turn(None, None)
         if started_new or state.get("thread_id") != self._thread_id:
             await sp.put_async(
                 scope="umo",
@@ -401,10 +406,6 @@ class VoiceSession:
                 },
             )
         self._check_open()
-        # This thread only ever carries the voice conversation, so its pump
-        # route stays open for the whole session and sees every event.
-        events = engine.pump(self._thread_id).open_turn(None, None)
-        self._events_queue = events
 
     async def _connect(self) -> None:
         """Starts the realtime conversation over WebRTC on the agent thread."""

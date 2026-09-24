@@ -11,6 +11,7 @@ import pytest
 
 from astrbot.core.voice import chat as chat_module
 from astrbot.core.voice import omni
+from astrbot.core.voice import session as session_module
 from astrbot.core.voice.chat import VoiceChat
 from astrbot.core.voice.omni import OmniOptions, OmniVoiceSession
 from astrbot.core.voice.session import VoiceOptions
@@ -732,13 +733,49 @@ def test_private_router_sees_the_context_notes():
 @pytest.mark.asyncio
 async def test_a_progress_question_while_its_task_runs_is_answered_here():
     session = make_session(filler="")
-    session.chat.is_busy = True
+    session._pending = 1  # this conversation's task is still running
     session._on_tool_call(
         {"name": "backend_task", "arguments": {"task": "询问进度：查询比特币价格"}}
     )
     await settle()
     assert session._say == [omni.STILL_WORKING_SPEECH]
     assert session.chat.asked == []  # not queued behind the task it asks about
+    assert session._task_at == 0.0  # the next request still gets its filler
+
+
+@pytest.mark.asyncio
+async def test_a_progress_question_behind_other_chat_work_is_asked():
+    session = make_session(filler="")
+    session.chat.is_busy = True  # busy with a text turn, not this call's task
+    session._on_tool_call(
+        {"name": "backend_task", "arguments": {"task": "询问进度：查询比特币价格"}}
+    )
+    await settle()
+    assert len(session.chat.asked) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_progress_status_is_not_posted_after_the_call(monkeypatch):
+    posted = []
+
+    async def deliver(umo, answer):
+        posted.append(answer)
+
+    monkeypatch.setattr(session_module, "deliver", deliver)
+    session = make_session(filler="")
+    session._on_tool_call(
+        {"name": "backend_task", "arguments": {"task": "询问进度：查询比特币价格"}}
+    )
+    session._closed = True  # the call ended before the status came
+    await settle()
+    assert posted == [] and session._say == []
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_nothing_to_speak_is_said_done():
+    session = make_session()
+    await session._tell("```\nprint(1)\n```")
+    assert session._notes == [] and session._say == [omni.DONE_SPEECH]
 
 
 def test_notes_are_cleaned_and_bounded():

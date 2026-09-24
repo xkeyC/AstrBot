@@ -470,3 +470,25 @@ async def test_the_voice_persona_completes_the_prompt(engine, monkeypatch):
         with pytest.raises(RuntimeError):
             await session._start()
         assert session.prompt == expected
+
+
+@pytest.mark.asyncio
+async def test_a_quick_call_back_keeps_the_thread(engine, monkeypatch):
+    class SlowSp(FakeSp):
+        async def put_async(self, **_kwargs):
+            await asyncio.sleep(0)  # the database write yields
+
+    monkeypatch.setattr(voice, "sp", SlowSp())
+    old = make_session([])
+    old._engine, old._thread_id = engine, "t1"
+    old._events_queue = engine.pump("t1").open_turn(None, None)
+    new = make_session([])
+    opening = asyncio.create_task(new._open_agent())
+    await asyncio.sleep(0)  # the new session holds the lock in open_thread
+    releasing = asyncio.create_task(old._release())
+    await asyncio.sleep(0)
+    engine.gate.set()
+    await asyncio.wait_for(asyncio.gather(opening, releasing), 5)
+
+    assert engine.forgotten == []  # the new session's thread stays loaded
+    assert engine.pumps["t1"].route.events is new._events_queue

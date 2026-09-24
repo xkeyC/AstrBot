@@ -751,12 +751,11 @@ class OmniVoiceSession(VoiceSession):
         # A progress answer is spoken as given: in a context note the model
         # would make up the result.
         progress = task.startswith(PROGRESS_TASK)
-        if progress and self.chat.busy():
-            # Asked in the queue it would only be answered after the task it
-            # asks about, and repeat its result: the honest status is that
-            # it is still running.
+        if progress and self._pending:
+            # This conversation's task is still running: asked in the queue
+            # the question would only be answered after it, repeating its
+            # result. The honest status is that it is still running.
             self._say.append(STILL_WORKING_SPEECH)
-            self._task_at = now
             return
         busy = self._ask(
             body,
@@ -814,6 +813,9 @@ class OmniVoiceSession(VoiceSession):
             await self._say_answer(answer)
             return
         note = speakable(answer, MAX_NOTE_CHARS)
+        if not note:  # nothing left to tell (only code, links)
+            await self._say_answer(answer)
+            return
         logger.info("%s omni voice %s: chat answered: %s", self.label, self.key, note)
         self._notes.append((note, True))
 
