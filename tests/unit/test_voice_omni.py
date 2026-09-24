@@ -656,3 +656,18 @@ def test_utterances_measure_how_long_speech_goes_on():
     utt._vad = Vad(lambda n: n < 10)  # stops after 10 windows
     utt.feed(np.zeros(16000, np.float32))
     assert utt.speaking_for == 0.0
+
+
+@pytest.mark.asyncio
+async def test_answers_wait_while_a_barge_in_may_be_decided():
+    session = make_session(group=False)
+    session._ws = FakeWs()
+    session._say = ["答案"]
+    session._barge_until = omni.time.monotonic() + 30
+    send = asyncio.create_task(session._send(FakeUtterances([(False, None)] * 3)))
+    await asyncio.wait_for(session._ws.wait_sent(1), 5)
+    assert "say" not in session._ws.sent[0]["input"]
+    session._barge_until = 0.0
+    await asyncio.wait_for(session._ws.wait_sent(2), 5)
+    send.cancel()
+    assert session._ws.sent[1]["input"]["say"] == "答案"

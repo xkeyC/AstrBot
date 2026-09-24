@@ -591,8 +591,10 @@ class OmniVoiceSession(VoiceSession):
                 request["say_cancel"] = True
                 self._say_cancel = False
             # After a cut, speech waits until what is still arriving from the
-            # cut speech has been dropped (it is dropped by time).
-            if self._say and time.monotonic() >= self._cut_until:
+            # cut speech has been dropped (it is dropped by time), and while a
+            # barge-in may still be decided (it would cut this speech too).
+            now = time.monotonic()
+            if self._say and now >= self._cut_until and now >= self._barge_until:
                 request["say"] = " ".join(self._say)
                 self._say.clear()
             await self._ws.send(json.dumps({"type": "input.append", "input": request}))
