@@ -244,6 +244,9 @@ class VoiceSession:
         self.key = key
         self.scope_id = scope_id
         self.prompt = prompt
+        # The voice persona (or the platform's extra prompt) the start added
+        # to the prompt.
+        self.persona = ""
         self.options = options
         self.chat = chat
         # Requests handed to the chat and not answered yet.
@@ -343,6 +346,7 @@ class VoiceSession:
         # extra prompt, completes the voice model's instructions.
         extra = await self.chat.voice_persona() or self.options.extra_prompt
         self._check_open()
+        self.persona = extra
         if extra:
             self.prompt = f"{self.prompt}\n\n{extra}"
         await self._open_agent()

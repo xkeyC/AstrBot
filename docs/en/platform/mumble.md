@@ -30,6 +30,17 @@ Requires the `Codex agent runner` signed in with a **ChatGPT plan that includes 
 - **Mute / unmute**: send `wake prefix + mute` (or `闭麦`, or with the global wake prefix) in a channel, or just `mute` in a private message, and the bot stops listening and speaking and shows as muted; `unmute` (`开麦`) restores it. Muted for over a minute, it drops its voice sessions.
 - Voice options: `Voice Wake Name` and `Voice Wake Aliases`, `Voice` (juniper, maple, spruce, ember, vale, breeze, arbor, sol, cove; default cove), `Realtime Model`, `Extra Voice Prompt`. When the paired conversation's active persona has a voice persona, the voice model uses it instead of the extra voice prompt.
 
+## Local cascade voice
+
+Set `Voice Backend` to **Local cascade** to run voice conversations on the realtime voice endpoint (`/v1/realtime`) of your own local-multimodal-infra instead of a ChatGPT subscription; lookups and actions still go to the paired chat's agent (Codex) as described above.
+
+- **The server runs the whole pipeline**: Silero VAD finds utterances → SenseVoice recognises them (with voiceprints that tell "说话人A/B" apart within a conversation, given to the model as hints) → a Qwen3 chat model decides to answer, stay silent or hand a task to the backend → IndexTTS speaks while the answer is still being generated, sent back at real-time pace. The server downloads and loads the models; AstrBot only carries the audio and runs the tasks it is handed.
+- **Channel and whispers**: channel voice is a group conversation (the bot answers only when addressed and stays silent otherwise; talking over it takes its name); whispers are one to one (talking over the bot for about 1.2 s stops it).
+- Set `Cascade Voice Server URL` to `ws://<server>:17890/v1/realtime`; if the server sets `LOCAL_MCP_INFER_TOKENS`, put one of them in `Cascade Voice Server Token`.
+- `Reference Audio` is a WAV file (relative to the data directory unless absolute, at most 8 MB; 5–10 s of clear speech) whose voice the bot uses; empty uses the server's default voice (`default_reference_audio` of its `voice-cascade` model). `Task Acknowledgement` is said when a task is handed off; when the paired chat is busy nothing more is said, and the result is told once it is ready.
+- A conversation starts once the server has loaded every model, which can take tens of seconds the first time. Each resume from standby is a new conversation on the server: what was said before is not carried over (tasks handed to the paired chat and their results stay in that chat).
+- `Voice` and `Realtime Model` apply to Codex realtime only. The voice persona (or `Extra Voice Prompt`) is sent to the server as extra instructions, appended to its Chinese prompt.
+
 ## Proxy
 
 Set `Codex Proxy` in the Codex agent runner settings (e.g. `socks5://127.0.0.1:7890` or `http://127.0.0.1:7890`) and all of Codex's traffic uses it: model requests, sign-in, and realtime voice signalling and control. The rest of AstrBot is unaffected.

@@ -798,6 +798,30 @@
         "description": "语音待机时间",
         "hint": "连续多少秒没有识别到语音就进入待机（断开实时语音），检测到新的人声时自动恢复。闭麦超过 1 分钟也会断开。"
       },
+      "mumble_voice_backend": {
+        "description": "语音后端",
+        "hint": "Codex 实时语音：需要 Codex Agent 执行器登录含语音的 ChatGPT 订阅账号。本地级联语音：连接自己部署的 local-multimodal-infra（/v1/realtime），切句、识别、对话和合成都在服务端完成，查询、执行等任务交给配套会话的 Agent（Codex）处理。",
+        "labels": [
+          "Codex 实时语音",
+          "本地级联语音"
+        ]
+      },
+      "mumble_cascade_url": {
+        "description": "级联语音服务地址",
+        "hint": "local-multimodal-infra 的实时语音 WebSocket 地址，例如 ws://127.0.0.1:17890/v1/realtime。模型的下载和加载由服务端负责。"
+      },
+      "mumble_cascade_token": {
+        "description": "级联语音服务令牌",
+        "hint": "可选。服务端 LOCAL_MCP_INFER_TOKENS 中的任一令牌；服务端未设置令牌时留空。"
+      },
+      "mumble_cascade_ref_audio": {
+        "description": "参考音频（音色）",
+        "hint": "可选。WAV 文件路径（相对路径按 data 目录解析，不超过 8 MB），机器人用这段声音的音色说话，建议 5～10 秒清晰人声。留空使用服务端的默认音色。"
+      },
+      "mumble_cascade_tool_filler": {
+        "description": "任务应答语",
+        "hint": "可选。把任务交给后台时先说的一句话，例如“好的，我查一下。”留空则不说。"
+      },
       "type": {
         "description": "适配器类型"
       },

@@ -808,6 +808,30 @@
         "description": "音声スタンバイまでの時間",
         "hint": "音声が認識されない状態がこの秒数続くとスタンバイ（リアルタイム切断）になり、新しい発話を検知すると自動で再開します。1 分以上ミュートしても切断されます。"
       },
+      "mumble_voice_backend": {
+        "description": "音声バックエンド",
+        "hint": "Codex リアルタイム音声：音声を含む ChatGPT サブスクリプションで Codex エージェントランナーにログインしている必要があります。ローカルカスケード音声：自分でデプロイした local-multimodal-infra（/v1/realtime）に接続し、発話検出・認識・対話・音声合成をサーバー側で行います。検索や操作などのタスクは対応するチャットのエージェント（Codex）が処理します。",
+        "labels": [
+          "Codex リアルタイム音声",
+          "ローカルカスケード音声"
+        ]
+      },
+      "mumble_cascade_url": {
+        "description": "カスケード音声サーバーのアドレス",
+        "hint": "local-multimodal-infra のリアルタイム音声 WebSocket アドレス（例：ws://127.0.0.1:17890/v1/realtime）。モデルのダウンロードと読み込みはサーバーが行います。"
+      },
+      "mumble_cascade_token": {
+        "description": "カスケード音声サーバーのトークン",
+        "hint": "任意。サーバーの LOCAL_MCP_INFER_TOKENS のいずれか。サーバーでトークンを設定していない場合は空欄。"
+      },
+      "mumble_cascade_ref_audio": {
+        "description": "参照音声（声質）",
+        "hint": "任意。WAV ファイルのパス（相対パスは data ディレクトリ基準、8 MB まで）。ボットはこの声で話します。5～10 秒の明瞭な音声を推奨。空欄の場合はサーバーの既定の声を使います。"
+      },
+      "mumble_cascade_tool_filler": {
+        "description": "タスク受付の一言",
+        "hint": "任意。タスクをバックエンドに渡すときに最初に話す一言（例：「わかりました、調べます。」）。空欄の場合は何も話しません。"
+      },
       "type": {
         "description": "アダプターの種類"
       },

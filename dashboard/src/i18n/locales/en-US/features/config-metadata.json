@@ -785,6 +785,30 @@
         "description": "Voice Standby Timeout",
         "hint": "Seconds without recognised speech before voice goes on standby (realtime disconnected); new speech resumes it automatically. Muting for over a minute also disconnects."
       },
+      "mumble_voice_backend": {
+        "description": "Voice Backend",
+        "hint": "Codex realtime needs the Codex agent runner signed in with a ChatGPT subscription that includes voice. Local cascade connects to your own local-multimodal-infra (/v1/realtime): utterance detection, recognition, conversation and speech synthesis run on that server; lookups and actions go to the paired chat's agent (Codex).",
+        "labels": [
+          "Codex realtime",
+          "Local cascade"
+        ]
+      },
+      "mumble_cascade_url": {
+        "description": "Cascade Voice Server URL",
+        "hint": "The realtime voice WebSocket of local-multimodal-infra, e.g. ws://127.0.0.1:17890/v1/realtime. The server downloads and loads the models."
+      },
+      "mumble_cascade_token": {
+        "description": "Cascade Voice Server Token",
+        "hint": "Optional. Any token of the server's LOCAL_MCP_INFER_TOKENS; leave empty when the server sets none."
+      },
+      "mumble_cascade_ref_audio": {
+        "description": "Reference Audio (Voice)",
+        "hint": "Optional. Path of a WAV file (relative to the data directory unless absolute, at most 8 MB) whose voice the bot speaks in; 5-10 s of clear speech works best. Empty: the server's default voice."
+      },
+      "mumble_cascade_tool_filler": {
+        "description": "Task Acknowledgement",
+        "hint": "Optional. Said when a task is handed to the backend, e.g. \"OK, let me check.\" Empty: nothing is said."
+      },
       "type": {
         "description": "Adapter Type"
       },
