@@ -192,6 +192,7 @@ class MumblePlatformAdapter(Platform):
         from astrbot.core.voice.cascade import CascadeOptions
 
         self.voice_backend = str(cfg.get("mumble_voice_backend") or "codex_realtime")
+        strength = cfg.get("mumble_cascade_emotion_strength")
         self.cascade_options = CascadeOptions(
             url=str(cfg.get("mumble_cascade_url") or CascadeOptions.url).strip(),
             token=str(cfg.get("mumble_cascade_token") or "").strip(),
@@ -200,6 +201,8 @@ class MumblePlatformAdapter(Platform):
             tool_filler=str(
                 cfg.get("mumble_cascade_tool_filler", CascadeOptions.tool_filler) or ""
             ),
+            emotion=str(cfg.get("mumble_cascade_emotion") or "").strip(),
+            emotion_strength=(None if strength in (None, "") else float(strength)),
         )
         if self.voice_backend == "local_cascade":
             try:

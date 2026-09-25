@@ -120,6 +120,8 @@ async def open_session(
             token="secret",
             ref_audio=str(ref),
             tool_filler="On it.",
+            emotion="happy",
+            emotion_strength=0.5,
         ),
         group=not private,
         instructions=instructions,
@@ -167,6 +169,8 @@ async def test_the_session_starts_with_the_bot_and_its_voice(tmp_path):
     assert config["instructions"] == "Speak like a pirate."
     assert base64.b64decode(config["ref_audio"]) == b"RIFF-voice"
     assert config["tool_filler"] == "On it."
+    assert config["tts_emotion"] == "happy"
+    assert config["tts_emotion_strength"] == 0.5
     assert t.server.headers["Authorization"] == "Bearer secret"
     assert VOICE_SESSIONS[t.chat.umo] is t.session
     await asyncio.wait_for(t.media.played.wait(), 5)
@@ -401,6 +405,11 @@ def test_settings_are_checked(tmp_path, monkeypatch):
     big.write_bytes(b"x" * (cascade_module.MAX_REF_AUDIO_BYTES + 1))
     with pytest.raises(ValueError):
         CascadeOptions(ref_audio=str(big)).validate()
+    CascadeOptions(emotion="none", emotion_strength=0).validate()
+    with pytest.raises(ValueError):
+        CascadeOptions(emotion="bored").validate()
+    with pytest.raises(ValueError):
+        CascadeOptions(emotion="sad", emotion_strength=1.5).validate()
     # A relative path is under the data directory.
     monkeypatch.setattr(cascade_module, "get_astrbot_data_path", lambda: str(tmp_path))
     (tmp_path / "voice.wav").write_bytes(b"RIFF")

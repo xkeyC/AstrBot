@@ -40,6 +40,19 @@ IN_RATE = 16000  # the server's input: 16-bit mono PCM
 START_TIMEOUT = 300.0
 # The reference voice goes in one WebSocket message (the server takes 16 MB).
 MAX_REF_AUDIO_BYTES = 8 * 1024 * 1024
+# Emotions the server's TTS (IndexTTS-2.5) speaks with; "none" keeps the
+# reference voice's own.
+EMOTIONS = (
+    "calm",
+    "happy",
+    "angry",
+    "sad",
+    "afraid",
+    "disgusted",
+    "melancholic",
+    "surprised",
+    "none",
+)
 # After the server's speech stops, this much silence (20 ms frames) follows,
 # so the platform's player starts and ends even a very short reply. Speech has
 # stopped when nothing arrived for TAIL_GAP: well over the server's 20 ms
@@ -59,6 +72,10 @@ class CascadeOptions:
     ref_audio: str = ""
     # Said by the server right away when a task is handed off (empty: none).
     tool_filler: str = "好的，我查一下。"
+    # The emotion the bot speaks with (IndexTTS-2.5; one of EMOTIONS) and
+    # its weight, 0 to 1; empty / None: the server's defaults.
+    emotion: str = ""
+    emotion_strength: float | None = None
 
     def ref_audio_path(self) -> Path | None:
         """The reference voice file, or None when none is set."""
@@ -77,6 +94,14 @@ class CascadeOptions:
         if parts.scheme not in ("ws", "wss") or not parts.netloc:
             raise ValueError(
                 f"cascade voice URL must be ws:// or wss://, got {self.url!r}"
+            )
+        if self.emotion and self.emotion not in EMOTIONS:
+            raise ValueError(
+                f"cascade emotion must be one of {', '.join(EMOTIONS)}, got {self.emotion!r}"
+            )
+        if self.emotion_strength is not None and not 0 <= self.emotion_strength <= 1:
+            raise ValueError(
+                f"cascade emotion strength must be 0 to 1, got {self.emotion_strength}"
             )
         path = self.ref_audio_path()
         if path is not None:
@@ -244,6 +269,8 @@ class CascadeVoiceSession(VoiceSession):
                             or None,
                             "ref_audio": ref_audio,
                             "tool_filler": self.cascade.tool_filler,
+                            "tts_emotion": self.cascade.emotion or None,
+                            "tts_emotion_strength": self.cascade.emotion_strength,
                         },
                     }
                 )

@@ -809,6 +809,25 @@
         "description": "Task Acknowledgement",
         "hint": "Optional. Said when a task is handed to the backend, e.g. \"OK, let me check.\" Empty: nothing is said."
       },
+      "mumble_cascade_emotion": {
+        "description": "Speaking Emotion",
+        "hint": "Applies when the server uses IndexTTS-2.5 (1.5 ignores it). Reference voice: no emotion set, the tone follows the reference audio.",
+        "labels": [
+          "Calm",
+          "Happy",
+          "Angry",
+          "Sad",
+          "Afraid",
+          "Disgusted",
+          "Melancholic",
+          "Surprised",
+          "Reference voice"
+        ]
+      },
+      "mumble_cascade_emotion_strength": {
+        "description": "Emotion Strength",
+        "hint": "0 to 1, default 0.8; the rest follows the reference audio's tone."
+      },
       "type": {
         "description": "Adapter Type"
       },
