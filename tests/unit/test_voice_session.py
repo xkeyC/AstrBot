@@ -1,11 +1,13 @@
 import asyncio
 
 import pytest
+import pytest_asyncio
 
 from astrbot.core.config.agent_runner import get_agent_runner_config_default
 from astrbot.core.platform.sources.mumble import voice as mumble_voice
 from astrbot.core.platform.sources.mumble.audio import MumbleMedia
 from astrbot.core.voice import chat as chat_module
+from astrbot.core.voice import record as record_module
 from astrbot.core.voice import session as voice
 from astrbot.core.voice.chat import VoiceChat
 from astrbot.core.voice.session import VoiceOptions, VoiceSession
@@ -108,8 +110,17 @@ class FakeSp:
         return None
 
 
+@pytest_asyncio.fixture
+async def voice_db(monkeypatch, temp_db):
+    """The voice records' database, ready (its first use is slow)."""
+    async with temp_db.get_db():
+        pass
+    monkeypatch.setattr(record_module, "db_helper", temp_db)
+    return temp_db
+
+
 @pytest.fixture
-def engine(monkeypatch):
+def engine(monkeypatch, voice_db):
     gate = asyncio.Event()
     engine = FakeEngine(gate)
 

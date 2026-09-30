@@ -42,6 +42,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .chat import TASK_BODY, VOICE_SESSIONS, VoiceChat, deliver
 from .icetcp import IceTcpRelay, replace_candidates, tcp_candidates
+from .record import VoiceRecord, voice_conversation
 
 VOICE_THREAD_KEY = "voice_thread"
 # Voices of realtime v1/v3, which subscription (WebRTC) sessions use.
@@ -287,6 +288,8 @@ class VoiceSession:
         self._events_queue: asyncio.Queue | None = None
         self._realtime_requested = False
         self._thread_released = False
+        # The transcript and stats of the thread (see record.py).
+        self._record: VoiceRecord | None = None
         self._pc: RTCPeerConnection | None = None
         self._relay: IceTcpRelay | None = None
         self._tasks: list[asyncio.Task] = []
@@ -426,7 +429,13 @@ class VoiceSession:
             self._events_queue = engine.pump(self._thread_id).open_turn(
                 self._tool_handler(), None
             )
-        if started_new or state.get("thread_id") != self._thread_id:
+        same_thread = state.get("thread_id") == self._thread_id
+        cid = await voice_conversation(
+            self.chat.umo,
+            state.get("conversation_id") if same_thread else None,
+            f"Voice: {self.label}",
+        )
+        if started_new or not same_thread or state.get("conversation_id") != cid:
             await sp.put_async(
                 scope="umo",
                 scope_id=self.scope_id,
@@ -434,8 +443,12 @@ class VoiceSession:
                 value={
                     "thread_id": info["thread_id"],
                     "rollout_path": info.get("rollout_path"),
+                    "conversation_id": cid,
                 },
             )
+        record = VoiceRecord(self.chat.umo, cid, engine, self._thread_id, self.label)
+        await record.start()
+        self._record = record
         self._check_open()
 
     def _thread_params(self) -> dict:
@@ -558,6 +571,8 @@ class VoiceSession:
     async def _events(self, events: asyncio.Queue, answer: asyncio.Future) -> None:
         while True:
             msg = await events.get()
+            if self._record is not None:
+                self._record.event(msg)
             kind = msg.get("type")
             if kind == "realtime_conversation_sdp":
                 if not answer.done():
@@ -764,6 +779,9 @@ class VoiceSession:
         for task in self._tasks:
             if task is not current:
                 task.cancel()
+        record, self._record = self._record, None
+        if record is not None:
+            await record.close()
         if engine is not None and thread_id is not None and not self._thread_released:
             self._thread_released = True
             # Under the lock a newer session of this key opens the thread with

@@ -389,6 +389,8 @@ class InfraVoiceSession(VoiceSession):
         while True:
             msg = await events.get()
             try:
+                if self._record is not None:
+                    self._record.event(msg)
                 kind = msg.get("type")
                 if kind in ("realtime_conversation_closed", "_pump_closed"):
                     reason = msg.get("reason") or msg.get("message") or "closed"

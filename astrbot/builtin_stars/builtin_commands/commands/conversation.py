@@ -6,6 +6,7 @@ from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.core.agent.runners.codex.constants import (
     CODEX_RUNNER_TYPE,
     CODEX_THREAD_STATE_KEY,
+    CODEX_VOICE_STATS_TYPE,
 )
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.utils.active_event_registry import active_event_registry
@@ -147,7 +148,9 @@ class ConversationCommands:
                         "total_output",
                     ),
                 ).where(
-                    col(ProviderStat.agent_type) == CODEX_RUNNER_TYPE,
+                    col(ProviderStat.agent_type).in_(
+                        (CODEX_RUNNER_TYPE, CODEX_VOICE_STATS_TYPE)
+                    ),
                     col(ProviderStat.conversation_id) == cid,
                 )
             )

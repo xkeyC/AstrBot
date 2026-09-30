@@ -16,7 +16,10 @@ import psutil
 from sqlmodel import col, func, select
 
 from astrbot.core import DEMO_MODE, logger
-from astrbot.core.agent.runners.codex.constants import CODEX_RUNNER_TYPE
+from astrbot.core.agent.runners.codex.constants import (
+    CODEX_RUNNER_TYPE,
+    CODEX_VOICE_STATS_TYPE,
+)
 from astrbot.core.config import VERSION
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
@@ -322,8 +325,11 @@ class StatService:
                 result = await session.execute(
                     select(ProviderStat)
                     .where(
-                        # This fork runs every reply through Codex.
-                        ProviderStat.agent_type == CODEX_RUNNER_TYPE,
+                        # This fork runs every reply through Codex; voice
+                        # threads have rows of their own.
+                        col(ProviderStat.agent_type).in_(
+                            (CODEX_RUNNER_TYPE, CODEX_VOICE_STATS_TYPE)
+                        ),
                         ProviderStat.created_at >= query_start_utc,
                     )
                     .order_by(col(ProviderStat.created_at).asc())
@@ -369,6 +375,10 @@ class StatService:
                 # Codex rows share a provider (usually "openai"), so the trend
                 # and ranking are by model, which is what tells them apart.
                 provider_id = record.provider_model or record.provider_id or "unknown"
+                if record.agent_type == CODEX_VOICE_STATS_TYPE:
+                    # The voice model apart from the same model in chats.
+                    provider_model = f"{provider_model} (voice)"
+                    provider_id = f"{provider_id} (voice)"
 
                 if created_at_local >= range_start_local:
                     bucket_local = created_at_local.replace(

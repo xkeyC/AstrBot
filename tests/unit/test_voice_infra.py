@@ -5,11 +5,15 @@ from types import SimpleNamespace
 
 import av
 import pytest
+import pytest_asyncio
 from aiortc.mediastreams import MediaStreamError
+from sqlmodel import select
 
 from astrbot.core.config.agent_runner import get_agent_runner_config_default
+from astrbot.core.db.po import ProviderStat
 from astrbot.core.voice import chat as chat_module
 from astrbot.core.voice import infra as infra_module
+from astrbot.core.voice import record as record_module
 from astrbot.core.voice import session as voice
 from astrbot.core.voice.chat import VOICE_SESSIONS, VoiceChat
 from astrbot.core.voice.infra import (
@@ -84,6 +88,12 @@ class FakeRuntime:
         self.audio: list[dict] = []
         self.texts: list[tuple[str, str]] = []
         self.stopped = 0
+        # The voice thread's model and cumulative usage (thread_usage).
+        self.usage: dict = {
+            "model": "deepseek-v4.1-flash",
+            "model_provider": "deepseek",
+            "total_token_usage": None,
+        }
 
     async def realtime_start(self, thread_id, request):
         self.started.append(json.loads(request))
@@ -96,6 +106,9 @@ class FakeRuntime:
 
     async def realtime_stop(self, thread_id):
         self.stopped += 1
+
+    async def thread_usage(self, thread_id):
+        return json.dumps(self.usage)
 
 
 class FakePump:
@@ -144,12 +157,14 @@ class FakeEngine:
 class FakeSp:
     def __init__(self) -> None:
         self.keys: list[str] = []
+        self.values: dict[str, dict] = {}
 
-    async def get_async(self, **_kwargs):
-        return {}
+    async def get_async(self, **kwargs):
+        return self.values.get(kwargs["key"], {})
 
     async def put_async(self, **kwargs):
         self.keys.append(kwargs["key"])
+        self.values[kwargs["key"]] = kwargs["value"]
 
 
 def runner_config(**voice_settings) -> dict:
@@ -170,8 +185,17 @@ def runner_config(**voice_settings) -> dict:
     return config
 
 
+@pytest_asyncio.fixture
+async def voice_db(monkeypatch, temp_db):
+    """The voice records' database, ready (its first use is slow)."""
+    async with temp_db.get_db():
+        pass
+    monkeypatch.setattr(record_module, "db_helper", temp_db)
+    return temp_db
+
+
 @pytest.fixture
-def engine(monkeypatch):
+def engine(monkeypatch, voice_db):
     engine = FakeEngine()
 
     async def codex_engine():
@@ -398,3 +422,95 @@ async def test_a_bad_event_does_not_end_the_conversation(engine):
         {"type": "realtime_conversation_closed", "reason": "requested"}
     )
     await eventually(lambda: t.closed)
+
+
+def _total(input_tokens, cached, output):
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached,
+        "output_tokens": output,
+        "reasoning_output_tokens": 0,
+        "total_tokens": input_tokens + output,
+    }
+
+
+async def _stat_rows(db):
+    async with db.get_db() as session:
+        result = await session.execute(select(ProviderStat))
+        return result.scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_a_call_leaves_its_transcript_and_stats(engine, voice_db):
+    engine.rt.usage["total_token_usage"] = _total(1000, 800, 50)
+    t = await open_session(engine, private=False)
+    await event(t, {"InputTranscriptDone": {"text": "what time is it"}})
+    await t.pump.queue.put({"type": "task_started", "turn_id": "u1"})
+    await t.pump.queue.put(
+        {"type": "token_count", "info": {"total_token_usage": _total(3000, 2500, 90)}}
+    )
+    await t.pump.queue.put(
+        {"type": "task_complete", "turn_id": "u1", "time_to_first_token_ms": 400}
+    )
+    await event(t, {"OutputTranscriptDone": {"text": "It is three."}})
+    await event(t, {"InputTranscriptDone": {"text": "thanks"}})
+    await t.session.close("hung up")
+
+    # Its own conversation under the chat, which stays the chat's choice.
+    state = voice.sp.values["mumble_voice_thread_infra"]
+    conv = await voice_db.get_conversation_by_id(cid=state["conversation_id"])
+    assert (conv.user_id, conv.title) == ("test:GroupMessage:server", "Voice: voice")
+    assert conv.content == [
+        {"role": "user", "content": "what time is it"},
+        {"role": "assistant", "content": "It is three."},
+        {"role": "user", "content": "thanks"},
+    ]
+    [row] = await _stat_rows(voice_db)
+    assert (
+        row.agent_type,
+        row.umo,
+        row.conversation_id,
+        row.provider_id,
+        row.provider_model,
+        row.status,
+        row.token_input_other,
+        row.token_input_cached,
+        row.token_output,
+        row.time_to_first_token,
+    ) == (
+        "codex_voice",
+        "test:GroupMessage:server",
+        conv.conversation_id,
+        "deepseek",
+        "deepseek-v4.1-flash",
+        "completed",
+        300,
+        1700,
+        40,
+        0.4,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_next_call_keeps_the_conversation_and_a_cut_turn_counts(
+    engine, voice_db
+):
+    t = await open_session(engine)
+    await event(t, {"InputTranscriptDone": {"text": "hello"}})
+    await t.session.close("hung up")
+    cid = voice.sp.values["mumble_voice_thread_infra"]["conversation_id"]
+
+    engine.rt.started.clear()
+    t = await open_session(engine)
+    await t.pump.queue.put({"type": "task_started", "turn_id": "u2"})
+    await t.pump.queue.put(
+        {"type": "token_count", "info": {"total_token_usage": _total(500, 0, 20)}}
+    )
+    await eventually(lambda: t.pump.queue.empty())
+    await t.session.close("hung up")
+
+    assert voice.sp.values["mumble_voice_thread_infra"]["conversation_id"] == cid
+    conv = await voice_db.get_conversation_by_id(cid=cid)
+    assert conv.content == [{"role": "user", "content": "hello"}]
+    [row] = await _stat_rows(voice_db)
+    assert (row.status, row.token_input_other, row.token_output) == ("aborted", 500, 20)

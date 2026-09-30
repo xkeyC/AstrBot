@@ -176,3 +176,31 @@ async def test_provider_token_stats_read_codex_runs(temp_db):
         "gpt-5.5",
         "gpt-5.4-mini",
     ]
+
+
+@pytest.mark.asyncio
+async def test_voice_threads_show_their_model_apart(temp_db):
+    """A voice thread's rows count, under its model marked as the voice's."""
+    for agent_type in ("codex", "codex_voice"):
+        await temp_db.insert_provider_stat(
+            umo="qq:GroupMessage:g",
+            provider_id="deepseek",
+            provider_model="deepseek-v4.1-flash",
+            stats={
+                "token_usage": {"input_other": 100, "input_cached": 0, "output": 10}
+            },
+            agent_type=agent_type,
+        )
+
+    result = await _make_service(temp_db).get_provider_token_stats(1)
+
+    assert result["range_total_calls"] == 2
+    assert sorted(r["provider_id"] for r in result["range_by_provider"]) == [
+        "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash (voice)",
+    ]
+    assert sorted(r["provider_model"] for r in result["today_by_model"]) == [
+        "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash (voice)",
+    ]
+    assert [r["tokens"] for r in result["range_by_umo"]] == [220]
