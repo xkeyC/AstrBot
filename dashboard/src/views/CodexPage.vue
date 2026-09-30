@@ -898,7 +898,7 @@ function validateBeforeSave(): boolean {
       return false
     }
     // The runner's model belongs to its own provider.
-    if (voiceProvider && voiceProvider !== form.value.model_provider && !voice.text_model.trim()) {
+    if (voiceProvider && voiceProvider !== (form.value.model_provider || 'openai') && !voice.text_model.trim()) {
       toast(tm('messages.voiceModelRequired'), 'warning')
       return false
     }

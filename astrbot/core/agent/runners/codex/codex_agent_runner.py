@@ -237,7 +237,9 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
                 info["supported_reasoning_levels"] = [
                     {"effort": e, "description": e} for e in efforts
                 ]
-            if default := str(m.get("default_reasoning_effort") or ""):
+            default = str(m.get("default_reasoning_effort") or "")
+            # A default the model does not list is left out.
+            if default and (not efforts or default in efforts):
                 info["default_reasoning_level"] = default
             # Unset keeps Codex's default (text and images).
             if isinstance(m.get("image_input"), bool):

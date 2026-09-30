@@ -273,7 +273,8 @@ class InfraVoiceSession(VoiceSession):
         if (
             provider
             and not model
-            and provider != voice._runner_config()["model_provider"]
+            # "" is the built-in OpenAI provider.
+            and provider != (voice._runner_config()["model_provider"] or "openai")
         ):
             # The runner's model is another provider's.
             raise ValueError(
@@ -387,18 +388,12 @@ class InfraVoiceSession(VoiceSession):
         ends."""
         while True:
             msg = await events.get()
-            kind = msg.get("type")
-            if kind in ("realtime_conversation_closed", "_pump_closed"):
-                reason = msg.get("reason") or msg.get("message") or "closed"
-                self._realtime_requested = False
-                if not self.ready:
-                    # The start fails with it (and reports and closes).
-                    if not started.done():
-                        started.set_exception(RuntimeError(f"voice closed: {reason}"))
-                    return
-                self._request_close(f"voice {reason}")
-                return
             try:
+                kind = msg.get("type")
+                if kind in ("realtime_conversation_closed", "_pump_closed"):
+                    reason = msg.get("reason") or msg.get("message") or "closed"
+                    self._conversation_ended(started, f"voice closed: {reason}")
+                    return
                 self._event(msg, started)
             except Exception as exc:  # noqa: BLE001 - one bad event
                 logger.warning(

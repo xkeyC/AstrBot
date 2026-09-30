@@ -294,6 +294,9 @@ class VoiceSession:
         self._close_task: asyncio.Task | None = None
         self._closed_event = asyncio.Event()
         self._closed = False
+        # Why the conversation ended while it was still starting (reported
+        # as the start's failure).
+        self._start_error: Exception | None = None
         self.created_at = time.monotonic()
         # Set once the model listens; standby only counts from then.
         self.ready = False
@@ -320,11 +323,13 @@ class VoiceSession:
             try:
                 await self._start()
             except _SessionClosed:
+                if self._start_error is not None:
+                    on_failed(self._start_error)
                 return
             except Exception as exc:  # noqa: BLE001 - reported to the owner
-                if self._closed:
+                if self._closed and self._start_error is None:
                     return
-                on_failed(exc)
+                on_failed(self._start_error or exc)
                 # Not awaited: the close waits for this very task to end.
                 self._request_close(f"start failed: {exc}")
 
@@ -558,14 +563,9 @@ class VoiceSession:
                 if not answer.done():
                     answer.set_result(msg["sdp"])
             elif kind == "realtime_conversation_closed":
-                reason = msg.get("reason") or "closed"
-                if not answer.done():
-                    answer.set_exception(RuntimeError(f"realtime closed: {reason}"))
-                self._realtime_requested = False
-                if not self.ready:
-                    # The start fails with it (and reports and closes).
-                    return
-                self._request_close(f"realtime {reason}")
+                self._conversation_ended(
+                    answer, f"realtime closed: {msg.get('reason') or 'closed'}"
+                )
                 return
             elif kind == "realtime_conversation_realtime":
                 payload = msg.get("payload")
@@ -591,11 +591,29 @@ class VoiceSession:
                         payload["InputTranscriptDone"].get("text"),
                     )
             elif kind == "_pump_closed":
-                if not answer.done():
-                    answer.set_exception(RuntimeError("voice thread closed"))
-                self._realtime_requested = False
-                self._request_close("voice thread closed")
+                self._conversation_ended(answer, "voice thread closed")
                 return
+
+    def _conversation_ended(self, pending: asyncio.Future, reason: str) -> None:
+        """The conversation ended: the session closes; one still starting
+        fails its start with ``reason`` (reported by ``launch``).
+
+        Args:
+            pending: What the start waits for (the SDP answer, the server's
+                start), failed with the reason if it is still pending.
+            reason: Why it ended.
+        """
+        self._realtime_requested = False
+        if not self.ready and self._start_error is None:
+            if not pending.done():
+                self._start_error = RuntimeError(reason)
+                pending.set_exception(self._start_error)
+            elif not pending.cancelled() and pending.exception() is not None:
+                # Failed already (a server error): that is the reason.
+                self._start_error = pending.exception()
+            else:
+                self._start_error = RuntimeError(reason)
+        self._request_close(reason)
 
     async def _handoff(self, handoff: dict) -> None:
         """Has the paired chat answer a handoff, and the model speak it."""

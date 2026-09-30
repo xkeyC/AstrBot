@@ -351,6 +351,17 @@ async def test_a_failed_server_start_fails_the_session(engine):
 
 
 @pytest.mark.asyncio
+async def test_a_conversation_closed_while_starting_fails_the_start(engine):
+    t = await open_session(engine, started=False)
+    await t.pump.queue.put(
+        {"type": "realtime_conversation_closed", "reason": "transport_closed"}
+    )
+    await eventually(lambda: t.failures and t.closed)
+    assert len(t.failures) == 1
+    assert "transport_closed" in str(t.failures[0])
+
+
+@pytest.mark.asyncio
 async def test_the_session_ends_with_the_conversation(engine):
     t = await open_session(engine)
     await t.pump.queue.put(
