@@ -917,3 +917,34 @@ async def test_a_follow_up_steered_into_a_continuation_counts_as_dropped(
     text = responses[-1].data["chain"].get_plain_text()
     assert text.startswith("first")
     assert runner_mod.FOLLOW_UP_DROPPED_NOTE in text
+
+
+@pytest.mark.asyncio
+async def test_leaked_citation_markup_is_stripped(monkeypatch, temp_db):
+    ref = chr(0xE200) + "cite" + chr(0xE202) + "turn0search6" + chr(0xE201)
+    events = [
+        {"type": "item_started", "item": {"type": "AgentMessage", "id": "m"}},
+        {"type": "agent_message_content_delta", "item_id": "m", "delta": "答案。"},
+        {"type": "agent_message_content_delta", "item_id": "m", "delta": ref[:5]},
+        {"type": "agent_message_content_delta", "item_id": "m", "delta": ref[5:]},
+        {"type": "agent_message_content_delta", "item_id": "m", "delta": " citeturn"},
+        {"type": "agent_message_content_delta", "item_id": "m", "delta": "1search2"},
+        {"type": "item_completed", "item": {"type": "AgentMessage", "id": "m"}},
+        {
+            "type": "agent_message",
+            "message": "答案。" + ref + " citeturn1search2",
+            "phase": "final_answer",
+        },
+        {"type": "task_complete"},
+    ]
+    _, responses, _ = await _run(
+        monkeypatch, temp_db, events, [None, _total(10, 0, 1)], streaming=True
+    )
+
+    streamed = "".join(
+        r.data["chain"].get_plain_text()
+        for r in responses
+        if r.type == "streaming_delta"
+    )
+    assert streamed == "答案。 "
+    assert responses[-1].data["chain"].get_plain_text() == "答案。"

@@ -27,6 +27,7 @@ from astrbot.core.permission_rules import DEFAULT_POLICY, PermissionPolicy
 from astrbot.core.permission_rules import EVENT_EXTRA_KEY as POLICY_EXTRA_KEY
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest, TokenUsage
+from astrbot.core.utils.model_markup import ModelMarkupStream, strip_model_markup
 
 from ...hooks import BaseAgentRunHooks
 from ...response import AgentResponseData, AgentStats
@@ -950,6 +951,9 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                 pump = engine.pump(thread_id)
                 queue = pump.open_turn(self._handle_tool_call, self._handle_approval)
                 phases: dict[str, str | None] = {}
+                # Per agent-message item: strips citation markup the model
+                # leaks, which may be split across streamed deltas.
+                markup_streams: dict[str, ModelMarkupStream] = {}
                 final_texts: list[str] = []
                 commentary: list[str] = []
                 reasoning: list[str] = []
@@ -1065,7 +1069,18 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                             if item.get("type") == "AgentMessage":
                                 phases[item.get("id", "")] = item.get("phase")
                         elif kind == "item_completed":
-                            path = generated_image_path(msg.get("item") or {})
+                            item = msg.get("item") or {}
+                            # Only streamed items have one; flush what it held.
+                            markup = markup_streams.pop(item.get("id", ""), None)
+                            tail = markup.finish() if markup else ""
+                            if tail:
+                                yield AgentResponse(
+                                    type="streaming_delta",
+                                    data=AgentResponseData(
+                                        chain=MessageChain().message(tail)
+                                    ),
+                                )
+                            path = generated_image_path(item)
                             if (
                                 path
                                 and path not in placed_images
@@ -1081,21 +1096,24 @@ class CodexAgentRunner(BaseAgentRunner[TContext]):
                                 ):
                                     pending_notes.append(note)
                         elif kind == "agent_message_content_delta":
-                            phase = phases.get(msg.get("item_id", ""))
+                            item_id = msg.get("item_id", "")
+                            phase = phases.get(item_id)
                             if self.streaming and (
                                 phase in _FINAL_PHASES or show_commentary
                             ):
-                                yield AgentResponse(
-                                    type="streaming_delta",
-                                    data=AgentResponseData(
-                                        chain=MessageChain().message(
-                                            msg.get("delta", "")
-                                        )
-                                    ),
-                                )
+                                delta = markup_streams.setdefault(
+                                    item_id, ModelMarkupStream()
+                                ).push(msg.get("delta", ""))
+                                if delta:
+                                    yield AgentResponse(
+                                        type="streaming_delta",
+                                        data=AgentResponseData(
+                                            chain=MessageChain().message(delta)
+                                        ),
+                                    )
                         elif kind == "agent_message":
                             last_agent_seq = event_seq
-                            text = msg.get("message") or ""
+                            text = strip_model_markup(msg.get("message") or "")
                             if msg.get("phase") in _FINAL_PHASES:
                                 final_texts.append(text)
                             else:

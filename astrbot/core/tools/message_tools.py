@@ -31,6 +31,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_system_tmp_path,
     get_astrbot_temp_path,
 )
+from astrbot.core.utils.model_markup import strip_model_markup
 
 
 def _file_send_allowed_roots(
@@ -239,7 +240,7 @@ class SendMessageToUserTool(FunctionTool[AstrAgentContext]):
 
             try:
                 if msg_type == "plain":
-                    text = str(msg.get("text", "")).strip()
+                    text = strip_model_markup(str(msg.get("text", ""))).strip()
                     if not text:
                         return f"error: messages[{idx}].text is required for plain component."
                     components.append(Comp.Plain(text=text))
