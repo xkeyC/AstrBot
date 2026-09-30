@@ -14,7 +14,6 @@ import contextlib
 import datetime
 import time
 from collections import deque
-from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -183,38 +182,8 @@ class MumblePlatformAdapter(Platform):
         self.voice_options = VoiceOptions(
             name=str(cfg.get("mumble_voice_name") or self.username),
             aliases=[str(a) for a in aliases if str(a).strip()],
-            voice=str(cfg.get("mumble_voice_voice") or ""),
-            model=str(cfg.get("mumble_voice_model") or ""),
             extra_prompt=str(cfg.get("mumble_voice_prompt") or ""),
         )
-        # Voice backend: Codex realtime, or a local-multimodal-infra
-        # realtime server (the local cascade).
-        from astrbot.core.voice.cascade import CascadeOptions
-
-        self.voice_backend = str(cfg.get("mumble_voice_backend") or "codex_realtime")
-        strength = cfg.get("mumble_cascade_emotion_strength")
-        self.cascade_options = CascadeOptions(
-            url=str(cfg.get("mumble_cascade_url") or CascadeOptions.url).strip(),
-            token=str(cfg.get("mumble_cascade_token") or "").strip(),
-            ref_audio=str(cfg.get("mumble_cascade_ref_audio") or "").strip(),
-            # Empty on purpose means no acknowledgement.
-            tool_filler=str(
-                cfg.get("mumble_cascade_tool_filler", CascadeOptions.tool_filler) or ""
-            ),
-            emotion=str(cfg.get("mumble_cascade_emotion") or "").strip(),
-            emotion_strength=(None if strength in (None, "") else float(strength)),
-        )
-        if self.voice_backend == "local_cascade":
-            try:
-                self.cascade_options.validate()
-            except ValueError as exc:
-                logger.error("Mumble cascade voice settings: %s", exc)
-        elif self.voice_backend != "codex_realtime":
-            logger.warning(
-                "Mumble voice backend %r is unknown; using Codex realtime",
-                self.voice_backend,
-            )
-            self.voice_backend = "codex_realtime"
         self.voice_sessions: dict[str, Any] = {}  # key -> VoiceSession
         self.whisper_targets: dict[str, int] = {}  # user key -> voice target id
         self.muted = False
@@ -503,9 +472,8 @@ class MumblePlatformAdapter(Platform):
             session.media.mixer.feed(speaker, data, terminator)
 
     def _start_voice(self, key: str, user: User):
-        from astrbot.core.voice.cascade import CascadeVoiceSession
         from astrbot.core.voice.chat import VoiceChat
-        from astrbot.core.voice.session import VoiceSession
+        from astrbot.core.voice.session import new_voice_session
 
         from .audio import MumbleMedia
         from .voice import channel_prompt, whisper_prompt
@@ -528,15 +496,8 @@ class MumblePlatformAdapter(Platform):
             def send(frame: bytes, terminator: bool) -> None:
                 self._send_voice(frame, target, terminator)
 
-        if self.voice_backend == "local_cascade":
-            session_type = partial(
-                CascadeVoiceSession,
-                cascade=self.cascade_options,
-                group=key == SERVER_SESSION,
-            )
-        else:
-            session_type = VoiceSession
-        session = session_type(
+        # The realtime backend is a setting of the Codex runner.
+        session = new_voice_session(
             key=key,
             scope_id=f"{self.meta().id}:voice:{key}",
             prompt=prompt,

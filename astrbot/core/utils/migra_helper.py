@@ -167,9 +167,83 @@ def migrate_config_on_load(config: dict[str, Any], config_path: Path) -> bool:
     """
     original = copy.deepcopy(config)
     changed = _migrate_agent_runner_config(config)
-    changed = _migrate_dynamic_persona_bindings(config, config_path) or changed
     if changed and original.get("agent_runner") != config.get("agent_runner"):
         _backup_pre_codex_config(original, config_path)
+    changed = _migrate_dynamic_persona_bindings(config, config_path) or changed
+    changed = _migrate_voice_settings(config) or changed
+    return changed
+
+
+# Mumble's voice settings that are now the Codex runner's (realtime_voice).
+_MUMBLE_VOICE_KEYS = (
+    "mumble_voice_voice",
+    "mumble_voice_model",
+    "mumble_voice_backend",
+    "mumble_cascade_url",
+    "mumble_cascade_token",
+    "mumble_cascade_ref_audio",
+    "mumble_cascade_tool_filler",
+    "mumble_cascade_emotion",
+    "mumble_cascade_emotion_strength",
+)
+
+
+def _migrate_voice_settings(config: dict[str, Any]) -> bool:
+    """Move Mumble's voice backend settings into the Codex runner.
+
+    The realtime voice backend (Codex realtime or a local-multimodal-infra
+    server), its voice and model are one setting of the runner now
+    (``agent_runner.config.realtime_voice``). The first Mumble platform using
+    the local server hands its server settings over; set voices and models
+    fill empty ones. The Mumble keys are removed.
+
+    Args:
+        config: Mutable AstrBot configuration loaded from disk.
+
+    Returns:
+        Whether the configuration changed.
+    """
+    platforms = config.get("platform")
+    runner = config.get("agent_runner")
+    if not isinstance(platforms, list) or not isinstance(runner, dict):
+        return False
+    runner_config = runner.setdefault("config", {})
+    changed = False
+    for platform in platforms:
+        if not isinstance(platform, dict) or not any(
+            key in platform for key in _MUMBLE_VOICE_KEYS
+        ):
+            continue
+        voice = runner_config.get("realtime_voice")
+        if not isinstance(voice, dict):
+            voice = runner_config["realtime_voice"] = {}
+        if (
+            platform.get("mumble_voice_backend") == "local_cascade"
+            and voice.get("backend") != "local_infra"
+        ):
+            voice["backend"] = "local_infra"
+            for old, new in (
+                ("mumble_cascade_url", "infra_url"),
+                ("mumble_cascade_token", "infra_token"),
+                ("mumble_cascade_ref_audio", "ref_audio"),
+                ("mumble_cascade_emotion", "emotion"),
+                ("mumble_cascade_emotion_strength", "emotion_strength"),
+            ):
+                if platform.get(old) not in (None, ""):
+                    voice[new] = platform[old]
+        for old, new in (
+            ("mumble_voice_voice", "voice"),
+            ("mumble_voice_model", "model"),
+        ):
+            if platform.get(old) and not voice.get(new):
+                voice[new] = platform[old]
+        for key in _MUMBLE_VOICE_KEYS:
+            platform.pop(key, None)
+        changed = True
+    if changed:
+        logger.warning(
+            "Mumble voice backend settings moved to the Codex runner's realtime voice settings."
+        )
     return changed
 
 

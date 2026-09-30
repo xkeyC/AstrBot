@@ -62,7 +62,11 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "proxy": "",
         "model": "",
         "model_provider": "",
-        # Custom Responses-API endpoints: [{id, name, base_url, api_key, wire_api}]
+        # Custom Responses-API endpoints: [{id, name, base_url, api_key,
+        # wire_api, headers: {name: value}, compaction: auto|local|remote,
+        # models: [{slug, context_window, auto_compact_token_limit,
+        # reasoning_efforts: [...], default_reasoning_effort, image_input,
+        # metadata_json}]}] (see model_provider_overrides).
         "model_providers": [],
         "reasoning_effort": "",
         "sandbox": "read-only",
@@ -87,6 +91,32 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         # wait. This caps how many may wait before the rest are told to retry.
         # 0 removes the cap.
         "max_queued_turns": 5,
+        # Realtime voice (Mumble, QQ calls). "builtin": Codex realtime, an
+        # OpenAI realtime model (a ChatGPT subscription with voice).
+        # "local_infra": a local-multimodal-infra server listens and speaks,
+        # and a model of the providers above (text_*) does the talking.
+        "realtime_voice": {
+            "backend": "builtin",
+            # builtin: voice and realtime model (empty: Codex's defaults).
+            "voice": "",
+            "model": "",
+            # local_infra: the server's realtime WebSocket and token.
+            "infra_url": "ws://127.0.0.1:17890/v1/realtime",
+            "infra_token": "",
+            # A WAV file the bot speaks like (relative to the data directory;
+            # empty: the server's default voice), and the emotion it speaks
+            # with (IndexTTS-2.5) at a strength of 0 to 1.
+            "ref_audio": "",
+            "emotion": "calm",
+            "emotion_strength": 0.8,
+            # The model that talks (empty: the runner's provider and model).
+            "text_model_provider": "",
+            "text_model": "",
+            "text_reasoning_effort": "",
+            # Compact the voice history while idle once its prompt passes
+            # this percentage of the context window (0: never).
+            "idle_compact_percent": 70,
+        },
     },
 }
 

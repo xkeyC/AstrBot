@@ -770,7 +770,7 @@
       },
       "mumble_voice_enabled": {
         "description": "リアルタイム音声を有効化",
-        "hint": "Codex リアルタイム音声を使います（音声を含む ChatGPT プランでログインした Codex エージェント実行器が必要）。チャンネル音声とウィスパーはそれぞれ独立した音声エージェントスレッドを使い、対応する会話の一般メンバーと同じツールと実行環境（権限ルールに従う）を持ちます。"
+        "hint": "誰かが話すとリアルタイム音声に参加します。バックエンドは Codex 設定の「リアルタイム音声」で選びます（Codex 内蔵のリアルタイム音声、またはローカルの local-multimodal-infra）。チャンネル音声とウィスパーはそれぞれ独立した音声スレッドを持ち、調べものや操作は対応する会話のエージェントが処理します（権限ルールに従う）。"
       },
       "mumble_voice_name": {
         "description": "音声の呼び名",
@@ -780,26 +780,6 @@
         "description": "音声の別名",
         "hint": "ニックネームや別の言語での名前など、ボットの他の呼び方です。"
       },
-      "mumble_voice_voice": {
-        "description": "音色",
-        "hint": "リアルタイム音声の声です。デフォルトは cove です。",
-        "labels": [
-          "デフォルト",
-          "juniper",
-          "maple",
-          "spruce",
-          "ember",
-          "vale",
-          "breeze",
-          "arbor",
-          "sol",
-          "cove"
-        ]
-      },
-      "mumble_voice_model": {
-        "description": "リアルタイムモデル",
-        "hint": "任意。リアルタイム音声モデルを上書きします。"
-      },
       "mumble_voice_prompt": {
         "description": "音声の追加プロンプト",
         "hint": "リアルタイム音声モデルへの追加指示（話し方など）です。"
@@ -807,49 +787,6 @@
       "mumble_voice_idle_timeout": {
         "description": "音声スタンバイまでの時間",
         "hint": "音声が認識されない状態がこの秒数続くとスタンバイ（リアルタイム切断）になり、新しい発話を検知すると自動で再開します。1 分以上ミュートしても切断されます。"
-      },
-      "mumble_voice_backend": {
-        "description": "音声バックエンド",
-        "hint": "Codex リアルタイム音声：音声を含む ChatGPT サブスクリプションで Codex エージェントランナーにログインしている必要があります。ローカルカスケード音声：自分でデプロイした local-multimodal-infra（/v1/realtime）に接続し、発話検出・認識・対話・音声合成をサーバー側で行います。検索や操作などのタスクは対応するチャットのエージェント（Codex）が処理します。",
-        "labels": [
-          "Codex リアルタイム音声",
-          "ローカルカスケード音声"
-        ]
-      },
-      "mumble_cascade_url": {
-        "description": "カスケード音声サーバーのアドレス",
-        "hint": "local-multimodal-infra のリアルタイム音声 WebSocket アドレス（例：ws://127.0.0.1:17890/v1/realtime）。モデルのダウンロードと読み込みはサーバーが行います。"
-      },
-      "mumble_cascade_token": {
-        "description": "カスケード音声サーバーのトークン",
-        "hint": "任意。サーバーの LOCAL_MCP_INFER_TOKENS のいずれか。サーバーでトークンを設定していない場合は空欄。"
-      },
-      "mumble_cascade_ref_audio": {
-        "description": "参照音声（声質）",
-        "hint": "任意。WAV ファイルのパス（相対パスは data ディレクトリ基準、8 MB まで）。ボットはこの声で話します。5～10 秒の明瞭な音声を推奨。空欄の場合はサーバーの既定の声を使います。"
-      },
-      "mumble_cascade_tool_filler": {
-        "description": "タスク受付の一言",
-        "hint": "任意。タスクをバックエンドに渡すときに最初に話す一言（例：「わかりました、調べます。」）。空欄の場合は何も話しません。"
-      },
-      "mumble_cascade_emotion": {
-        "description": "話し方の感情",
-        "hint": "サーバーが IndexTTS-2.5 を使う場合に有効です（1.5 は無視します）。参照音声のまま：感情を指定せず、参照音声と同じ口調で話します。",
-        "labels": [
-          "穏やか",
-          "喜び",
-          "怒り",
-          "悲しみ",
-          "恐れ",
-          "嫌悪",
-          "憂鬱",
-          "驚き",
-          "参照音声のまま"
-        ]
-      },
-      "mumble_cascade_emotion_strength": {
-        "description": "感情の強さ",
-        "hint": "0～1、既定値 0.8。残りは参照音声の口調に従います。"
       },
       "type": {
         "description": "アダプターの種類"

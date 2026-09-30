@@ -22,24 +22,28 @@ On first connect a client certificate is generated under `data/mumble/<platform 
 
 ## Realtime voice
 
-Requires the `Codex agent runner` signed in with a **ChatGPT plan that includes voice**. Voice uses Codex realtime over WebRTC; no API key is needed.
+The voice backend is set under **Realtime Voice on the Codex page**, for every platform:
+
+- **Codex realtime** (default): requires the `Codex agent runner` signed in with a **ChatGPT plan that includes voice**; it connects over WebRTC and needs no API key. Optional `Voice` (juniper, maple, spruce, ember, vale, breeze, arbor, sol, cove; default cove) and `Realtime model`.
+- **local-multimodal-infra**: see "Local voice server" below.
 
 - It joins in when someone speaks in the bot's channel. In channels it **only answers when called by name** (enforced by the prompt, so it may occasionally chime in). **Whispers** to the bot are always answered, and answered by whisper.
 - Tasks asked by voice are **handled by the agent of the paired conversation**: the server group for channel voice, the user's private chat for whispers. Each runs as a turn of that conversation, sharing its context, persona, tools, memories and approvals with the text chat; text messages and voice requests queue behind each other, and while the conversation is busy the bot says so first and gives the result when it is done. Answers are only spoken, never posted to the chat. Identity: channel voice cannot tell speakers apart, so it always runs as a fixed voice user locked to the member role; whispers run as the speaker, with their own permissions. (With `unique_session` on, group chats are split per user, while channel voice still pairs with the single server-wide group conversation.)
 - **Standby**: after `Voice Standby Timeout` (default 300 s) without recognised speech, realtime voice disconnects; new speech resumes it automatically, including the words that woke it.
 - **Mute / unmute**: send `wake prefix + mute` (or `闭麦`, or with the global wake prefix) in a channel, or just `mute` in a private message, and the bot stops listening and speaking and shows as muted; `unmute` (`开麦`) restores it. Muted for over a minute, it drops its voice sessions.
-- Voice options: `Voice Wake Name` and `Voice Wake Aliases`, `Voice` (juniper, maple, spruce, ember, vale, breeze, arbor, sol, cove; default cove), `Realtime Model`, `Extra Voice Prompt`. When the paired conversation's active persona has a voice persona, the voice model uses it instead of the extra voice prompt.
+- Voice options of the platform: `Voice Wake Name` and `Voice Wake Aliases`, `Extra Voice Prompt`, `Voice Standby Timeout`. When the paired conversation's active persona has a voice persona, the voice model uses it instead of the extra voice prompt.
 
-## Local cascade voice
+## Local voice server
 
-Set `Voice Backend` to **Local cascade** to run voice conversations on the realtime voice endpoint (`/v1/realtime`) of your own local-multimodal-infra instead of a ChatGPT subscription; lookups and actions still go to the paired chat's agent (Codex) as described above.
+Pick **local-multimodal-infra** under Realtime Voice on the Codex page and your own local-multimodal-infra listens and speaks (its realtime endpoint `/v1/realtime`, in audio mode), while Codex does the talking with a model you choose; no ChatGPT subscription is needed. Lookups and actions still go to the paired chat's agent as described above.
 
-- **The server runs the whole pipeline**: Silero VAD finds utterances → SenseVoice recognises them (speakers are not told apart) → a Qwen3 chat model decides to answer, stay silent or hand a task to the backend → IndexTTS speaks while the answer is still being generated, sent back at real-time pace. The server downloads and loads the models; AstrBot only carries the audio and runs the tasks it is handed.
+- **Who does what**: the server runs Silero VAD, SenseVoice recognition (speakers are not told apart), barge-in, and IndexTTS, sent back at real-time pace. Codex connects to the server itself; every utterance that wants a reply is a turn of the voice thread, and the reply is spoken while it is still being generated. AstrBot only carries the platform's audio.
+- **Voice text model**: choose a model provider and model under Realtime Voice (empty: the runner's), with reasoning effort `none` (thinking off, less delay). Describe third-party models under Custom Providers (context window, reasoning efforts, image input), where request headers a gateway needs (a session header, say) go too.
+- **Caching and compaction**: the voice thread of a conversation is kept from call to call and its history only grows, so the prompt prefix stays cached; once the prompt passes `Compact while idle at` (default 70%) of the context window, it is compacted while nobody talks, so no reply waits for it.
 - **Channel and whispers**: channel voice is a group conversation (the bot answers only when addressed and stays silent otherwise; talking over it takes its name); whispers are one to one (talking over the bot for about 1.2 s stops it).
-- Set `Cascade Voice Server URL` to `ws://<server>:17890/v1/realtime`; if the server sets `LOCAL_MCP_INFER_TOKENS`, put one of them in `Cascade Voice Server Token`.
-- `Reference Audio` is a WAV file (relative to the data directory unless absolute, at most 8 MB; 5–10 s of clear speech) whose voice the bot uses; empty uses the server's default voice (`default_reference_audio` of its `voice-cascade` model). `Task Acknowledgement` is said when a task is handed off; when the paired chat is busy nothing more is said, and the result is told once it is ready. `Speaking Emotion` and `Emotion Strength` apply when the server uses IndexTTS-2.5 (default Calm, 0.8; Reference voice keeps the reference audio's tone).
-- A conversation starts once the server has loaded every model, which can take tens of seconds the first time. Each resume from standby is a new conversation on the server: what was said before is not carried over (tasks handed to the paired chat and their results stay in that chat).
-- `Voice` and `Realtime Model` apply to Codex realtime only. The voice persona (or `Extra Voice Prompt`) is sent to the server as extra instructions, appended to its Chinese prompt.
+- Set `Server URL` to `ws://<server>:17890/v1/realtime`; if the server sets `LOCAL_MCP_INFER_TOKENS`, put one of them in `Token`.
+- `Reference audio` is a WAV file (relative to the data directory unless absolute, at most 8 MB; 5–10 s of clear speech) whose voice the bot uses; empty uses the server's default voice. `Speaking emotion` and `Emotion strength` apply when the server uses IndexTTS-2.5 (default Calm, 0.8).
+- A conversation starts once the server has loaded its models, which can take tens of seconds the first time.
 
 ## Proxy
 

@@ -1,0 +1,439 @@
+"""Voice through a local-multimodal-infra server, with Codex doing the talking.
+
+With ``realtime_voice.backend = "local_infra"`` Codex connects the voice
+thread to the server's ``/v1/realtime`` in audio mode (Codex's
+``[realtime] backend = "local_multimodal_infra"``): the server listens and
+speaks (VAD, ASR, barge-in, TTS), and every utterance that wants a reply is a
+turn of the voice thread, on the model chosen for it (``text_*``). This
+session carries the audio both ways through Codex and runs what the voice
+model hands off (its one tool, ``backend_task``) as a turn of the paired
+chat, like ``VoiceSession`` does; the answer goes back to the voice thread,
+which tells it.
+
+The voice thread is kept per conversation key, like the realtime one: its
+history (compacted while idle) carries over from call to call.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import fractions
+import json
+import time
+from pathlib import Path
+from urllib.parse import urlsplit
+
+import av
+from aiortc import MediaStreamTrack
+from aiortc.mediastreams import MediaStreamError
+
+from astrbot import logger
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+from .chat import TASK_BODY
+from .session import (
+    DONE_SPEECH,
+    FAILED_SPEECH,
+    VOICE_THREAD_CONFIG,
+    VoiceSession,
+    realtime_voice_config,
+    time_prompt,
+)
+
+IN_RATE = 16000  # what Codex hands the server: 16-bit mono PCM
+# A session loads every model on the server before it starts (IndexTTS takes
+# tens of seconds the first time).
+START_TIMEOUT = 300.0
+# The reference voice goes in one WebSocket message (the server takes 16 MB).
+MAX_REF_AUDIO_BYTES = 8 * 1024 * 1024
+# Emotions the server's TTS (IndexTTS-2.5) speaks with; "none" keeps the
+# reference voice's own.
+EMOTIONS = (
+    "calm",
+    "happy",
+    "angry",
+    "sad",
+    "afraid",
+    "disgusted",
+    "melancholic",
+    "surprised",
+    "none",
+)
+# After the server's speech stops, this much silence (20 ms frames) follows,
+# so the platform's player starts and ends even a very short reply. Speech has
+# stopped when nothing arrived for TAIL_GAP: well over the server's 20 ms
+# frame period and its jitter, well under its 300 ms lead.
+TAIL_FRAMES = 15
+TAIL_GAP = 0.2
+
+# How the voice thread's model takes part, ahead of the platform's prompt
+# (whose "delegate to the backend" and "stay silent" these define).
+INFRA_INSTRUCTIONS = """You are the voice in a live voice conversation. What people say reaches you as transcripts (speech recognition may mishear words); everything you write is spoken aloud by speech synthesis.
+
+- Speak naturally and briefly, usually one to three short sentences, in the speaker's language. Never use Markdown, lists, links, code or emoji.
+- To stay silent, reply exactly <silence> and nothing else.
+- To delegate to the backend, call backend_task with the whole task in one sentence, then say in a few words that you are on it. The result comes back later as a message; tell it then, briefly and in your own words.
+- Text in parentheses comes from the system, not from anyone speaking."""
+START_INSTRUCTIONS = "A voice conversation has started."
+END_INSTRUCTIONS = "The voice conversation has ended; nothing said now is heard."
+# A handed-off task's answer, for the voice thread to tell.
+RESULT_PROMPT = """(The backend finished "{task}": {answer}
+Tell the listener briefly, in your own words.)"""
+BACKEND_TASK_TOOL = {
+    "type": "function",
+    "name": "backend_task",
+    "description": (
+        "Hands a task to the backend: anything needing current information "
+        "(time, date, weather, news, prices), searching or looking things up, "
+        "or doing something (messages, reminders, devices, remembering). The "
+        "result comes back later as a message."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "The whole task in one sentence, with every detail it needs.",
+            }
+        },
+        "required": ["task"],
+        "additionalProperties": False,
+    },
+}
+
+
+def infra_settings_error(settings: dict) -> str | None:
+    """What is wrong with the ``local_infra`` realtime voice settings.
+
+    Args:
+        settings: The runner's ``realtime_voice``.
+
+    Returns:
+        The problem, or None when they are usable.
+    """
+    parts = urlsplit(str(settings["infra_url"]))
+    if parts.scheme not in ("ws", "wss") or not parts.netloc:
+        return (
+            f"voice server URL must be ws:// or wss://, got {settings['infra_url']!r}"
+        )
+    if (emotion := str(settings["emotion"])) and emotion not in EMOTIONS:
+        return f"voice emotion must be one of {', '.join(EMOTIONS)}, got {emotion!r}"
+    if not 0 <= float(settings["emotion_strength"]) <= 1:
+        return (
+            f"voice emotion strength must be 0 to 1, got {settings['emotion_strength']}"
+        )
+    if path := ref_audio_path(settings):
+        if not path.is_file() or path.suffix.lower() != ".wav":
+            return f"reference audio must be an existing .wav file: {path}"
+        if path.stat().st_size > MAX_REF_AUDIO_BYTES:
+            return f"reference audio is over {MAX_REF_AUDIO_BYTES // 2**20} MB: {path}"
+    return None
+
+
+def ref_audio_path(settings: dict) -> Path | None:
+    """The reference voice file (relative paths are in the data directory)."""
+    if not (ref := str(settings["ref_audio"]).strip()):
+        return None
+    path = Path(ref)
+    return path if path.is_absolute() else Path(get_astrbot_data_path()) / path
+
+
+class SpeechTrack(MediaStreamTrack):
+    """The server's speech (already at real-time pace) as a track."""
+
+    kind = "audio"
+
+    def __init__(self, rate: int = 24000) -> None:
+        """Creates an empty track.
+
+        Args:
+            rate: Sample rate of the server's 16-bit mono PCM.
+        """
+        super().__init__()
+        self.rate = rate
+        self._queue: asyncio.Queue[av.AudioFrame | None] = asyncio.Queue()
+        self._pts = 0
+        self._tail = 0
+        self._odd = b""  # a byte of a sample split between two messages
+        self._ended = False
+
+    def _frame(self, pcm: bytes) -> av.AudioFrame:
+        frame = av.AudioFrame(format="s16", layout="mono", samples=len(pcm) // 2)
+        frame.planes[0].update(pcm)
+        frame.sample_rate = self.rate
+        frame.pts = self._pts
+        frame.time_base = fractions.Fraction(1, self.rate)
+        self._pts += frame.samples
+        return frame
+
+    def put(self, pcm: bytes) -> None:
+        """Queues server speech.
+
+        Args:
+            pcm: 16-bit mono PCM; a trailing odd byte goes before the next.
+        """
+        pcm = self._odd + pcm
+        cut = len(pcm) - len(pcm) % 2
+        pcm, self._odd = pcm[:cut], pcm[cut:]
+        if pcm:
+            self._queue.put_nowait(self._frame(pcm))
+            self._tail = TAIL_FRAMES
+
+    def clear(self) -> None:
+        """Drops what the player has not taken yet."""
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        self._tail = 0
+
+    def end(self) -> None:
+        self._ended = True
+        self._queue.put_nowait(None)
+
+    async def recv(self) -> av.AudioFrame:
+        """The next frame of speech, or of the silence after it."""
+        if self._ended:
+            raise MediaStreamError
+        while True:
+            if self._tail > 0 and self._queue.empty():
+                # The first silent frame only once speech has clearly
+                # stopped, then one per frame period.
+                wait = TAIL_GAP if self._tail == TAIL_FRAMES else 0.02
+                try:
+                    frame = await asyncio.wait_for(self._queue.get(), wait)
+                except asyncio.TimeoutError:
+                    self._tail = max(self._tail - 1, 0)
+                    return self._frame(bytes(2 * (self.rate // 50)))
+            else:
+                frame = await self._queue.get()
+            if frame is None:
+                raise MediaStreamError
+            return frame
+
+
+class InfraVoiceSession(VoiceSession):
+    """A voice conversation on a local-multimodal-infra server, the voice
+    thread's model doing the talking."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        """Creates the session (it starts with ``launch``).
+
+        Args:
+            *args, **kwargs: As for ``VoiceSession``. The ``thread_key`` gets
+                an ``_infra`` suffix: this thread talks itself, unlike the
+                realtime one.
+        """
+        super().__init__(*args, **kwargs)
+        self.thread_key = f"{self.thread_key}_infra"
+        self._track = SpeechTrack()
+        # The last utterance heard (what a handed-off task was asked with).
+        self._heard = ""
+
+    def _thread_params(self) -> dict:
+        """The voice thread: the voice instructions and persona, the
+        ``backend_task`` tool, the chosen model, and the server (Codex
+        connects to it when the conversation starts)."""
+        settings = realtime_voice_config()
+        if problem := infra_settings_error(settings):
+            raise ValueError(problem)
+        session: dict = {
+            "name": self.options.name,
+            "aliases": self.options.aliases,
+            "group": not self.chat.private,
+            "tts_emotion": str(settings["emotion"]),
+            "tts_emotion_strength": float(settings["emotion_strength"]),
+        }
+        config = {
+            **{
+                key: value
+                for key, value in VOICE_THREAD_CONFIG.items()
+                if key != "realtime.host_routes_handoffs"
+            },
+            # The voice thread's only tool is a plain function.
+            "model_tool_mode": "direct",
+            "features.shell_tool": False,
+            "web_search": "disabled",
+            "realtime.backend": "local_multimodal_infra",
+            "realtime.local_infra.url": str(settings["infra_url"]),
+            "realtime.local_infra.session": session,
+            "realtime.local_infra.idle_compact_percent": int(
+                settings["idle_compact_percent"]
+            ),
+        }
+        if token := str(settings["infra_token"]).strip():
+            config["realtime.local_infra.token"] = token
+        if path := ref_audio_path(settings):
+            config["realtime.local_infra.ref_audio_path"] = str(path)
+        if provider := str(settings["text_model_provider"]).strip():
+            config["model_provider"] = provider
+        if model := str(settings["text_model"]).strip():
+            config["model"] = model
+        if effort := str(settings["text_reasoning_effort"]).strip():
+            config["model_reasoning_effort"] = effort
+        return {
+            # Kept the same from call to call: the thread's prompt prefix
+            # stays cached (the time goes with each call's start).
+            "base_instructions": f"{INFRA_INSTRUCTIONS}\n\n{self.prompt}",
+            "dynamic_tools": [BACKEND_TASK_TOOL],
+            "no_environment": True,
+            "config": config,
+        }
+
+    def _tool_handler(self):
+        return self._backend_task
+
+    async def _backend_task(self, msg: dict) -> dict:
+        """Runs a ``backend_task`` call as a turn of the paired chat; the
+        voice thread gets its answer later (``RESULT_PROMPT``)."""
+        if msg.get("tool") != "backend_task":
+            return {
+                "contentItems": [{"type": "inputText", "text": "Unknown tool."}],
+                "success": False,
+            }
+        arguments = msg.get("arguments")
+        task = str(
+            (arguments.get("task") if isinstance(arguments, dict) else None)
+            or self._heard
+        ).strip()
+        logger.info("%s voice %s: task %r", self.label, self.key, task)
+
+        async def tell(answer: str | None) -> None:
+            if answer is None:
+                answer = FAILED_SPEECH
+            await self._speak(
+                RESULT_PROMPT.format(task=task, answer=answer or DONE_SPEECH)
+            )
+
+        busy = self._ask(TASK_BODY.format(heard=self._heard or task, task=task), tell)
+        text = "Handed to the backend; the result comes later as a message."
+        if busy:
+            text += " It is still busy with an earlier request: this one is next."
+        return {"contentItems": [{"type": "inputText", "text": text}], "success": True}
+
+    async def _connect(self) -> None:
+        """Has Codex start the conversation on the server; the server has
+        loaded its models when it is up."""
+        engine, events = self._engine, self._events_queue
+        started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._spawn(self._events(events, started), "events")
+        self._realtime_requested = True
+        await engine.rt.realtime_start(
+            self._thread_id,
+            json.dumps(
+                {
+                    "transport": {"type": "websocket"},
+                    "realtime_start_instructions": f"{START_INSTRUCTIONS}\n\n{time_prompt()}",
+                    "realtime_end_instructions": END_INSTRUCTIONS,
+                }
+            ),
+        )
+        await self._wait_open(started, START_TIMEOUT)
+        self._phase("voice server session started")
+        self._spawn(self.media.play(self._track), "outbound")
+        self._spawn(self._send(), "send")
+        self.media.start()
+        self.started_at = time.monotonic()
+        self.ready = True
+        logger.info(
+            "%s voice session %s started on the voice server in %.1fs (thread %s)",
+            self.label,
+            self.key,
+            self.started_at - self.created_at,
+            self._thread_id,
+        )
+
+    async def _send(self) -> None:
+        """Hands the platform's audio to Codex as 16 kHz mono PCM."""
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=IN_RATE)
+        try:
+            while True:
+                frame = await self.media.track.recv()
+                for out in resampler.resample(frame):
+                    pcm = bytes(out.planes[0])[: out.samples * 2]
+                    await self._engine.rt.realtime_append_audio(
+                        self._thread_id,
+                        json.dumps(
+                            {
+                                "data": base64.b64encode(pcm).decode(),
+                                "sample_rate": IN_RATE,
+                                "num_channels": 1,
+                                "samples_per_channel": out.samples,
+                            }
+                        ),
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported, the session ends
+            logger.warning("%s voice %s: sending failed: %s", self.label, self.key, exc)
+            self._request_close(f"voice send failed: {exc}")
+
+    async def _events(self, events: asyncio.Queue, started: asyncio.Future) -> None:
+        """Plays the server's speech and follows the conversation until it
+        ends."""
+        while True:
+            msg = await events.get()
+            kind = msg.get("type")
+            if kind == "realtime_conversation_started":
+                if not started.done():
+                    started.set_result(None)
+            elif kind in ("realtime_conversation_closed", "_pump_closed"):
+                reason = msg.get("reason") or msg.get("message") or "closed"
+                if not started.done():
+                    started.set_exception(RuntimeError(f"voice closed: {reason}"))
+                self._realtime_requested = False
+                self._request_close(f"voice {reason}")
+                return
+            elif kind == "realtime_conversation_realtime":
+                payload = msg.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if audio := payload.get("AudioOut"):
+                    self._track.rate = int(audio.get("sample_rate") or 24000)
+                    self._track.put(base64.b64decode(audio.get("data") or ""))
+                elif "ResponseCancelled" in payload:
+                    # Talked over: what is buffered goes.
+                    self._track.clear()
+                    self.media.flush()
+                elif done := payload.get("InputTranscriptDone"):
+                    self.last_transcript_at = time.monotonic()
+                    self._heard = str(done.get("text") or "")
+                    logger.debug(
+                        "%s voice %s heard: %s", self.label, self.key, self._heard
+                    )
+                elif "InputTranscriptDelta" in payload:
+                    self.last_transcript_at = time.monotonic()
+                elif "OutputTranscriptDelta" in payload:
+                    self.last_answer_at = time.monotonic()
+                elif "Error" in payload:
+                    logger.warning(
+                        "%s voice %s: %s", self.label, self.key, payload["Error"]
+                    )
+                    if not started.done():
+                        started.set_exception(RuntimeError(str(payload["Error"])))
+            elif kind == "error":
+                logger.warning(
+                    "%s voice %s: Codex error: %s",
+                    self.label,
+                    self.key,
+                    msg.get("message"),
+                )
+
+    async def _speak(self, text: str) -> None:
+        """Gives the voice thread ``text`` (a task's answer) to tell at the
+        next quiet moment."""
+        if self._engine is None or self._thread_id is None or self._closed:
+            return
+        try:
+            await self._engine.rt.realtime_append_text(
+                self._thread_id, text, "developer"
+            )
+        except Exception as exc:  # noqa: BLE001 - the conversation goes on
+            logger.warning(
+                "%s voice %s: answer not told: %s", self.label, self.key, exc
+            )
+
+    async def _release_transport(self) -> None:
+        """Stops the conversation (Codex ends the server session) and the
+        speech track."""
+        await super()._release_transport()
+        self._track.end()

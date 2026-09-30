@@ -311,3 +311,42 @@ def test_load_migration_backs_up_replaced_runner_once(tmp_path):
     assert json.loads(backup.read_text(encoding="utf-8-sig")) == legacy
     migrate_config_on_load({"agent_runner": {"runner_type": "dify"}}, path)
     assert json.loads(backup.read_text(encoding="utf-8-sig")) == legacy
+
+
+def test_mumble_voice_settings_move_to_the_runner():
+    from pathlib import Path
+
+    from astrbot.core.utils.migra_helper import migrate_config_on_load
+
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config["platform"] = [
+        {
+            "id": "m1",
+            "type": "mumble",
+            "mumble_voice_name": "Mon3tr",
+            "mumble_voice_voice": "cove",
+            "mumble_voice_backend": "local_cascade",
+            "mumble_cascade_url": "ws://10.0.0.2:17890/v1/realtime",
+            "mumble_cascade_token": "tok",
+            "mumble_cascade_ref_audio": "voice.wav",
+            "mumble_cascade_tool_filler": "OK",
+            "mumble_cascade_emotion": "sad",
+            "mumble_cascade_emotion_strength": 0.4,
+        },
+        {"id": "qq", "type": "aiocqhttp"},
+    ]
+
+    assert migrate_config_on_load(config, Path("cmd_config.json"))
+
+    platform = config["platform"][0]
+    assert platform == {"id": "m1", "type": "mumble", "mumble_voice_name": "Mon3tr"}
+    voice = normalize_agent_runner(config["agent_runner"])["config"]["realtime_voice"]
+    assert voice["backend"] == "local_infra"
+    assert voice["infra_url"] == "ws://10.0.0.2:17890/v1/realtime"
+    assert voice["infra_token"] == "tok"
+    assert voice["ref_audio"] == "voice.wav"
+    assert voice["emotion"] == "sad"
+    assert voice["emotion_strength"] == 0.4
+    assert voice["voice"] == "cove"
+    # Once only.
+    assert not migrate_config_on_load(config, Path("cmd_config.json"))

@@ -2,6 +2,8 @@ import asyncio
 
 import pytest
 
+from astrbot.core.config.agent_runner import get_agent_runner_config_default
+
 from astrbot.core.platform.sources.mumble import voice as mumble_voice
 from astrbot.core.platform.sources.mumble.audio import MumbleMedia
 from astrbot.core.voice import chat as chat_module
@@ -117,7 +119,11 @@ def engine(monkeypatch):
 
     monkeypatch.setattr(voice, "_codex_engine", codex_engine)
     monkeypatch.setattr(voice, "sp", FakeSp())
-    monkeypatch.setattr(voice, "_runner_config", lambda: {})
+    monkeypatch.setattr(
+        voice,
+        "_runner_config",
+        lambda: get_agent_runner_config_default("codex"),
+    )
     return engine
 
 
@@ -386,18 +392,17 @@ def test_consent_expiry_is_disabled():
     assert aioice.ice.CONSENT_FAILURES >= 1_000_000
 
 
-def test_realtime_prompts_state_the_date(monkeypatch):
+def test_realtime_prompts_name_the_bot_and_the_session_adds_the_date():
     import datetime
 
     options = voice.VoiceOptions(name="Jarvis", aliases=["贾维斯"])
     today = datetime.datetime.now().astimezone().strftime("%Y-%m-%d")
-    for prompt in (
-        mumble_voice.channel_prompt(options),
-        mumble_voice.whisper_prompt(options, "alice"),
-    ):
-        assert f"Today is {today}" in prompt
-        assert "must be delegated to the backend" in prompt
     assert '("Jarvis", "贾维斯")' in mumble_voice.channel_prompt(options)
+    assert "alice" in mumble_voice.whisper_prompt(options, "alice")
+    # The date goes with each conversation's start (not in the prompt kept
+    # by the thread).
+    assert f"Today is {today}" in voice.time_prompt()
+    assert "must be delegated to the backend" in voice.time_prompt()
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from astrbot.core.voice.session import VoiceOptions, time_prompt
+from astrbot.core.voice.session import VoiceOptions
 
 CHANNEL_PROMPT = """Your name is {name}.
 
@@ -24,12 +24,10 @@ def channel_prompt(options: VoiceOptions) -> str:
         if aliases
         else f' "{options.name}"'
     )
-    # The voice persona or the platform's extra prompt is appended by the
-    # session when it starts.
-    prompt = CHANNEL_PROMPT.format(name=options.name, aliases=alias_text)
-    return prompt + "\n\n" + time_prompt()
+    # The session adds the voice persona (or the platform's extra prompt)
+    # and the time.
+    return CHANNEL_PROMPT.format(name=options.name, aliases=alias_text)
 
 
 def whisper_prompt(options: VoiceOptions, speaker: str) -> str:
-    prompt = WHISPER_PROMPT.format(name=options.name, speaker=speaker)
-    return prompt + "\n\n" + time_prompt()
+    return WHISPER_PROMPT.format(name=options.name, speaker=speaker)

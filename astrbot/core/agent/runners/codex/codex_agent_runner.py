@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -189,7 +190,9 @@ def engine_options(cfg: dict) -> JsonObject:
 
 
 def model_provider_overrides(providers: T.Any) -> JsonObject:
-    """Map WebUI-managed providers to Codex `model_providers.<id>` overrides."""
+    """Map WebUI-managed providers to Codex overrides: `model_providers.<id>`
+    (endpoint, key, extra request headers) and `model_provider_options.<id>`
+    (compaction mode, metadata of the provider's models)."""
     out: JsonObject = {}
     for p in providers if isinstance(providers, list) else []:
         if not isinstance(p, dict):
@@ -204,6 +207,49 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
         out[f"{prefix}.wire_api"] = str(p.get("wire_api") or "responses")
         if key := str(p.get("api_key") or "").strip():
             out[f"{prefix}.experimental_bearer_token"] = key
+        headers = p.get("headers")
+        if isinstance(headers, dict) and (
+            headers := {
+                str(name).strip(): str(value)
+                for name, value in headers.items()
+                if str(name).strip()
+            }
+        ):
+            out[f"{prefix}.http_headers"] = headers
+        compaction = str(p.get("compaction") or "auto")
+        if compaction in ("local", "remote"):
+            out[f"model_provider_options.{pid}.compaction"] = compaction
+        models: JsonObject = {}
+        for m in p.get("models") if isinstance(p.get("models"), list) else []:
+            slug = str(m.get("slug") or "").strip() if isinstance(m, dict) else ""
+            if not slug:
+                continue
+            info: JsonObject = {}
+            for field in ("context_window", "auto_compact_token_limit"):
+                with contextlib.suppress(TypeError, ValueError):
+                    if (value := int(m.get(field) or 0)) > 0:
+                        info[field] = value
+            efforts = [str(e) for e in m.get("reasoning_efforts") or [] if e]
+            if efforts:
+                info["supported_reasoning_levels"] = [
+                    {"effort": e, "description": e} for e in efforts
+                ]
+            if default := str(m.get("default_reasoning_effort") or ""):
+                info["default_reasoning_level"] = default
+            info["input_modalities"] = (
+                ["text", "image"] if m.get("image_input") else ["text"]
+            )
+            # Any other model info fields, over the form's.
+            try:
+                extra = json.loads(str(m.get("metadata_json") or "").strip() or "{}")
+            except json.JSONDecodeError as exc:
+                logger.warning("Codex model %s: metadata JSON ignored: %s", slug, exc)
+                extra = {}
+            if isinstance(extra, dict):
+                info.update(extra)
+            models[slug] = info
+        if models:
+            out[f"model_provider_options.{pid}.models"] = models
     return out
 
 

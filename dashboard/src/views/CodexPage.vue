@@ -233,6 +233,22 @@
         </div>
       </section>
 
+      <!-- Realtime voice -->
+      <div class="dashboard-section-head">
+        <div>
+          <div class="dashboard-section-title">{{ tm('voice.title') }}</div>
+          <div class="dashboard-section-subtitle">{{ tm('voice.subtitle') }}</div>
+        </div>
+      </div>
+
+      <section class="dashboard-card dashboard-card--padded mb-5 codex-section">
+        <CodexRealtimeVoice
+          :model-value="form.realtime_voice"
+          :provider-items="providerItems"
+          :model-ids="modelIds"
+        />
+      </section>
+
       <!-- Custom providers -->
       <div class="dashboard-section-head">
         <div>
@@ -303,6 +319,7 @@
               class="provider-remove"
               @click="removeProvider(idx)"
             />
+            <CodexProviderExtras :model-value="p.extras" />
           </div>
         </div>
       </section>
@@ -358,6 +375,18 @@ import { httpClient } from '@/api/http'
 import { configProfileApi } from '@/api/v1'
 import { useModuleI18n } from '@/i18n/composables'
 import { askForConfirmation, useConfirmDialog } from '@/utils/confirmDialog'
+import CodexProviderExtras from '@/components/codex/CodexProviderExtras.vue'
+import CodexRealtimeVoice from '@/components/codex/CodexRealtimeVoice.vue'
+import {
+  extrasFromConfig,
+  extrasPayload,
+  extrasProblem,
+  realtimeVoiceFromConfig,
+  realtimeVoicePayload,
+  realtimeVoiceProblem,
+  type ProviderExtras,
+  type RealtimeVoiceForm
+} from '@/components/codex/types'
 
 type CodexAccount = {
   logged_in: boolean
@@ -397,6 +426,8 @@ type ProviderRow = {
   base_url: string
   api_key: string
   wire_api: string
+  // Request headers, compaction mode and model metadata.
+  extras: ProviderExtras
 }
 
 type CodexForm = {
@@ -404,6 +435,7 @@ type CodexForm = {
   model_provider: string
   reasoning_effort: string
   model_providers: ProviderRow[]
+  realtime_voice: RealtimeVoiceForm
   base_instructions: string
   developer_instructions: string
 }
@@ -453,6 +485,7 @@ function emptyForm(): CodexForm {
     model_provider: '',
     reasoning_effort: '',
     model_providers: [],
+    realtime_voice: realtimeVoiceFromConfig({}),
     base_instructions: '',
     developer_instructions: ''
   }
@@ -748,7 +781,8 @@ function addProvider() {
     name: '',
     base_url: '',
     api_key: '',
-    wire_api: 'responses'
+    wire_api: 'responses',
+    extras: extrasFromConfig({})
   })
 }
 
@@ -776,8 +810,10 @@ function normalizeForm(runnerCfg: any): CodexForm {
         name: str(p.name),
         base_url: str(p.base_url),
         api_key: str(p.api_key),
-        wire_api: str(p.wire_api) || 'responses'
+        wire_api: str(p.wire_api) || 'responses',
+        extras: extrasFromConfig(p)
       })),
+    realtime_voice: realtimeVoiceFromConfig(runnerCfg?.realtime_voice),
     base_instructions: str(runnerCfg?.base_instructions),
     developer_instructions: str(runnerCfg?.developer_instructions)
   }
@@ -793,8 +829,10 @@ function formPayload(f: CodexForm) {
       name: p.name.trim(),
       base_url: p.base_url.trim(),
       api_key: p.api_key.trim(),
-      wire_api: p.wire_api || 'responses'
+      wire_api: p.wire_api || 'responses',
+      ...extrasPayload(p.extras)
     })),
+    realtime_voice: realtimeVoicePayload(f.realtime_voice),
     base_instructions: f.base_instructions || '',
     developer_instructions: f.developer_instructions || ''
   }
@@ -841,6 +879,21 @@ function validateBeforeSave(): boolean {
       toast(tm('messages.baseUrlRequired'), 'warning')
       return false
     }
+    const problem = extrasProblem(p.extras)
+    if (problem) {
+      toast(`${id}: ${tm(problem[0], problem[1])}`, 'warning')
+      return false
+    }
+  }
+  const voiceProblem = realtimeVoiceProblem(form.value.realtime_voice)
+  if (voiceProblem) {
+    toast(tm(voiceProblem[0], voiceProblem[1]), 'warning')
+    return false
+  }
+  const voiceProvider = form.value.realtime_voice.text_model_provider
+  if (voiceProvider && voiceProvider !== 'openai' && !seen.has(voiceProvider)) {
+    toast(tm('messages.providerNotFound', { id: voiceProvider }), 'warning')
+    return false
   }
   const provider = form.value.model_provider
   if (provider && provider !== 'openai' && !seen.has(provider)) {

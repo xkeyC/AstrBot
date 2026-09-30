@@ -206,6 +206,57 @@ def test_model_providers_map_to_codex_overrides(tmp_path):
     assert not any(k.startswith("model_providers.no-url") for k in cfg)
 
 
+def test_provider_headers_compaction_and_model_metadata(tmp_path):
+    opts = engine_options(
+        {
+            "codex_home": str(tmp_path),
+            "tool_mode": "direct",
+            "model_providers": [
+                {
+                    "id": "go",
+                    "base_url": "https://opencode.ai/zen/go/v1",
+                    "headers": {"x-opencode-session": "abc", " ": "dropped"},
+                    "compaction": "local",
+                    "models": [
+                        {
+                            "slug": "deepseek-v4.1-flash",
+                            "context_window": 128000,
+                            "auto_compact_token_limit": "100000",
+                            "reasoning_efforts": ["none", "high"],
+                            "default_reasoning_effort": "none",
+                            "image_input": True,
+                            "metadata_json": '{"support_verbosity": false}',
+                        },
+                        {"slug": "bad-json", "metadata_json": "{nope"},
+                        {"context_window": 1},
+                    ],
+                },
+                {"id": "plain", "base_url": "https://p/v1", "compaction": "auto"},
+            ],
+        }
+    )
+    cfg = opts["config"]
+    assert cfg["model_providers.go.http_headers"] == {"x-opencode-session": "abc"}
+    assert cfg["model_provider_options.go.compaction"] == "local"
+    assert cfg["model_provider_options.go.models"] == {
+        "deepseek-v4.1-flash": {
+            "context_window": 128000,
+            "auto_compact_token_limit": 100000,
+            "supported_reasoning_levels": [
+                {"effort": "none", "description": "none"},
+                {"effort": "high", "description": "high"},
+            ],
+            "default_reasoning_level": "none",
+            "input_modalities": ["text", "image"],
+            "support_verbosity": False,
+        },
+        "bad-json": {"input_modalities": ["text"]},
+    }
+    # Nothing is said for a provider left as it is.
+    assert not any(k.startswith("model_provider_options.plain") for k in cfg)
+    assert "model_providers.plain.http_headers" not in cfg
+
+
 def test_native_exec_approvals_follow_permission_rules(tmp_path):
     from astrbot.core.agent.runners.codex.codex_agent_runner import (
         native_exec_decision,

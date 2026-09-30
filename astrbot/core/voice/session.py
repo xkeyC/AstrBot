@@ -1,4 +1,9 @@
-"""Full-duplex voice through Codex realtime over WebRTC.
+"""Full-duplex voice through Codex realtime.
+
+Which realtime backend carries it is a setting of the Codex runner
+(``realtime_voice.backend``): this module's ``VoiceSession`` talks to an
+OpenAI realtime model over WebRTC; ``infra.InfraVoiceSession`` has Codex
+connect to a local-multimodal-infra server. ``new_voice_session`` picks it.
 
 The realtime model listens and speaks. What it hands off runs as a turn of
 the paired chat (see ``chat``): the chat's own thread, context, persona,
@@ -169,8 +174,6 @@ class VoiceMedia(Protocol):
 class VoiceOptions:
     name: str
     aliases: list[str]
-    voice: str = ""
-    model: str = ""
     # Appended to the voice model's prompt unless the paired chat's persona
     # has a voice persona.
     extra_prompt: str = ""
@@ -184,6 +187,28 @@ def _runner_config() -> dict:
     from astrbot.core.config.agent_runner import normalize_agent_runner
 
     return normalize_agent_runner(astrbot_config.get("agent_runner"))["config"]
+
+
+def realtime_voice_config() -> dict:
+    """The runner's realtime voice settings (``realtime_voice``)."""
+    return _runner_config()["realtime_voice"]
+
+
+def new_voice_session(**kwargs) -> VoiceSession:
+    """A voice session on the configured realtime backend.
+
+    Args:
+        **kwargs: As for ``VoiceSession``.
+
+    Returns:
+        A ``VoiceSession`` (Codex realtime) or an ``InfraVoiceSession``
+        (local-multimodal-infra), not started yet.
+    """
+    if realtime_voice_config()["backend"] == "local_infra":
+        from .infra import InfraVoiceSession
+
+        return InfraVoiceSession(**kwargs)
+    return VoiceSession(**kwargs)
 
 
 async def _codex_engine():
@@ -233,7 +258,8 @@ class VoiceSession:
         Args:
             key: Conversation key within the platform, e.g. ``server``.
             scope_id: Storage scope of the persisted voice thread.
-            prompt: Instructions for the realtime model.
+            prompt: Instructions for the realtime model (who and where it
+                is); the session adds the voice persona and the time.
             options: Voice settings of the platform.
             media: The platform's audio in and out.
             on_closed: Called once the session has ended, for any reason.
@@ -368,13 +394,7 @@ class VoiceSession:
         self._check_open()
         workspace = Path(get_astrbot_data_path()) / "voice"
         workspace.mkdir(parents=True, exist_ok=True)
-        params = {
-            "cwd": str(workspace),
-            "base_instructions": VOICE_THREAD_INSTRUCTIONS,
-            "dynamic_tools": [],
-            "no_environment": True,
-            "config": dict(VOICE_THREAD_CONFIG),
-        }
+        params = {"cwd": str(workspace), **self._thread_params()}
         # Opening and unloading this key's thread are serialised: a session
         # closed while its open was still running unloads the thread before
         # anyone else may open it, so it can never unload a newer session's
@@ -398,7 +418,9 @@ class VoiceSession:
             # the thread sees it is ours and leaves it (see _release). This
             # thread only ever carries the voice conversation, so its pump
             # route stays open for the whole session and sees every event.
-            self._events_queue = engine.pump(self._thread_id).open_turn(None, None)
+            self._events_queue = engine.pump(self._thread_id).open_turn(
+                self._tool_handler(), None
+            )
         if started_new or state.get("thread_id") != self._thread_id:
             await sp.put_async(
                 scope="umo",
@@ -410,6 +432,20 @@ class VoiceSession:
                 },
             )
         self._check_open()
+
+    def _thread_params(self) -> dict:
+        """The parameters of the thread carrying the conversation (it runs
+        no turns here: handoffs go to the paired chat)."""
+        return {
+            "base_instructions": VOICE_THREAD_INSTRUCTIONS,
+            "dynamic_tools": [],
+            "no_environment": True,
+            "config": dict(VOICE_THREAD_CONFIG),
+        }
+
+    def _tool_handler(self):
+        """Answers the thread's dynamic tool calls (none here)."""
+        return None
 
     async def _connect(self) -> None:
         """Starts the realtime conversation over WebRTC on the agent thread."""
@@ -442,12 +478,14 @@ class VoiceSession:
             # The answers come from the paired chat and are spoken here.
             "client_managed_handoffs": True,
             "include_startup_context": False,
-            "prompt": self.prompt,
+            # The realtime model has no clock of its own.
+            "prompt": f"{self.prompt}\n\n{time_prompt()}",
         }
-        if self.options.voice:
-            request["voice"] = self.options.voice
-        if self.options.model:
-            request["model"] = self.options.model
+        settings = realtime_voice_config()
+        if voice := str(settings["voice"]).strip():
+            request["voice"] = voice
+        if model := str(settings["model"]).strip():
+            request["model"] = model
         answer: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._spawn(self._events(events, answer), "events")
         self._realtime_requested = True
