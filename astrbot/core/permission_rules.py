@@ -19,6 +19,11 @@ one) still serves as a template.
 ``rate_limit`` caps how many requests an account may send to the agent within
 sliding windows; see ``astrbot/core/permission_rate_limit.py``.
 
+``cron_max_tasks`` and ``cron_min_interval_hours`` limit the scheduled tasks
+(``future_task``) an account keeps and how often each may run; 0 is no
+limit. Left unset along the whole chain (and for a sender no rule matches),
+members get one task at most every 6 hours and admins are not limited.
+
 Tool permissions are always enforced when a tool is called. Under code mode
 the denied tools are also left out of the set the model can see, which costs
 nothing because deferred tool specs never enter the prompt prefix; without
@@ -43,6 +48,9 @@ MAX_WINDOW_S = 30 * 24 * 3600
 # still acts on the rights of whoever sent the current turn.
 MEMORY_WRITE_GLOBAL_SCOPE = "memory.write_global"
 MEMORY_DELETE_SCOPE = "memory.delete"
+# Scheduled-task limits of a member whose rules leave them unset.
+MEMBER_CRON_MAX_TASKS = 1
+MEMBER_CRON_MIN_INTERVAL_S = 6 * 3600
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,9 @@ class PermissionPolicy:
     # (window seconds, max requests) pairs; every one must hold. Empty: no limit.
     rate_limits: tuple[tuple[int, int], ...] = ()
     rate_limit_reply: str = ""
+    # Scheduled-task limits: None for the role's default, 0 for no limit.
+    cron_max_tasks: int | None = None
+    cron_min_interval_s: int | None = None
     # Ids of the rule that matched and the rules it inherited from, in order.
     chain: tuple[str, ...] = ()
 
@@ -73,6 +84,25 @@ class PermissionPolicy:
         if self.global_memory is True:
             scopes += [MEMORY_WRITE_GLOBAL_SCOPE, MEMORY_DELETE_SCOPE]
         return scopes
+
+    def cron_limits(self, role: str) -> tuple[int, int]:
+        """The sender's scheduled-task limits, 0 meaning none.
+
+        Args:
+            role: The sender's AstrBot role (``admin`` or ``member``).
+
+        Returns:
+            (most tasks the sender may keep, least seconds between two runs
+            of a recurring task).
+        """
+        admin = role == "admin"
+        tasks = self.cron_max_tasks
+        if tasks is None:
+            tasks = 0 if admin else MEMBER_CRON_MAX_TASKS
+        interval = self.cron_min_interval_s
+        if interval is None:
+            interval = 0 if admin else MEMBER_CRON_MIN_INTERVAL_S
+        return tasks, interval
 
     @property
     def is_default(self) -> bool:
@@ -157,6 +187,17 @@ def _as_opt_bool(value: Any) -> bool | None:
     if isinstance(value, str) and value.lower() in ("true", "false"):
         return value.lower() == "true"
     return None
+
+
+def _as_opt_number(value: Any) -> float | None:
+    """A non-negative number, or None (unset: empty, ``inherit``, invalid)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number < float("inf") else None
 
 
 def condition_matches(condition: str, facts: EventFacts) -> bool:
@@ -255,6 +296,10 @@ def policy_from_rule(rule: dict, rules: list[dict] | None) -> PermissionPolicy:
     rate_limits = _nearest(
         chain, lambda r: parse_rate_limits(r.get("rate_limit")), None
     )
+    max_tasks = _nearest(chain, lambda r: _as_opt_number(r.get("cron_max_tasks")), None)
+    interval_h = _nearest(
+        chain, lambda r: _as_opt_number(r.get("cron_min_interval_hours")), None
+    )
     return PermissionPolicy(
         rule_name=str(rule.get("name") or ""),
         tools_allow=names("tools_allow"),
@@ -267,6 +312,8 @@ def policy_from_rule(rule: dict, rules: list[dict] | None) -> PermissionPolicy:
         global_memory=switch("global_memory"),
         rate_limits=rate_limits or (),
         rate_limit_reply=text("rate_limit_reply"),
+        cron_max_tasks=None if max_tasks is None else int(max_tasks),
+        cron_min_interval_s=None if interval_h is None else round(interval_h * 3600),
         chain=tuple(rule_id(r) for r in chain),
     )
 

@@ -91,6 +91,47 @@ def _normalize_crontab_day_of_week(day_of_week: str) -> str:
     return ",".join(normalized_parts)
 
 
+def shortest_cron_gap(
+    cron_expression: str, timezone: str | None = None, runs: int = 400
+) -> float | None:
+    """The shortest time between two runs of a recurring schedule.
+
+    Looks at the next ``runs`` runs: enough for any schedule that runs more
+    often than a limit of hours to show it within them.
+
+    Args:
+        cron_expression: A five-part crontab expression.
+        timezone: IANA name of the schedule's timezone; system time if None.
+        runs: How many upcoming runs to look at.
+
+    Returns:
+        Seconds between the closest two runs; None if the expression does not
+        parse or runs fewer than twice.
+    """
+    try:
+        minute, hour, day, month, day_of_week = cron_expression.split()
+        trigger = CronTrigger.from_crontab(
+            " ".join(
+                [minute, hour, day, month, _normalize_crontab_day_of_week(day_of_week)]
+            ),
+            timezone=ZoneInfo(timezone) if timezone else None,
+        )
+    except Exception:  # noqa: BLE001 - the scheduler reports it when adding
+        return None
+    gap = None
+    previous = trigger.get_next_fire_time(None, datetime.now(trigger.timezone))
+    for _ in range(runs):
+        if previous is None:
+            break
+        following = trigger.get_next_fire_time(previous, previous)
+        if following is None:
+            break
+        seconds = (following - previous).total_seconds()
+        gap = seconds if gap is None else min(gap, seconds)
+        previous = following
+    return gap
+
+
 class CronJobSchedulingError(Exception):
     """Raised when a cron job fails to be scheduled."""
 

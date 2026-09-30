@@ -131,3 +131,24 @@ def test_summary_names_the_sandbox_tools_that_still_work():
 
     mixed = PermissionPolicy(tools_deny=("weather",), native_exec=False)
     assert mixed.summary(host_exec=False) == "denied tools: weather"
+
+
+def test_scheduled_task_limits_default_by_role_and_are_inherited():
+    # Unset everywhere: members one task at most every 6 hours, admins free.
+    assert DEFAULT_POLICY.cron_limits("member") == (1, 6 * 3600)
+    assert DEFAULT_POLICY.cron_limits("admin") == (0, 0)
+    rules = [
+        {"id": "base", "cron_max_tasks": 3, "cron_min_interval_hours": "0.5"},
+        {"name": "vip", "match": ["p_1"], "inherits": "base"},
+        {"name": "free", "match": ["p_2"], "cron_max_tasks": 0},
+        {"name": "admins", "match": ["role:admin"], "cron_max_tasks": 2},
+        {"name": "unset", "match": ["p_3"], "cron_min_interval_hours": "inherit"},
+    ]
+    assert resolve_policy(rules, facts("1")).cron_limits("member") == (3, 1800)
+    # 0 is no limit; what a rule leaves unset keeps the role's default.
+    assert resolve_policy(rules, facts("2")).cron_limits("member") == (0, 6 * 3600)
+    assert resolve_policy(rules, facts("9", role="admin")).cron_limits("admin") == (
+        2,
+        0,
+    )
+    assert resolve_policy(rules, facts("3")).cron_limits("member") == (1, 6 * 3600)

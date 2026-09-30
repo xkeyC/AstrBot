@@ -47,7 +47,7 @@ def test_cron_and_background_prompts_quote_origin():
         {"note": "send the weather", "origin_message": "every day at 8 send weather"},
     )
     assert "> every day at 8 send weather" in cron
-    assert "Do not create, change or cancel scheduled tasks" in cron
+    assert "cannot create or change scheduled tasks" in cron
     assert cron.strip().endswith("</scheduled_task>")
     bg = build_background_prompt(
         {"tool_name": "render", "task_id": "1", "result": "done"}, "render my video"

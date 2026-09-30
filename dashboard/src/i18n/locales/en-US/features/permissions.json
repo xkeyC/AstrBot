@@ -130,5 +130,15 @@
       "d": "d"
     },
     "errorEmpty": "custom rate limit has no valid limits; it saves as \"Unlimited\" (overriding inherited limits)"
+  },
+  "cronLimit": {
+    "title": "Scheduled tasks",
+    "maxTasks": "Max tasks",
+    "maxTasksHint": "Most scheduled tasks an account keeps on this platform; 0 is no limit. Empty inherits; unset everywhere, members get 1 and admins no limit.",
+    "interval": "Min interval (hours)",
+    "intervalHint": "Least hours between two runs of a recurring task; 0 is no limit. Empty inherits; unset everywhere, members get 6 hours and admins no limit.",
+    "unset": "Default (members limited, admins not)",
+    "unlimited": "No limit",
+    "errorNumber": "Scheduled-task limits must be numbers of 0 or more (whole tasks)"
   }
 }

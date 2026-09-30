@@ -26,8 +26,9 @@ def build_cron_prompt(cron_job: dict, payload: dict) -> str:
     lines = [
         f'<scheduled_task name="{name}" triggered_at="{started}">',
         "This is one scheduled run of a task the user set up earlier. Carry out the "
-        "task now. Do not create, change or cancel scheduled tasks unless the task "
-        "itself asks for it. Your final reply is sent to the chat; do not greet.",
+        "task now. A task's run cannot create or change scheduled tasks; do not "
+        "cancel one unless the task itself asks for it. Your final reply is sent "
+        "to the chat; do not greet.",
     ]
     if origin:
         quoted = "\n".join(f"> {line}" for line in origin.splitlines())

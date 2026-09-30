@@ -9,12 +9,24 @@ import pytest
 from astrbot.core.tools.cron_tools import FutureTaskTool
 
 
+class _Event(SimpleNamespace):
+    """A chat message's event, with the extras the permission policy uses."""
+
+    def get_extra(self, key):
+        return self.extras.get(key)
+
+    def set_extra(self, key, value):
+        self.extras[key] = value
+
+
 def _context(
     cron_mgr,
     *,
     umo: str = "test:group:shared",
     sender_id: str = "user-1",
     tz_name: str | None = "Asia/Shanghai",
+    role: str = "member",
+    event=None,
 ):
     return SimpleNamespace(
         context=SimpleNamespace(
@@ -22,10 +34,13 @@ def _context(
                 cron_manager=cron_mgr,
                 get_config=lambda umo=None: {"timezone": tz_name},
             ),
-            event=SimpleNamespace(
+            event=event
+            or _Event(
                 unified_msg_origin=umo,
                 get_sender_id=lambda: sender_id,
                 get_group_id=lambda: "",
+                role=role,
+                extras={},
             ),
         )
     )
@@ -90,10 +105,12 @@ async def test_future_task_edit_requires_job_id():
     context = SimpleNamespace(
         context=SimpleNamespace(
             context=SimpleNamespace(cron_manager=cron_mgr),
-            event=SimpleNamespace(
+            event=_Event(
                 unified_msg_origin="test:private:session",
                 get_sender_id=lambda: "user-1",
                 get_group_id=lambda: "",
+                role="member",
+                extras={},
             ),
         )
     )
@@ -134,10 +151,12 @@ async def test_future_task_edit_updates_existing_job():
     context = SimpleNamespace(
         context=SimpleNamespace(
             context=SimpleNamespace(cron_manager=cron_mgr),
-            event=SimpleNamespace(
+            event=_Event(
                 unified_msg_origin="test:private:session",
                 get_sender_id=lambda: "user-1",
                 get_group_id=lambda: "",
+                role="member",
+                extras={},
             ),
         )
     )
@@ -301,6 +320,7 @@ async def test_future_task_create_passes_config_timezone_to_scheduler():
         next_run_time=None,
     )
     cron_mgr = SimpleNamespace(
+        list_jobs=AsyncMock(return_value=[]),
         add_active_job=AsyncMock(return_value=created_job),
         get_next_run_time=MagicMock(return_value=datetime(2026, 1, 1, 0, 0)),
     )
@@ -329,6 +349,7 @@ async def test_future_task_create_localizes_next_run_for_new_york():
         next_run_time=None,
     )
     cron_mgr = SimpleNamespace(
+        list_jobs=AsyncMock(return_value=[]),
         add_active_job=AsyncMock(return_value=created_job),
         get_next_run_time=MagicMock(return_value=datetime(2026, 1, 1, 0, 0)),
     )
@@ -357,6 +378,7 @@ async def test_future_task_create_falls_back_to_run_at_when_scheduler_has_no_tim
         next_run_time=None,
     )
     cron_mgr = SimpleNamespace(
+        list_jobs=AsyncMock(return_value=[]),
         add_active_job=AsyncMock(return_value=created_job),
         get_next_run_time=MagicMock(return_value=None),
     )
@@ -370,3 +392,132 @@ async def test_future_task_create_falls_back_to_run_at_when_scheduler_has_no_tim
     )
 
     assert "2026-02-02 08:00:00+08:00" in result
+
+
+def _creating_manager(owned=()):
+    created_job = SimpleNamespace(job_id="job-new", name="task", next_run_time=None)
+    return SimpleNamespace(
+        list_jobs=AsyncMock(return_value=list(owned)),
+        add_active_job=AsyncMock(return_value=created_job),
+        get_next_run_time=MagicMock(return_value=None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_member_keeps_one_task_and_admins_are_not_limited():
+    tool = FutureTaskTool()
+    # Another member's task and one on another platform do not count.
+    cron_mgr = _creating_manager(
+        [_job("other", sender_id="user-2"), _job("away", umo="qq:group:g")]
+    )
+    result = await tool.call(
+        _context(cron_mgr), action="create", cron_expression="0 8 * * *", note="n"
+    )
+    assert "Scheduled future task job-new" in result
+
+    cron_mgr = _creating_manager([_job("mine")])
+    result = await tool.call(
+        _context(cron_mgr), action="create", cron_expression="0 8 * * *", note="n"
+    )
+    assert result.startswith("error: you may keep at most 1 scheduled task")
+    cron_mgr.add_active_job.assert_not_awaited()
+
+    result = await tool.call(
+        _context(cron_mgr, role="admin"),
+        action="create",
+        cron_expression="*/5 * * * *",
+        note="n",
+    )
+    assert "Scheduled future task job-new" in result
+
+
+@pytest.mark.asyncio
+async def test_a_member_task_runs_at_most_every_six_hours():
+    tool = FutureTaskTool()
+    cron_mgr = _creating_manager()
+    result = await tool.call(
+        _context(cron_mgr), action="create", cron_expression="0 8,12 * * *", note="n"
+    )
+    assert result == (
+        "error: your scheduled tasks may run at most every 6 hours; "
+        "'0 8,12 * * *' runs every 4 hours."
+    )
+    cron_mgr.add_active_job.assert_not_awaited()
+
+    result = await tool.call(
+        _context(cron_mgr), action="create", cron_expression="0 */6 * * *", note="n"
+    )
+    assert "Scheduled future task job-new" in result
+
+
+@pytest.mark.asyncio
+async def test_a_member_cannot_edit_a_task_to_run_more_often():
+    tool = FutureTaskTool()
+    job = _job("job-1")
+    job.timezone = "Asia/Shanghai"
+    cron_mgr = SimpleNamespace(
+        db=SimpleNamespace(get_cron_job=AsyncMock(return_value=job)),
+        update_job=AsyncMock(),
+    )
+    result = await tool.call(
+        _context(cron_mgr),
+        action="edit",
+        job_id="job-1",
+        cron_expression="*/30 * * * *",
+    )
+    assert result.startswith("error: your scheduled tasks may run at most every 6")
+    cron_mgr.update_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rules_set_the_limits():
+    from astrbot.core.permission_rules import EVENT_EXTRA_KEY, PermissionPolicy
+
+    tool = FutureTaskTool()
+    cron_mgr = _creating_manager([_job("mine"), _job("mine-2")])
+    ctx = _context(cron_mgr)
+    ctx.context.event.set_extra(
+        EVENT_EXTRA_KEY, PermissionPolicy(cron_max_tasks=3, cron_min_interval_s=0)
+    )
+    result = await tool.call(
+        ctx, action="create", cron_expression="*/5 * * * *", note="n"
+    )
+    assert "Scheduled future task job-new" in result
+
+
+@pytest.mark.asyncio
+async def test_a_task_run_cannot_create_or_change_tasks():
+    from astrbot.core.cron.events import CronMessageEvent
+    from astrbot.core.platform.message_session import MessageSession
+
+    tool = FutureTaskTool()
+    event = CronMessageEvent(
+        context=MagicMock(),
+        session=MessageSession.from_str("test:GroupMessage:shared"),
+        message="run",
+    )
+    event.role = "admin"
+    job = _job("job-1", umo=event.unified_msg_origin, sender_id="shared")
+    cron_mgr = SimpleNamespace(
+        db=SimpleNamespace(get_cron_job=AsyncMock(return_value=job)),
+        list_jobs=AsyncMock(return_value=[job]),
+        add_active_job=AsyncMock(),
+        update_job=AsyncMock(),
+        delete_job=AsyncMock(),
+    )
+    ctx = _context(cron_mgr, event=event)
+    for kwargs in (
+        {"action": "create", "cron_expression": "0 8 * * *", "note": "again"},
+        {"action": "edit", "job_id": "job-1", "note": "changed"},
+    ):
+        result = await tool.call(ctx, **kwargs)
+        assert result == (
+            "error: a scheduled task's run cannot create or change scheduled tasks."
+        )
+    cron_mgr.add_active_job.assert_not_awaited()
+    cron_mgr.update_job.assert_not_awaited()
+    # Listing and cancelling stay possible.
+    assert "job-1" in await tool.call(ctx, action="list")
+    assert await tool.call(ctx, action="delete", job_id="job-1") == (
+        "Deleted cron job job-1."
+    )

@@ -349,6 +349,32 @@
                 </div>
                 <div class="setting-subtitle">{{ tm('rateLimit.slidingHint') }}</div>
               </div>
+
+              <div class="section-label">{{ tm('cronLimit.title') }}</div>
+              <div class="dashboard-form-grid">
+                <v-text-field
+                  v-model="rule.cron_max_tasks"
+                  type="number"
+                  min="0"
+                  :label="tm('cronLimit.maxTasks')"
+                  :placeholder="tm('cronLimit.unset')"
+                  :hint="tm('cronLimit.maxTasksHint')"
+                  persistent-hint
+                  variant="outlined"
+                  density="comfortable"
+                />
+                <v-text-field
+                  v-model="rule.cron_min_interval_hours"
+                  type="number"
+                  min="0"
+                  :label="tm('cronLimit.interval')"
+                  :placeholder="tm('cronLimit.unset')"
+                  :hint="tm('cronLimit.intervalHint')"
+                  persistent-hint
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -467,6 +493,9 @@ type RuleRow = {
   rate_mode: RateMode
   rate_limits: RateRow[]
   rate_limit_reply: string
+  // Scheduled-task limits; '' inherits (unset everywhere: the role's default).
+  cron_max_tasks: string
+  cron_min_interval_hours: string
 }
 
 type Facts = { sender_id: string; group_id: string; role: string }
@@ -489,7 +518,9 @@ const KNOWN_KEYS = [
   'persona_id',
   'model',
   'native_exec',
-  'global_memory'
+  'global_memory',
+  'cron_max_tasks',
+  'cron_min_interval_hours'
 ]
 
 const { tm } = useModuleI18n('features/permissions')
@@ -774,6 +805,11 @@ function policyLines(rule: RuleRow | undefined): { label: string; value: string 
     {
       label: tm('rateLimit.reply'),
       value: nearest((r) => r.rate_limit_reply.trim(), tm('rateLimit.replyPlaceholder'))
+    },
+    { label: tm('cronLimit.maxTasks'), value: nearest((r) => cronText(r.cron_max_tasks), tm('cronLimit.unset')) },
+    {
+      label: tm('cronLimit.interval'),
+      value: nearest((r) => cronText(r.cron_min_interval_hours), tm('cronLimit.unset'))
     }
   ]
 }
@@ -792,6 +828,10 @@ function ruleSummary(rule: RuleRow): string {
   if (rule.native_exec !== 'inherit') parts.push(`${tm('fields.nativeExec')}: ${triLabel(rule.native_exec)}`)
   if (rule.global_memory !== 'inherit') parts.push(`${tm('fields.globalMemory')}: ${triLabel(rule.global_memory)}`)
   if (rateText(rule)) parts.push(`${tm('rateLimit.title')}: ${rateText(rule)}`)
+  if (cronText(rule.cron_max_tasks)) parts.push(`${tm('cronLimit.maxTasks')}: ${cronText(rule.cron_max_tasks)}`)
+  if (cronText(rule.cron_min_interval_hours)) {
+    parts.push(`${tm('cronLimit.interval')}: ${cronText(rule.cron_min_interval_hours)}`)
+  }
   return parts.join(' · ')
 }
 
@@ -817,7 +857,9 @@ function emptyRule(): RuleRow {
     global_memory: 'inherit',
     rate_mode: 'inherit',
     rate_limits: [],
-    rate_limit_reply: ''
+    rate_limit_reply: '',
+    cron_max_tasks: '',
+    cron_min_interval_hours: ''
   }
 }
 
@@ -931,6 +973,22 @@ function personaItems(current: string) {
 
 // ---------- config load/save ----------
 
+/** A scheduled-task limit as the backend reads it: a number of 0 or more. */
+function cronValid(value: unknown): boolean {
+  const text = String(value ?? '').trim()
+  return text !== '' && Number.isFinite(Number(text)) && Number(text) >= 0
+}
+
+function cronValue(raw: unknown): string {
+  return cronValid(raw) ? String(Number(raw)) : ''
+}
+
+/** A limit set on a rule, for display ('' when it inherits). */
+function cronText(value: string): string {
+  if (!cronValid(value)) return ''
+  return Number(value) === 0 ? tm('cronLimit.unlimited') : String(Number(value))
+}
+
 function normalizeRule(raw: Record<string, unknown>): RuleRow {
   const extra: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(raw)) {
@@ -965,7 +1023,9 @@ function normalizeRule(raw: Record<string, unknown>): RuleRow {
     global_memory: toTriState(raw.global_memory),
     rate_mode: rateMode,
     rate_limits: limits.map((l) => toRateRow(l.window, l.count)),
-    rate_limit_reply: str(raw.rate_limit_reply)
+    rate_limit_reply: str(raw.rate_limit_reply),
+    cron_max_tasks: cronValue(raw.cron_max_tasks),
+    cron_min_interval_hours: cronValue(raw.cron_min_interval_hours)
   }
 }
 
@@ -1006,7 +1066,11 @@ function rulesPayload(rows: RuleRow[]) {
             .filter(rateRowValid)
             .map((l) => ({ window: Number(l.amount) * UNIT_S[l.unit], count: Number(l.count) }))
         : r.rate_mode,
-    rate_limit_reply: r.rate_limit_reply.trim()
+    rate_limit_reply: r.rate_limit_reply.trim(),
+    cron_max_tasks: cronValid(r.cron_max_tasks) ? Number(r.cron_max_tasks) : 'inherit',
+    cron_min_interval_hours: cronValid(r.cron_min_interval_hours)
+      ? Number(r.cron_min_interval_hours)
+      : 'inherit'
   }))
 }
 
@@ -1042,6 +1106,11 @@ async function confirmProblems(): Promise<boolean> {
     if (rule.rate_mode === 'limit') {
       if (!rule.rate_limits.every(rateRowValid)) errs.push(tm('rateLimit.errorRow'))
       if (!rule.rate_limits.some(rateRowValid)) errs.push(tm('rateLimit.errorEmpty'))
+    }
+    const tasks = String(rule.cron_max_tasks).trim()
+    const hours = String(rule.cron_min_interval_hours).trim()
+    if ((tasks && !(cronValid(tasks) && Number.isInteger(Number(tasks)))) || (hours && !cronValid(hours))) {
+      errs.push(tm('cronLimit.errorNumber'))
     }
     if (errs.length) problems.push(`#${idx + 1} ${ruleLabel(rule, idx)}: ${errs.join('; ')}`)
   })

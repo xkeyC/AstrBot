@@ -7,10 +7,14 @@ from pydantic import Field
 from pydantic.dataclasses import dataclass
 
 from astrbot import logger
+from astrbot.core import astrbot_config
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
-from astrbot.core.cron.manager import CronJobSchedulingError
+from astrbot.core.cron.events import CronMessageEvent
+from astrbot.core.cron.manager import CronJobSchedulingError, shortest_cron_gap
+from astrbot.core.permission_rules import CONFIG_KEY as PERMISSION_RULES_KEY
+from astrbot.core.permission_rules import policy_for_event
 from astrbot.core.tools.registry import builtin_tool
 
 _CRON_TOOL_CONFIG = {
@@ -106,6 +110,30 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
             return "error: cron manager is not available."
 
         action = str(kwargs.get("action") or "").strip().lower()
+        event = context.context.event
+        if action in ("create", "edit"):
+            # A task's run creating or rescheduling tasks would let one task
+            # multiply itself.
+            if isinstance(event, CronMessageEvent):
+                return "error: a scheduled task's run cannot create or change scheduled tasks."
+            # The sender's permission rule sets these (members by default:
+            # one task, at most every 6 hours; admins: no limit).
+            max_tasks, min_interval = policy_for_event(
+                event, astrbot_config.get(PERMISSION_RULES_KEY) or []
+            ).cron_limits(str(getattr(event, "role", "") or "member"))
+
+            def too_often(expression: str | None, tz: str | None) -> str | None:
+                if not (min_interval and expression):
+                    return None
+                gap = shortest_cron_gap(expression, tz)
+                if gap is None or gap >= min_interval:
+                    return None
+                return (
+                    f"error: your scheduled tasks may run at most every "
+                    f"{min_interval / 3600:g} hours; '{expression}' runs every "
+                    f"{gap / 3600:g} hours."
+                )
+
         if action == "create":
             cron_expression = kwargs.get("cron_expression")
             run_at = kwargs.get("run_at")
@@ -154,6 +182,25 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
                         "Invalid timezone %r in config, falling back to system timezone.",
                         tz_name,
                     )
+
+            if max_tasks:
+                platform = event.unified_msg_origin.split(":", 1)[0]
+                sender_id = str(event.get_sender_id())
+                owned = [
+                    job
+                    for job in await cron_mgr.list_jobs("active_agent")
+                    if _extract_job_sender(job) == sender_id
+                    and (_extract_job_session(job) or "").split(":", 1)[0] == platform
+                ]
+                if len(owned) >= max_tasks:
+                    return (
+                        f"error: you may keep at most {max_tasks} scheduled task(s) "
+                        f"and have {len(owned)} on this platform (a chat's "
+                        "action='list' shows the ones there); edit or delete "
+                        "one instead."
+                    )
+            if problem := too_often(cron_expression, tz_name or None):
+                return problem
 
             try:
                 job = await cron_mgr.add_active_job(
@@ -258,6 +305,8 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
             else:
                 if not cron_expression:
                     return "error: cron_expression is required when run_once=false."
+                if problem := too_often(cron_expression, job.timezone):
+                    return problem
                 payload.pop("run_at", None)
 
             updates["run_once"] = run_once
