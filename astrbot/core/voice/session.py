@@ -604,7 +604,8 @@ class VoiceSession:
             reason: Why it ended.
         """
         self._realtime_requested = False
-        if not self.ready and self._start_error is None:
+        # A close the owner asked for is no failure.
+        if not self.ready and not self._closed and self._start_error is None:
             if not pending.done():
                 self._start_error = RuntimeError(reason)
                 pending.set_exception(self._start_error)
