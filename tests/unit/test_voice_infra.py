@@ -222,15 +222,15 @@ async def event(t, payload: dict) -> None:
 
 def test_the_configured_backend_picks_the_session(monkeypatch):
     monkeypatch.setattr(voice, "_runner_config", runner_config)
-    kwargs = dict(
-        key="k",
-        scope_id="s",
-        prompt="p",
-        options=VoiceOptions(name="J", aliases=[]),
-        media=FakeMedia(),
-        on_closed=lambda s: None,
-        chat=FakeChat(True),
-    )
+    kwargs = {
+        "key": "k",
+        "scope_id": "s",
+        "prompt": "p",
+        "options": VoiceOptions(name="J", aliases=[]),
+        "media": FakeMedia(),
+        "on_closed": lambda s: None,
+        "chat": FakeChat(True),
+    }
     assert type(new_voice_session(**kwargs)) is InfraVoiceSession
     monkeypatch.setattr(
         voice, "_runner_config", lambda: runner_config(backend="builtin")
@@ -358,3 +358,32 @@ async def test_the_session_ends_with_the_conversation(engine):
     )
     await eventually(lambda: t.closed)
     assert t.session.closing
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_its_model_fails_the_start(engine, monkeypatch):
+    monkeypatch.setattr(voice, "_runner_config", lambda: runner_config(text_model=""))
+    t = await open_session(engine, started=False)
+    await eventually(lambda: t.failures)
+    assert "voice text model" in str(t.failures[0])
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_fails_before_starting_is_reported(engine):
+    t = await open_session(engine, started=False)
+    # Codex reports the failure and ends the conversation at once.
+    await event(t, {"Error": "the voice server closed the connection"})
+    await t.pump.queue.put({"type": "realtime_conversation_closed", "reason": "error"})
+    await eventually(lambda: t.failures)
+    assert "closed the connection" in str(t.failures[0])
+    await eventually(lambda: t.closed)
+
+
+@pytest.mark.asyncio
+async def test_a_bad_event_does_not_end_the_conversation(engine):
+    t = await open_session(engine)
+    await event(t, {"AudioOut": {"data": "!!not base64!!", "sample_rate": 24000}})
+    await t.pump.queue.put(
+        {"type": "realtime_conversation_closed", "reason": "requested"}
+    )
+    await eventually(lambda: t.closed)

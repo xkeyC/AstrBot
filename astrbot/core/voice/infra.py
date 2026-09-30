@@ -31,6 +31,7 @@ from aiortc.mediastreams import MediaStreamError
 from astrbot import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from . import session as voice
 from .chat import TASK_BODY
 from .session import (
     DONE_SPEECH,
@@ -44,7 +45,7 @@ from .session import (
 IN_RATE = 16000  # what Codex hands the server: 16-bit mono PCM
 # A session loads every model on the server before it starts (IndexTTS takes
 # tens of seconds the first time).
-START_TIMEOUT = 300.0
+START_TIMEOUT = 320.0  # a little over Codex's own, whose error says why
 # The reference voice goes in one WebSocket message (the server takes 16 MB).
 MAX_REF_AUDIO_BYTES = 8 * 1024 * 1024
 # Emotions the server's TTS (IndexTTS-2.5) speaks with; "none" keeps the
@@ -123,6 +124,8 @@ def infra_settings_error(settings: dict) -> str | None:
         return (
             f"voice emotion strength must be 0 to 1, got {settings['emotion_strength']}"
         )
+    if not 0 <= int(settings["idle_compact_percent"]) <= 100:
+        return f"idle compaction must be 0 to 100 percent, got {settings['idle_compact_percent']}"
     if path := ref_audio_path(settings):
         if not path.is_file() or path.suffix.lower() != ".wav":
             return f"reference audio must be an existing .wav file: {path}"
@@ -240,9 +243,10 @@ class InfraVoiceSession(VoiceSession):
             "name": self.options.name,
             "aliases": self.options.aliases,
             "group": not self.chat.private,
-            "tts_emotion": str(settings["emotion"]),
-            "tts_emotion_strength": float(settings["emotion_strength"]),
         }
+        if emotion := str(settings["emotion"]):
+            session["tts_emotion"] = emotion
+            session["tts_emotion_strength"] = float(settings["emotion_strength"])
         config = {
             **{
                 key: value
@@ -264,9 +268,20 @@ class InfraVoiceSession(VoiceSession):
             config["realtime.local_infra.token"] = token
         if path := ref_audio_path(settings):
             config["realtime.local_infra.ref_audio_path"] = str(path)
-        if provider := str(settings["text_model_provider"]).strip():
+        provider = str(settings["text_model_provider"]).strip()
+        model = str(settings["text_model"]).strip()
+        if (
+            provider
+            and not model
+            and provider != voice._runner_config()["model_provider"]
+        ):
+            # The runner's model is another provider's.
+            raise ValueError(
+                f"choose the voice text model of provider {provider!r} (realtime voice settings)"
+            )
+        if provider:
             config["model_provider"] = provider
-        if model := str(settings["text_model"]).strip():
+        if model:
             config["model"] = model
         if effort := str(settings["text_reasoning_effort"]).strip():
             config["model_reasoning_effort"] = effort
@@ -373,50 +388,58 @@ class InfraVoiceSession(VoiceSession):
         while True:
             msg = await events.get()
             kind = msg.get("type")
-            if kind == "realtime_conversation_started":
-                if not started.done():
-                    started.set_result(None)
-            elif kind in ("realtime_conversation_closed", "_pump_closed"):
+            if kind in ("realtime_conversation_closed", "_pump_closed"):
                 reason = msg.get("reason") or msg.get("message") or "closed"
-                if not started.done():
-                    started.set_exception(RuntimeError(f"voice closed: {reason}"))
                 self._realtime_requested = False
+                if not self.ready:
+                    # The start fails with it (and reports and closes).
+                    if not started.done():
+                        started.set_exception(RuntimeError(f"voice closed: {reason}"))
+                    return
                 self._request_close(f"voice {reason}")
                 return
-            elif kind == "realtime_conversation_realtime":
-                payload = msg.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                if audio := payload.get("AudioOut"):
-                    self._track.rate = int(audio.get("sample_rate") or 24000)
-                    self._track.put(base64.b64decode(audio.get("data") or ""))
-                elif "ResponseCancelled" in payload:
-                    # Talked over: what is buffered goes.
-                    self._track.clear()
-                    self.media.flush()
-                elif done := payload.get("InputTranscriptDone"):
-                    self.last_transcript_at = time.monotonic()
-                    self._heard = str(done.get("text") or "")
-                    logger.debug(
-                        "%s voice %s heard: %s", self.label, self.key, self._heard
-                    )
-                elif "InputTranscriptDelta" in payload:
-                    self.last_transcript_at = time.monotonic()
-                elif "OutputTranscriptDelta" in payload:
-                    self.last_answer_at = time.monotonic()
-                elif "Error" in payload:
-                    logger.warning(
-                        "%s voice %s: %s", self.label, self.key, payload["Error"]
-                    )
-                    if not started.done():
-                        started.set_exception(RuntimeError(str(payload["Error"])))
-            elif kind == "error":
+            try:
+                self._event(msg, started)
+            except Exception as exc:  # noqa: BLE001 - one bad event
                 logger.warning(
-                    "%s voice %s: Codex error: %s",
-                    self.label,
-                    self.key,
-                    msg.get("message"),
+                    "%s voice %s: bad event skipped: %s", self.label, self.key, exc
                 )
+
+    def _event(self, msg: dict, started: asyncio.Future) -> None:
+        """One event of the conversation (other than its end)."""
+        kind = msg.get("type")
+        if kind == "realtime_conversation_started":
+            if not started.done():
+                started.set_result(None)
+        elif kind == "realtime_conversation_realtime":
+            payload = msg.get("payload")
+            if not isinstance(payload, dict):
+                return
+            if audio := payload.get("AudioOut"):
+                self._track.rate = int(audio.get("sample_rate") or 24000)
+                self._track.put(base64.b64decode(audio.get("data") or ""))
+            elif "ResponseCancelled" in payload:
+                # Talked over: what is buffered goes.
+                self._track.clear()
+                self.media.flush()
+            elif done := payload.get("InputTranscriptDone"):
+                self.last_transcript_at = time.monotonic()
+                self._heard = str(done.get("text") or "")
+                logger.debug("%s voice %s heard: %s", self.label, self.key, self._heard)
+            elif "InputTranscriptDelta" in payload:
+                self.last_transcript_at = time.monotonic()
+            elif "OutputTranscriptDelta" in payload:
+                self.last_answer_at = time.monotonic()
+            elif "Error" in payload:
+                logger.warning(
+                    "%s voice %s: %s", self.label, self.key, payload["Error"]
+                )
+                if not started.done():
+                    started.set_exception(RuntimeError(str(payload["Error"])))
+        elif kind == "error":
+            logger.warning(
+                "%s voice %s: Codex error: %s", self.label, self.key, msg.get("message")
+            )
 
     async def _speak(self, text: str) -> None:
         """Gives the voice thread ``text`` (a task's answer) to tell at the

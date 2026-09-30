@@ -229,16 +229,21 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
                 with contextlib.suppress(TypeError, ValueError):
                     if (value := int(m.get(field) or 0)) > 0:
                         info[field] = value
-            efforts = [str(e) for e in m.get("reasoning_efforts") or [] if e]
+            efforts = m.get("reasoning_efforts")
+            efforts = (
+                [str(e) for e in efforts if e] if isinstance(efforts, list) else []
+            )
             if efforts:
                 info["supported_reasoning_levels"] = [
                     {"effort": e, "description": e} for e in efforts
                 ]
             if default := str(m.get("default_reasoning_effort") or ""):
                 info["default_reasoning_level"] = default
-            info["input_modalities"] = (
-                ["text", "image"] if m.get("image_input") else ["text"]
-            )
+            # Unset keeps Codex's default (text and images).
+            if isinstance(m.get("image_input"), bool):
+                info["input_modalities"] = (
+                    ["text", "image"] if m["image_input"] else ["text"]
+                )
             # Any other model info fields, over the form's.
             try:
                 extra = json.loads(str(m.get("metadata_json") or "").strip() or "{}")

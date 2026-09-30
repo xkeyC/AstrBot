@@ -562,6 +562,9 @@ class VoiceSession:
                 if not answer.done():
                     answer.set_exception(RuntimeError(f"realtime closed: {reason}"))
                 self._realtime_requested = False
+                if not self.ready:
+                    # The start fails with it (and reports and closes).
+                    return
                 self._request_close(f"realtime {reason}")
                 return
             elif kind == "realtime_conversation_realtime":

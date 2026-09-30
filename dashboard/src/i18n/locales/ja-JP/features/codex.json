@@ -126,7 +126,10 @@
     "metadataJson": "追加のメタデータ（JSON）",
     "metadataJsonHint": "任意。Codex のモデル情報のその他のフィールド。上の設定を上書きします（例：{\"support_verbosity\": false}）。",
     "removeModel": "モデルを削除",
-    "modelCount": "モデル {n} 件"
+    "modelCount": "モデル {n} 件",
+    "imageInputDefault": "既定（テキストと画像）",
+    "imageInputYes": "テキストと画像",
+    "imageInputNo": "テキストのみ"
   },
   "prompt": {
     "title": "システムプロンプト",
@@ -166,6 +169,7 @@
     "modelMetadataInvalid": "{slug} のメタデータが正しい JSON ではありません",
     "voiceUrlInvalid": "音声サーバーの URL は ws:// または wss:// で始まる必要があります",
     "voiceStrengthInvalid": "感情の強さは 0～1 で指定してください",
-    "voiceCompactInvalid": "アイドル時の圧縮しきい値は 0～100 で指定してください"
+    "voiceCompactInvalid": "アイドル時の圧縮しきい値は 0～100 で指定してください",
+    "voiceModelRequired": "選んだプロバイダーの音声テキストモデルを入力してください"
   }
 }

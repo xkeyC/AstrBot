@@ -11,7 +11,8 @@ export type ModelRow = {
   auto_compact_token_limit: string
   reasoning_efforts: string[]
   default_reasoning_effort: string
-  image_input: boolean
+  // null: Codex's default (text and images).
+  image_input: boolean | null
   metadata_json: string
 }
 
@@ -75,8 +76,13 @@ function str(v: unknown): string {
 }
 
 function num(v: unknown, fallback: number): number {
+  if (v === null || v === undefined || String(v).trim() === '') return fallback
   const n = Number(v)
   return Number.isFinite(n) ? n : fallback
+}
+
+function blank(v: unknown): boolean {
+  return v === null || v === undefined || String(v).trim() === ''
 }
 
 export function emptyModelRow(): ModelRow {
@@ -87,7 +93,7 @@ export function emptyModelRow(): ModelRow {
     auto_compact_token_limit: '',
     reasoning_efforts: [],
     default_reasoning_effort: '',
-    image_input: false,
+    image_input: null,
     metadata_json: ''
   }
 }
@@ -111,7 +117,7 @@ export function extrasFromConfig(p: any): ProviderExtras {
         auto_compact_token_limit: str(m.auto_compact_token_limit || ''),
         reasoning_efforts: Array.isArray(m.reasoning_efforts) ? m.reasoning_efforts.map(str) : [],
         default_reasoning_effort: str(m.default_reasoning_effort),
-        image_input: !!m.image_input,
+        image_input: typeof m.image_input === 'boolean' ? m.image_input : null,
         metadata_json: str(m.metadata_json)
       }))
   }
@@ -130,8 +136,12 @@ export function extrasPayload(e: ProviderExtras) {
       context_window: Number(m.context_window) || 0,
       auto_compact_token_limit: Number(m.auto_compact_token_limit) || 0,
       reasoning_efforts: [...m.reasoning_efforts],
-      default_reasoning_effort: m.default_reasoning_effort || '',
-      image_input: !!m.image_input,
+      // A default the model no longer lists goes.
+      default_reasoning_effort:
+        !m.reasoning_efforts.length || m.reasoning_efforts.includes(m.default_reasoning_effort)
+          ? m.default_reasoning_effort || ''
+          : '',
+      image_input: m.image_input,
       metadata_json: m.metadata_json.trim()
     }))
   }
@@ -198,8 +208,12 @@ export function realtimeVoiceProblem(v: RealtimeVoiceForm): [string, Record<stri
   if (v.backend !== 'local_infra') return null
   if (!/^wss?:\/\/[^/\s]+/.test((v.infra_url || '').trim())) return ['messages.voiceUrlInvalid', {}]
   const strength = Number(v.emotion_strength)
-  if (!(strength >= 0 && strength <= 1)) return ['messages.voiceStrengthInvalid', {}]
+  if (blank(v.emotion_strength) || !(strength >= 0 && strength <= 1)) {
+    return ['messages.voiceStrengthInvalid', {}]
+  }
   const percent = Number(v.idle_compact_percent)
-  if (!(percent >= 0 && percent <= 100)) return ['messages.voiceCompactInvalid', {}]
+  if (blank(v.idle_compact_percent) || !(percent >= 0 && percent <= 100)) {
+    return ['messages.voiceCompactInvalid', {}]
+  }
   return null
 }

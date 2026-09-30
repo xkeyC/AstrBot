@@ -126,7 +126,10 @@
     "metadataJson": "更多元数据（JSON）",
     "metadataJsonHint": "可选。Codex 模型信息的其他字段，覆盖上面的设置，例如 {\"support_verbosity\": false}。",
     "removeModel": "删除模型",
-    "modelCount": "{n} 个模型"
+    "modelCount": "{n} 个模型",
+    "imageInputDefault": "默认（文字和图片）",
+    "imageInputYes": "文字和图片",
+    "imageInputNo": "仅文字"
   },
   "prompt": {
     "title": "系统提示词",
@@ -166,6 +169,7 @@
     "modelMetadataInvalid": "{slug} 的元数据不是有效的 JSON",
     "voiceUrlInvalid": "语音服务地址必须以 ws:// 或 wss:// 开头",
     "voiceStrengthInvalid": "情绪强度必须在 0 到 1 之间",
-    "voiceCompactInvalid": "空闲压缩阈值必须在 0 到 100 之间"
+    "voiceCompactInvalid": "空闲压缩阈值必须在 0 到 100 之间",
+    "voiceModelRequired": "请为所选的语音模型提供商填写模型"
   }
 }

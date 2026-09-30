@@ -885,15 +885,23 @@ function validateBeforeSave(): boolean {
       return false
     }
   }
-  const voiceProblem = realtimeVoiceProblem(form.value.realtime_voice)
+  const voice = form.value.realtime_voice
+  const voiceProblem = realtimeVoiceProblem(voice)
   if (voiceProblem) {
     toast(tm(voiceProblem[0], voiceProblem[1]), 'warning')
     return false
   }
-  const voiceProvider = form.value.realtime_voice.text_model_provider
-  if (voiceProvider && voiceProvider !== 'openai' && !seen.has(voiceProvider)) {
-    toast(tm('messages.providerNotFound', { id: voiceProvider }), 'warning')
-    return false
+  if (voice.backend === 'local_infra') {
+    const voiceProvider = voice.text_model_provider
+    if (voiceProvider && voiceProvider !== 'openai' && !seen.has(voiceProvider)) {
+      toast(tm('messages.providerNotFound', { id: voiceProvider }), 'warning')
+      return false
+    }
+    // The runner's model belongs to its own provider.
+    if (voiceProvider && voiceProvider !== form.value.model_provider && !voice.text_model.trim()) {
+      toast(tm('messages.voiceModelRequired'), 'warning')
+      return false
+    }
   }
   const provider = form.value.model_provider
   if (provider && provider !== 'openai' && !seen.has(provider)) {

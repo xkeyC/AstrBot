@@ -126,7 +126,10 @@
     "metadataJson": "More metadata (JSON)",
     "metadataJsonHint": "Optional. Any other Codex model info fields, over the ones above, e.g. {\"support_verbosity\": false}.",
     "removeModel": "Remove model",
-    "modelCount": "{n} model(s)"
+    "modelCount": "{n} model(s)",
+    "imageInputDefault": "Default (text and images)",
+    "imageInputYes": "Text and images",
+    "imageInputNo": "Text only"
   },
   "prompt": {
     "title": "System prompt",
@@ -166,6 +169,7 @@
     "modelMetadataInvalid": "Metadata of {slug} is not valid JSON",
     "voiceUrlInvalid": "The voice server URL must start with ws:// or wss://",
     "voiceStrengthInvalid": "Emotion strength must be between 0 and 1",
-    "voiceCompactInvalid": "The idle compaction share must be between 0 and 100"
+    "voiceCompactInvalid": "The idle compaction share must be between 0 and 100",
+    "voiceModelRequired": "Choose the voice text model for the selected provider"
   }
 }

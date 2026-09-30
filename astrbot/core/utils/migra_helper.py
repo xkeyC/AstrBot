@@ -171,6 +171,7 @@ def migrate_config_on_load(config: dict[str, Any], config_path: Path) -> bool:
         _backup_pre_codex_config(original, config_path)
     changed = _migrate_dynamic_persona_bindings(config, config_path) or changed
     changed = _migrate_voice_settings(config) or changed
+    changed = _migrate_qq_call_voice(config, config_path) or changed
     return changed
 
 
@@ -207,7 +208,9 @@ def _migrate_voice_settings(config: dict[str, Any]) -> bool:
     runner = config.get("agent_runner")
     if not isinstance(platforms, list) or not isinstance(runner, dict):
         return False
-    runner_config = runner.setdefault("config", {})
+    if not isinstance(runner.get("config"), dict):
+        runner["config"] = {}
+    runner_config = runner["config"]
     changed = False
     for platform in platforms:
         if not isinstance(platform, dict) or not any(
@@ -243,6 +246,76 @@ def _migrate_voice_settings(config: dict[str, Any]) -> bool:
     if changed:
         logger.warning(
             "Mumble voice backend settings moved to the Codex runner's realtime voice settings."
+        )
+    return changed
+
+
+# The QQ call plugin's config, whose voice backend settings moved too.
+QQ_CALL_PLUGIN_CONFIG = "astrbot_plugin_qq_voice_call_config.json"
+
+
+def _migrate_qq_call_voice(config: dict[str, Any], config_path: Path) -> bool:
+    """Take over the QQ call plugin's voice backend, once.
+
+    The plugin's own ``voice_backend`` / ``cascade_*`` / ``voice`` /
+    ``voice_model`` settings are the runner's ``realtime_voice`` now. A plugin
+    on the local server hands its server settings over (unless the runner is
+    already set to one); the plugin's file is left as it is (it ignores them).
+
+    Args:
+        config: Mutable AstrBot configuration loaded from disk.
+        config_path: Path of the configuration being loaded.
+
+    Returns:
+        Whether the configuration changed.
+    """
+    if config_path.name != "cmd_config.json":
+        return False
+    plugin_path = config_path.parent / "config" / QQ_CALL_PLUGIN_CONFIG
+    marker = plugin_path.with_name(f"{plugin_path.name}.voice-migrated")
+    runner = config.get("agent_runner")
+    if not plugin_path.is_file() or marker.exists() or not isinstance(runner, dict):
+        return False
+    try:
+        plugin = json.loads(plugin_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot read QQ call plugin config %s: %s", plugin_path, exc)
+        return False
+    if not isinstance(runner.get("config"), dict):
+        runner["config"] = {}
+    voice = runner["config"].get("realtime_voice")
+    if not isinstance(voice, dict):
+        voice = runner["config"]["realtime_voice"] = {}
+    changed = False
+    if (
+        plugin.get("voice_backend") == "local_cascade"
+        and voice.get("backend") != "local_infra"
+    ):
+        voice["backend"] = "local_infra"
+        for old, new in (
+            ("cascade_url", "infra_url"),
+            ("cascade_token", "infra_token"),
+            ("cascade_ref_audio", "ref_audio"),
+            ("cascade_tts_emotion", "emotion"),
+            ("cascade_tts_emotion_strength", "emotion_strength"),
+        ):
+            if plugin.get(old) not in (None, ""):
+                voice[new] = plugin[old]
+        changed = True
+    for old, new in (("voice", "voice"), ("voice_model", "model")):
+        if plugin.get(old) and not voice.get(new):
+            voice[new] = plugin[old]
+            changed = True
+    try:
+        marker.write_text(
+            "The QQ call plugin's voice backend settings were taken over by realtime_voice.\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("Cannot write QQ call migration marker %s: %s", marker, exc)
+    if changed:
+        logger.warning(
+            "The QQ call plugin's voice backend settings moved to the Codex runner's realtime voice settings."
         )
     return changed
 

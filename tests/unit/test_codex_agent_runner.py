@@ -227,7 +227,11 @@ def test_provider_headers_compaction_and_model_metadata(tmp_path):
                             "image_input": True,
                             "metadata_json": '{"support_verbosity": false}',
                         },
-                        {"slug": "bad-json", "metadata_json": "{nope"},
+                        {
+                            "slug": "bad-json",
+                            "metadata_json": "{nope",
+                            "reasoning_efforts": "high",
+                        },
                         {"context_window": 1},
                     ],
                 },
@@ -250,7 +254,8 @@ def test_provider_headers_compaction_and_model_metadata(tmp_path):
             "input_modalities": ["text", "image"],
             "support_verbosity": False,
         },
-        "bad-json": {"input_modalities": ["text"]},
+        # Unset image input keeps Codex's default.
+        "bad-json": {},
     }
     # Nothing is said for a provider left as it is.
     assert not any(k.startswith("model_provider_options.plain") for k in cfg)

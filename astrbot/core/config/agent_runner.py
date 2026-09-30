@@ -65,8 +65,9 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         # Custom Responses-API endpoints: [{id, name, base_url, api_key,
         # wire_api, headers: {name: value}, compaction: auto|local|remote,
         # models: [{slug, context_window, auto_compact_token_limit,
-        # reasoning_efforts: [...], default_reasoning_effort, image_input,
-        # metadata_json}]}] (see model_provider_overrides).
+        # reasoning_efforts: [...], default_reasoning_effort, image_input
+        # (true/false; unset: Codex's default), metadata_json}]}] (see
+        # model_provider_overrides).
         "model_providers": [],
         "reasoning_effort": "",
         "sandbox": "read-only",

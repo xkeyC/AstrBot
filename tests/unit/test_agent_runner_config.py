@@ -350,3 +350,54 @@ def test_mumble_voice_settings_move_to_the_runner():
     assert voice["voice"] == "cove"
     # Once only.
     assert not migrate_config_on_load(config, Path("cmd_config.json"))
+
+
+def test_voice_migration_survives_a_missing_runner_config():
+    from pathlib import Path
+
+    from astrbot.core.utils.migra_helper import _migrate_voice_settings
+
+    config = {
+        "agent_runner": {"runner_type": "codex", "config": None},
+        "platform": [{"type": "mumble", "mumble_voice_model": "gpt-realtime"}],
+    }
+    assert _migrate_voice_settings(config)
+    assert config["agent_runner"]["config"]["realtime_voice"] == {
+        "model": "gpt-realtime"
+    }
+    assert Path("cmd_config.json").name == "cmd_config.json"
+
+
+def test_the_qq_call_plugin_voice_backend_moves_to_the_runner(tmp_path):
+    from astrbot.core.utils.migra_helper import migrate_config_on_load
+
+    (tmp_path / "config").mkdir()
+    plugin = tmp_path / "config" / "astrbot_plugin_qq_voice_call_config.json"
+    plugin.write_text(
+        json.dumps(
+            {
+                "voice_backend": "local_cascade",
+                "cascade_url": "ws://infra:17890/v1/realtime",
+                "cascade_ref_audio": "voice.wav",
+                "cascade_tts_emotion": "happy",
+                "voice": "cove",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    path = tmp_path / "cmd_config.json"
+
+    assert migrate_config_on_load(config, path)
+    voice = normalize_agent_runner(config["agent_runner"])["config"]["realtime_voice"]
+    assert voice["backend"] == "local_infra"
+    assert voice["infra_url"] == "ws://infra:17890/v1/realtime"
+    assert voice["ref_audio"] == "voice.wav"
+    assert voice["emotion"] == "happy"
+    assert voice["voice"] == "cove"
+    # Once only, and the plugin's file is left alone.
+    assert not migrate_config_on_load(config, path)
+    assert (
+        json.loads(plugin.read_text(encoding="utf-8"))["voice_backend"]
+        == "local_cascade"
+    )

@@ -108,12 +108,13 @@
                 density="compact"
                 hide-details="auto"
               />
-              <v-switch
+              <v-select
                 v-model="m.image_input"
+                :items="imageInputItems"
                 :label="tm('providers.imageInput')"
-                color="primary"
+                variant="outlined"
                 density="compact"
-                hide-details
+                hide-details="auto"
               />
             </div>
             <v-textarea
@@ -172,6 +173,12 @@ const summary = computed(() => {
   if (extras.value.models.length) parts.push(tm('providers.modelCount', { n: String(extras.value.models.length) }))
   return parts.join(' · ')
 })
+
+const imageInputItems = computed(() => [
+  { title: tm('providers.imageInputDefault'), value: null },
+  { title: tm('providers.imageInputYes'), value: true },
+  { title: tm('providers.imageInputNo'), value: false }
+])
 
 function defaultEffortItems(efforts: string[]) {
   return [{ title: tm('model.reasoningDefault'), value: '' }, ...efforts.map((e) => ({ title: e, value: e }))]

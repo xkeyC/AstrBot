@@ -87,7 +87,7 @@
       <div class="dashboard-form-grid">
         <v-select
           v-model="voice.text_model_provider"
-          :items="providerItems"
+          :items="textProviderItems"
           :label="tm('voice.textProvider')"
           :hint="tm('voice.textProviderHint')"
           persistent-hint
@@ -150,6 +150,12 @@ const voiceItems = computed(() => [
   { title: tm('voice.voiceDefault'), value: '' },
   ...REALTIME_VOICES.map((v) => ({ title: v, value: v }))
 ])
+// The providers, and the chosen one if it was removed meanwhile.
+const textProviderItems = computed(() => {
+  const current = voice.value.text_model_provider
+  if (!current || props.providerItems.some((item) => item.value === current)) return props.providerItems
+  return [...props.providerItems, { title: tm('model.providerMissing', { id: current }), value: current }]
+})
 const emotionItems = computed(() => EMOTIONS.map((e) => ({ title: tm(`voice.emotion_${e}`), value: e })))
 const effortItems = computed(() => [
   { title: tm('model.reasoningDefault'), value: '' },

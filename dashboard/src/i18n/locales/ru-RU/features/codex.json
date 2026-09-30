@@ -126,7 +126,10 @@
     "metadataJson": "Дополнительные метаданные (JSON)",
     "metadataJsonHint": "Необязательно. Любые другие поля информации о модели Codex поверх указанных выше, например {\"support_verbosity\": false}.",
     "removeModel": "Удалить модель",
-    "modelCount": "моделей: {n}"
+    "modelCount": "моделей: {n}",
+    "imageInputDefault": "По умолчанию (текст и изображения)",
+    "imageInputYes": "Текст и изображения",
+    "imageInputNo": "Только текст"
   },
   "prompt": {
     "title": "Системный промпт",
@@ -166,6 +169,7 @@
     "modelMetadataInvalid": "Метаданные {slug} — некорректный JSON",
     "voiceUrlInvalid": "Адрес голосового сервера должен начинаться с ws:// или wss://",
     "voiceStrengthInvalid": "Сила эмоции должна быть от 0 до 1",
-    "voiceCompactInvalid": "Порог сжатия в простое должен быть от 0 до 100"
+    "voiceCompactInvalid": "Порог сжатия в простое должен быть от 0 до 100",
+    "voiceModelRequired": "Укажите текстовую модель голоса для выбранного поставщика"
   }
 }
