@@ -105,11 +105,16 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
             "infra_url": "ws://127.0.0.1:17890/v1/realtime",
             "infra_token": "",
             # A WAV file the bot speaks like (relative to the data directory;
-            # empty: the server's default voice), and the emotion it speaks
+            # empty: the server's default voice), what it says (Qwen3-TTS
+            # then clones the voice in context), and the emotion it speaks
             # with (IndexTTS-2.5) at a strength of 0 to 1.
             "ref_audio": "",
+            "ref_text": "",
             "emotion": "calm",
             "emotion_strength": 0.8,
+            # Speak a reply's first clause while the model is still writing
+            # it (a TTS model that takes streamed text: Qwen3-TTS).
+            "stream_text": True,
             # The model that talks (empty: the runner's provider and model).
             "text_model_provider": "",
             "text_model": "",

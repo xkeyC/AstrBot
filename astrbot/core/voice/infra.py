@@ -131,6 +131,8 @@ def infra_settings_error(settings: dict) -> str | None:
             return f"reference audio must be an existing .wav file: {path}"
         if path.stat().st_size > MAX_REF_AUDIO_BYTES:
             return f"reference audio is over {MAX_REF_AUDIO_BYTES // 2**20} MB: {path}"
+    elif str(settings["ref_text"]).strip():
+        return "reference text is what the reference audio says: set the reference audio too"
     return None
 
 
@@ -247,6 +249,7 @@ class InfraVoiceSession(VoiceSession):
         if emotion := str(settings["emotion"]):
             session["tts_emotion"] = emotion
             session["tts_emotion_strength"] = float(settings["emotion_strength"])
+        session["tts_stream_text"] = bool(settings["stream_text"])
         config = {
             **{
                 key: value
@@ -268,6 +271,8 @@ class InfraVoiceSession(VoiceSession):
             config["realtime.local_infra.token"] = token
         if path := ref_audio_path(settings):
             config["realtime.local_infra.ref_audio_path"] = str(path)
+            if ref_text := str(settings["ref_text"]).strip():
+                config["realtime.local_infra.ref_text"] = ref_text
         provider = str(settings["text_model_provider"]).strip()
         model = str(settings["text_model"]).strip()
         if (

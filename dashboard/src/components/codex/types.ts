@@ -29,8 +29,10 @@ export type RealtimeVoiceForm = {
   infra_url: string
   infra_token: string
   ref_audio: string
+  ref_text: string
   emotion: string
   emotion_strength: number
+  stream_text: boolean
   text_model_provider: string
   text_model: string
   text_reasoning_effort: string
@@ -155,8 +157,10 @@ export function realtimeVoiceFromConfig(v: any): RealtimeVoiceForm {
     infra_url: str(v?.infra_url) || 'ws://127.0.0.1:17890/v1/realtime',
     infra_token: str(v?.infra_token),
     ref_audio: str(v?.ref_audio),
+    ref_text: str(v?.ref_text),
     emotion: str(v?.emotion) || 'calm',
     emotion_strength: num(v?.emotion_strength, 0.8),
+    stream_text: v?.stream_text !== false,
     text_model_provider: str(v?.text_model_provider),
     text_model: str(v?.text_model),
     text_reasoning_effort: str(v?.text_reasoning_effort),
@@ -172,8 +176,10 @@ export function realtimeVoicePayload(v: RealtimeVoiceForm) {
     infra_url: (v.infra_url || '').trim(),
     infra_token: (v.infra_token || '').trim(),
     ref_audio: (v.ref_audio || '').trim(),
+    ref_text: (v.ref_text || '').trim(),
     emotion: v.emotion || 'calm',
     emotion_strength: num(v.emotion_strength, 0.8),
+    stream_text: v.stream_text !== false,
     text_model_provider: v.text_model_provider || '',
     text_model: (v.text_model || '').trim(),
     text_reasoning_effort: v.text_reasoning_effort || '',

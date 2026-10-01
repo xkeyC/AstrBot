@@ -4,11 +4,11 @@
       <v-btn value="builtin">{{ tm('voice.backendBuiltin') }}</v-btn>
       <v-btn value="local_infra">{{ tm('voice.backendInfra') }}</v-btn>
     </v-btn-toggle>
-    <div class="setting-subtitle mb-4">
+    <div class="voice-hint mb-4">
       {{ voice.backend === 'local_infra' ? tm('voice.backendInfraHint') : tm('voice.backendBuiltinHint') }}
     </div>
 
-    <div v-if="voice.backend === 'builtin'" class="dashboard-form-grid">
+    <div v-if="voice.backend === 'builtin'" class="voice-grid">
       <v-select
         v-model="voice.voice"
         :items="voiceItems"
@@ -30,7 +30,7 @@
 
     <template v-else>
       <div class="text-subtitle-2 mb-2">{{ tm('voice.serverTitle') }}</div>
-      <div class="dashboard-form-grid mb-4">
+      <div class="voice-grid mb-4">
         <v-text-field
           v-model="voice.infra_url"
           :label="tm('voice.infraUrl')"
@@ -60,6 +60,27 @@
           variant="outlined"
           density="comfortable"
         />
+        <v-switch
+          v-model="voice.stream_text"
+          :label="tm('voice.streamText')"
+          :hint="tm('voice.streamTextHint')"
+          persistent-hint
+          color="primary"
+          inset
+          density="comfortable"
+        />
+        <v-textarea
+          v-model="voice.ref_text"
+          class="voice-wide"
+          :label="tm('voice.refText')"
+          :hint="tm('voice.refTextHint')"
+          :disabled="!voice.ref_audio.trim() && !voice.ref_text"
+          persistent-hint
+          auto-grow
+          rows="2"
+          variant="outlined"
+          density="comfortable"
+        />
         <v-select
           v-model="voice.emotion"
           :items="emotionItems"
@@ -84,7 +105,7 @@
       </div>
 
       <div class="text-subtitle-2 mb-2">{{ tm('voice.textTitle') }}</div>
-      <div class="dashboard-form-grid">
+      <div class="voice-grid">
         <v-select
           v-model="voice.text_model_provider"
           :items="textProviderItems"
@@ -162,3 +183,29 @@ const effortItems = computed(() => [
   ...REASONING_EFFORTS.map((e) => ({ title: e, value: e }))
 ])
 </script>
+
+<style scoped>
+/* The page's shared form styles are scoped to the page: this section has
+   its own. */
+.voice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.voice-wide {
+  grid-column: 1 / -1;
+}
+
+.voice-hint {
+  color: var(--dashboard-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@media (max-width: 1080px) {
+  .voice-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

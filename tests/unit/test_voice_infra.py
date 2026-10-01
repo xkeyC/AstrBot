@@ -20,6 +20,7 @@ from astrbot.core.voice.infra import (
     INFRA_INSTRUCTIONS,
     InfraVoiceSession,
     SpeechTrack,
+    infra_settings_error,
 )
 from astrbot.core.voice.session import VoiceOptions, VoiceSession, new_voice_session
 
@@ -283,7 +284,9 @@ async def test_the_voice_thread_talks_on_the_chosen_model(engine):
         "group": True,
         "tts_emotion": "happy",
         "tts_emotion_strength": 0.5,
+        "tts_stream_text": True,
     }
+    assert "realtime.local_infra.ref_text" not in config
     assert config["model_provider"] == "deepseek"
     assert config["model"] == "deepseek-v4.1-flash"
     assert config["model_reasoning_effort"] == "none"
@@ -353,6 +356,34 @@ async def test_a_backend_task_runs_in_the_chat_and_its_answer_is_told(engine):
     unknown = await t.pump.tool_handler({"tool": "shell", "arguments": {}})
     assert unknown["success"] is False
     await t.session.close("done")
+
+
+@pytest.mark.asyncio
+async def test_the_voice_and_its_transcript_go_to_the_server(
+    engine, monkeypatch, tmp_path
+):
+    ref = tmp_path / "voice.wav"
+    ref.write_bytes(b"RIFF")
+    monkeypatch.setattr(
+        voice,
+        "_runner_config",
+        lambda: runner_config(
+            ref_audio=str(ref), ref_text=" 你好，我是小乐。 ", stream_text=False
+        ),
+    )
+    t = await open_session(engine)
+    config = engine.params["config"]
+    assert config["realtime.local_infra.ref_audio_path"] == str(ref)
+    assert config["realtime.local_infra.ref_text"] == "你好，我是小乐。"
+    assert config["realtime.local_infra.session"]["tts_stream_text"] is False
+    await t.session.close("done")
+
+
+def test_a_reference_text_needs_its_audio():
+    settings = runner_config(ref_text="你好。")["realtime_voice"]
+    assert "reference audio" in infra_settings_error(settings)
+    settings["ref_text"] = "  "
+    assert infra_settings_error(settings) is None
 
 
 @pytest.mark.asyncio
