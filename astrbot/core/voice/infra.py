@@ -81,7 +81,8 @@ INFRA_INSTRUCTIONS = """You are the voice in a live voice conversation. What peo
 - To delegate to the backend, call backend_task with the whole task in one sentence, then say in a few words that you are on it. The result comes back later as a message; tell it then, briefly and in your own words.
 - Text in parentheses comes from the system, not from anyone speaking."""
 START_INSTRUCTIONS = "A voice conversation has started."
-END_INSTRUCTIONS = "The voice conversation has ended; nothing said now is heard."
+# Codex reads {now} as the time of the hang-up.
+END_INSTRUCTIONS = "The voice conversation ended at {now}; nothing said now is heard."
 # A handed-off task's answer, for the voice thread to tell.
 RESULT_PROMPT = """(The backend finished "{task}": {answer}
 Tell the listener briefly, in your own words.)"""

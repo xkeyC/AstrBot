@@ -298,6 +298,8 @@ async def test_the_voice_thread_talks_on_the_chosen_model(engine):
     request = engine.rt.started[0]
     assert request["transport"] == {"type": "websocket"}
     assert "Today is" in request["realtime_start_instructions"]
+    # Codex fills in the time of the hang-up.
+    assert "{now}" in request["realtime_end_instructions"]
     assert VOICE_SESSIONS[t.chat.umo] is t.session
     await t.session.close("done")
 
