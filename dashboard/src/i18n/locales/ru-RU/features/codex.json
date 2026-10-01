@@ -109,6 +109,8 @@
     "extras": "Заголовки, сжатие и модели",
     "compaction": "Сжатие",
     "compactionHint": "Где сжимается длинная история. Удалённому нужен /responses/compact (OpenAI).",
+    "extraBody": "Дополнительное тело запроса (JSON)",
+    "extraBodyHint": "Только для Chat Completions: объединяется с верхним уровнем каждого тела запроса, для собственных полей провайдера (например {\"thinking\": {\"type\": \"disabled\"}}); значение null удаляет поле, которое отправляет Codex (например {\"reasoning_effort\": null}).",
     "compaction_auto": "Автоматически",
     "compaction_local": "Локально (модель резюмирует)",
     "compaction_remote": "Удалённо (/responses/compact)",
@@ -174,6 +176,7 @@
     "voiceUrlInvalid": "Адрес голосового сервера должен начинаться с ws:// или wss://",
     "voiceStrengthInvalid": "Сила эмоции должна быть от 0 до 1",
     "voiceCompactInvalid": "Порог сжатия в простое должен быть от 0 до 100",
-    "voiceModelRequired": "Укажите текстовую модель голоса для выбранного поставщика"
+    "voiceModelRequired": "Укажите текстовую модель голоса для выбранного поставщика",
+    "extraBodyInvalid": "Дополнительное тело запроса должно быть JSON-объектом."
   }
 }

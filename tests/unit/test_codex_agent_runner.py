@@ -259,6 +259,40 @@ def test_provider_headers_compaction_and_model_metadata(tmp_path):
     }
     # Nothing is said for a provider left as it is.
     assert not any(k.startswith("model_provider_options.plain") for k in cfg)
+    assert "model_provider_options.go.wire" not in cfg
+
+
+def test_a_chat_provider_goes_over_the_chat_wire(tmp_path):
+    opts = engine_options(
+        {
+            "codex_home": str(tmp_path),
+            "tool_mode": "direct",
+            "model_providers": [
+                {
+                    "id": "go",
+                    "base_url": "https://opencode.ai/zen/go/v1",
+                    "wire_api": "chat",
+                    "extra_body": {
+                        "thinking": {"type": "disabled", "budget": None},
+                        "stop": ["END", None],
+                        "reasoning_effort": None,
+                    },
+                },
+                # An extra body without the chat wire says nothing.
+                {"id": "r", "base_url": "https://r/v1", "extra_body": {"x": 1}},
+            ],
+        }
+    )
+    cfg = opts["config"]
+    # Codex's own wire_api stays Responses; the chat wire is a fork option.
+    assert cfg["model_providers.go.wire_api"] == "responses"
+    assert cfg["model_provider_options.go.wire"] == "chat"
+    assert cfg["model_provider_options.go.extra_body"] == {
+        "thinking": {"type": "disabled"},
+        "stop": ["END"],
+    }
+    assert cfg["model_provider_options.go.extra_body_remove"] == ["reasoning_effort"]
+    assert not any(k.startswith("model_provider_options.r") for k in cfg)
     assert "model_providers.plain.http_headers" not in cfg
 
 

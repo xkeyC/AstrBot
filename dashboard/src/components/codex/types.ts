@@ -19,6 +19,8 @@ export type ModelRow = {
 export type ProviderExtras = {
   headers: HeaderRow[]
   compaction: string
+  // Chat wire: merged over each request body (a JSON object, as text).
+  extra_body_json: string
   models: ModelRow[]
 }
 
@@ -110,6 +112,10 @@ export function extrasFromConfig(p: any): ProviderExtras {
       value: str(value)
     })),
     compaction: COMPACTION_MODES.includes(str(p?.compaction)) ? str(p.compaction) : 'auto',
+    extra_body_json:
+      p?.extra_body && typeof p.extra_body === 'object' && Object.keys(p.extra_body).length
+        ? JSON.stringify(p.extra_body, null, 2)
+        : '',
     models: models
       .filter((m: any) => m && typeof m === 'object')
       .map((m: any) => ({
@@ -133,6 +139,8 @@ export function extrasPayload(e: ProviderExtras) {
   return {
     headers,
     compaction: e.compaction || 'auto',
+    // Text still being typed stays text (saving checks it, extrasProblem).
+    extra_body: parseExtraBody(e.extra_body_json),
     models: e.models.map((m) => ({
       slug: m.slug.trim(),
       context_window: Number(m.context_window) || 0,
@@ -188,7 +196,26 @@ export function realtimeVoicePayload(v: RealtimeVoiceForm) {
 }
 
 /** A problem of a provider's extra settings (an i18n key and its params), or null. */
+function parseExtraBody(text: string): unknown {
+  if (!text.trim()) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
+}
+
 export function extrasProblem(e: ProviderExtras): [string, Record<string, string>] | null {
+  if (e.extra_body_json.trim()) {
+    try {
+      const parsed = JSON.parse(e.extra_body_json)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return ['messages.extraBodyInvalid', {}]
+      }
+    } catch {
+      return ['messages.extraBodyInvalid', {}]
+    }
+  }
   const slugs = new Set<string>()
   for (const m of e.models) {
     const slug = m.slug.trim()

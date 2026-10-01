@@ -189,10 +189,21 @@ def engine_options(cfg: dict) -> JsonObject:
     return options
 
 
+def _without_nulls(value: T.Any) -> T.Any:
+    """`value` with nested nulls left out (TOML has none)."""
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_without_nulls(v) for v in value if v is not None]
+    return value
+
+
 def model_provider_overrides(providers: T.Any) -> JsonObject:
     """Map WebUI-managed providers to Codex overrides: `model_providers.<id>`
     (endpoint, key, extra request headers) and `model_provider_options.<id>`
-    (compaction mode, metadata of the provider's models)."""
+    (compaction mode, wire, extra chat request body, metadata of the
+    provider's models). The chat wire is a Codex fork option: the provider's
+    own `wire_api` stays Responses (upstream rejects "chat")."""
     out: JsonObject = {}
     for p in providers if isinstance(providers, list) else []:
         if not isinstance(p, dict):
@@ -204,7 +215,19 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
         prefix = f"model_providers.{pid}"
         out[f"{prefix}.name"] = str(p.get("name") or pid)
         out[f"{prefix}.base_url"] = base_url
-        out[f"{prefix}.wire_api"] = str(p.get("wire_api") or "responses")
+        out[f"{prefix}.wire_api"] = "responses"
+        if str(p.get("wire_api") or "") == "chat":
+            out[f"model_provider_options.{pid}.wire"] = "chat"
+            extra_body = p.get("extra_body")
+            if isinstance(extra_body, dict):
+                # A null removes a field Codex sends; TOML has no null, so
+                # Codex takes those as a list.
+                if fields := {
+                    k: _without_nulls(v) for k, v in extra_body.items() if v is not None
+                }:
+                    out[f"model_provider_options.{pid}.extra_body"] = fields
+                if removed := [k for k, v in extra_body.items() if v is None]:
+                    out[f"model_provider_options.{pid}.extra_body_remove"] = removed
         if key := str(p.get("api_key") or "").strip():
             out[f"{prefix}.experimental_bearer_token"] = key
         headers = p.get("headers")

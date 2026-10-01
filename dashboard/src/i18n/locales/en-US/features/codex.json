@@ -109,6 +109,8 @@
     "extras": "Headers, compaction and models",
     "compaction": "Compaction",
     "compactionHint": "Where long histories are compacted. Remote needs a /responses/compact endpoint (OpenAI).",
+    "extraBody": "Extra request body (JSON)",
+    "extraBodyHint": "Chat Completions only: merged over each request body's top level, for the provider's own fields (e.g. {\"thinking\": {\"type\": \"disabled\"}}); a null value removes a field Codex sends (e.g. {\"reasoning_effort\": null}).",
     "compaction_auto": "Automatic",
     "compaction_local": "Local (the model summarizes)",
     "compaction_remote": "Remote (/responses/compact)",
@@ -174,6 +176,7 @@
     "voiceUrlInvalid": "The voice server URL must start with ws:// or wss://",
     "voiceStrengthInvalid": "Emotion strength must be between 0 and 1",
     "voiceCompactInvalid": "The idle compaction share must be between 0 and 100",
-    "voiceModelRequired": "Choose the voice text model for the selected provider"
+    "voiceModelRequired": "Choose the voice text model for the selected provider",
+    "extraBodyInvalid": "The extra request body must be a JSON object."
   }
 }

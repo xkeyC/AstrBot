@@ -20,6 +20,21 @@
         </div>
 
         <div class="extras-block">
+          <v-textarea
+            v-model="extras.extra_body_json"
+            :label="tm('providers.extraBody')"
+            :hint="tm('providers.extraBodyHint')"
+            persistent-hint
+            auto-grow
+            rows="2"
+            placeholder='{"thinking": {"type": "disabled"}}'
+            class="text-mono"
+            variant="outlined"
+            density="comfortable"
+          />
+        </div>
+
+        <div class="extras-block">
           <div class="extras-head">
             <div>
               <div class="text-subtitle-2">{{ tm('providers.headers') }}</div>

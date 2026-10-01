@@ -62,8 +62,9 @@ AGENT_RUNNER_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "proxy": "",
         "model": "",
         "model_provider": "",
-        # Custom Responses-API endpoints: [{id, name, base_url, api_key,
-        # wire_api, headers: {name: value}, compaction: auto|local|remote,
+        # Custom endpoints: [{id, name, base_url, api_key, wire_api:
+        # responses|chat, extra_body: {...} (chat: merged over each request
+        # body), headers: {name: value}, compaction: auto|local|remote,
         # models: [{slug, context_window, auto_compact_token_limit,
         # reasoning_efforts: [...], default_reasoning_effort, image_input
         # (true/false; unset: Codex's default), metadata_json}]}] (see

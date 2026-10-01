@@ -476,8 +476,12 @@ const snackbar = ref({ show: false, message: '', color: 'success' })
 
 const form = ref<CodexForm>(emptyForm())
 
-// Codex only speaks the Responses API.
-const wireApiItems = ['responses']
+// chat: /chat/completions (a Codex fork option), for providers whose
+// Responses endpoint is missing or broken.
+const wireApiItems = [
+  { title: 'Responses', value: 'responses' },
+  { title: 'Chat Completions', value: 'chat' }
+]
 
 function emptyForm(): CodexForm {
   return {
