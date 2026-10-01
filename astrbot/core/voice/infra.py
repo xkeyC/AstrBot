@@ -21,6 +21,7 @@ import base64
 import fractions
 import json
 import time
+import wave
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -48,6 +49,9 @@ IN_RATE = 16000  # what Codex hands the server: 16-bit mono PCM
 START_TIMEOUT = 320.0  # a little over Codex's own, whose error says why
 # The reference voice goes in one WebSocket message (the server takes 16 MB).
 MAX_REF_AUDIO_BYTES = 8 * 1024 * 1024
+# With its transcript, Qwen3-TTS takes a reference of at most this long
+# (in-context cloning; the server's max_reference_seconds default).
+MAX_REF_SECONDS_WITH_TEXT = 15
 # Emotions the server's TTS (IndexTTS-2.5) speaks with; "none" keeps the
 # reference voice's own.
 EMOTIONS = (
@@ -131,9 +135,26 @@ def infra_settings_error(settings: dict) -> str | None:
             return f"reference audio must be an existing .wav file: {path}"
         if path.stat().st_size > MAX_REF_AUDIO_BYTES:
             return f"reference audio is over {MAX_REF_AUDIO_BYTES // 2**20} MB: {path}"
-    elif str(settings["ref_text"]).strip():
-        return "reference text is what the reference audio says: set the reference audio too"
+        seconds = wav_seconds(path)
+        if (
+            str(settings["ref_text"]).strip()
+            and seconds is not None
+            and seconds > MAX_REF_SECONDS_WITH_TEXT
+        ):
+            return (
+                f"with its transcript the reference audio may be at most "
+                f"{MAX_REF_SECONDS_WITH_TEXT} s, {path} is {seconds:.1f} s"
+            )
     return None
+
+
+def wav_seconds(path: Path) -> float | None:
+    """How long a WAV file plays (None when ``wave`` cannot read it)."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            return wav.getnframes() / wav.getframerate()
+    except (wave.Error, EOFError, ZeroDivisionError):
+        return None
 
 
 def ref_audio_path(settings: dict) -> Path | None:

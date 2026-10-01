@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import wave
 from types import SimpleNamespace
 
 import av
@@ -379,11 +380,32 @@ async def test_the_voice_and_its_transcript_go_to_the_server(
     await t.session.close("done")
 
 
-def test_a_reference_text_needs_its_audio():
-    settings = runner_config(ref_text="你好。")["realtime_voice"]
-    assert "reference audio" in infra_settings_error(settings)
-    settings["ref_text"] = "  "
-    assert infra_settings_error(settings) is None
+@pytest.mark.asyncio
+async def test_a_reference_text_without_its_audio_is_left_out(engine, monkeypatch):
+    monkeypatch.setattr(
+        voice, "_runner_config", lambda: runner_config(ref_text="你好。")
+    )
+    t = await open_session(engine)
+    assert "realtime.local_infra.ref_text" not in engine.params["config"]
+    await t.session.close("done")
+
+
+def test_a_transcribed_reference_must_be_short(tmp_path):
+    def silence(seconds: int) -> str:
+        path = tmp_path / f"{seconds}s.wav"
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(8000)
+            wav.writeframes(bytes(2 * 8000 * seconds))
+        return str(path)
+
+    long = runner_config(ref_audio=silence(16), ref_text="你好。")["realtime_voice"]
+    assert "at most 15 s" in infra_settings_error(long)
+    long["ref_text"] = ""
+    assert infra_settings_error(long) is None
+    short = runner_config(ref_audio=silence(5), ref_text="你好。")["realtime_voice"]
+    assert infra_settings_error(short) is None
 
 
 @pytest.mark.asyncio
