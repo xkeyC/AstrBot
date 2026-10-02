@@ -94,6 +94,7 @@ class PcmMedia:
         send: Callable[[bytes], None],
         buffer_seconds: float = 0,
         trim_silence: bool = False,
+        prebuffer_frames: int = PREBUFFER_FRAMES,
     ) -> None:
         """
         Args:
@@ -106,19 +107,23 @@ class PcmMedia:
                 otherwise the backlog of one stall stays as added latency
                 until the call ends. Not for a model that delivers speech
                 ahead of time (its pauses would be cut out).
+            prebuffer_frames: 20 ms frames buffered before a stretch of speech
+                starts. A peer sending in bursts needs the default; one that
+                sends at real-time pace (the local voice server) needs little.
         """
         self._send = send
         self._queue: deque[bytes] | None = (
             deque(
                 maxlen=max(
                     int(buffer_seconds / FRAME_SECONDS),
-                    PREBUFFER_FRAMES + LEAD_FRAMES,
+                    prebuffer_frames + LEAD_FRAMES,
                 )
             )
             if buffer_seconds > 0
             else None
         )
         self._trim_silence = trim_silence
+        self._prebuffer = prebuffer_frames
         self._buffer = bytearray()
         self._playing = False
         # Until the model listens, inbound audio is kept, not handed out.
@@ -172,7 +177,7 @@ class PcmMedia:
                     if self._queue is None:
                         self._send(chunk)
                         continue
-                    if self._trim_silence and len(self._queue) > PREBUFFER_FRAMES:
+                    if self._trim_silence and len(self._queue) > self._prebuffer:
                         samples = np.frombuffer(chunk, dtype=np.int16).astype(
                             np.float32
                         )
@@ -191,7 +196,7 @@ class PcmMedia:
         until the queue is empty after ``ended`` is set.
 
         Each stretch of speech (and each restart after the queue ran dry)
-        first buffers up PREBUFFER_FRAMES, or waits that long.
+        first buffers up its prebuffer frames, or waits that long.
         """
         loop = asyncio.get_running_loop()
         queue = self._queue
@@ -211,8 +216,8 @@ class PcmMedia:
                 if waiting_since is None:
                     waiting_since = now
                 if (
-                    len(queue) < PREBUFFER_FRAMES
-                    and now - waiting_since < PREBUFFER_FRAMES * FRAME_SECONDS
+                    len(queue) < self._prebuffer
+                    and now - waiting_since < self._prebuffer * FRAME_SECONDS
                     and not ended.is_set()
                 ):
                     await asyncio.sleep(FRAME_SECONDS)

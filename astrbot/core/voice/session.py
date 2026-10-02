@@ -24,7 +24,7 @@ import ipaddress
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -184,6 +184,34 @@ class VoiceOptions:
     media_tcp: bool = False
 
 
+@dataclass
+class VoiceTool:
+    """A quick action of the platform the voice model calls itself (wave,
+    jump, write a line), answered at once instead of handed to the chat.
+
+    Only a voice thread that runs its own tools has them: the
+    ``local_infra`` backend. Codex realtime hands everything off.
+
+    Attributes:
+        spec: The dynamic tool: ``name``, ``description``, ``inputSchema``.
+        run: Does it with the call's arguments; returns the result for the
+            model: a text, or Codex content items (``{"type": "inputText",
+            "text"}``, ``{"type": "inputImage", "imageUrl"}`` with a data
+            URL) to show it a picture. An exception fails the call.
+        ends_turn: Whether a call ends the turn unless its ``end_turn``
+            argument says otherwise (the model chooses per call when the
+            tool offers that argument). A call that ends the turn is the
+            whole answer: no model round follows it (when every call of the
+            reply ends the turn), and its ``say`` argument, if any, is
+            spoken as the reply. Not for tools whose result the model must
+            tell.
+    """
+
+    spec: dict
+    run: Callable[[dict], Awaitable[str | list[dict]]]
+    ends_turn: bool = False
+
+
 def _runner_config() -> dict:
     from astrbot.core.config.agent_runner import normalize_agent_runner
 
@@ -254,6 +282,7 @@ class VoiceSession:
         chat: VoiceChat,
         label: str = "voice",
         thread_key: str = VOICE_THREAD_KEY,
+        tools: list[VoiceTool] | None = None,
     ) -> None:
         """
         Args:
@@ -267,7 +296,10 @@ class VoiceSession:
             chat: The paired chat, which runs what the voice model hands off.
             label: Names the session in logs and task names, e.g. ``Mumble``.
             thread_key: Storage key of the persisted voice thread.
+            tools: The platform's quick actions for the voice model (see
+                ``VoiceTool``); ignored by Codex realtime.
         """
+        self.tools = list(tools or [])
         self.key = key
         self.scope_id = scope_id
         self.prompt = prompt
@@ -288,6 +320,8 @@ class VoiceSession:
         self._events_queue: asyncio.Queue | None = None
         self._realtime_requested = False
         self._thread_released = False
+        # The platform's latest context for the voice model (``set_context``).
+        self._context = ""
         # The transcript and stats of the thread (see record.py).
         self._record: VoiceRecord | None = None
         self._pc: RTCPeerConnection | None = None
@@ -686,6 +720,26 @@ class VoiceSession:
         if answer is None:
             answer = FAILED_SPEECH
         await self._speak(answer or DONE_SPEECH)
+
+    async def set_context(self, text: str) -> None:
+        """Gives the voice model the platform's latest context (who is
+        around, where it is): with the conversation's start, or later with
+        its next input, a newer one replacing it. Not a turn of its own.
+        """
+        self._context = text
+        if (
+            not self._realtime_requested
+            or self._engine is None
+            or self._thread_id is None
+            or self._closed
+        ):
+            return  # the start takes it along
+        try:
+            await self._engine.rt.realtime_append_text(self._thread_id, text, "context")
+        except Exception as exc:  # noqa: BLE001 - the conversation goes on
+            logger.warning(
+                "%s voice %s: context not given: %s", self.label, self.key, exc
+            )
 
     async def note(self, text: str) -> None:
         """Adds a note (a result that reached the chat) to the voice model's

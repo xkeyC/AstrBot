@@ -257,8 +257,12 @@ def test_provider_headers_compaction_and_model_metadata(tmp_path):
         # Unset image input keeps Codex's default.
         "bad-json": {},
     }
-    # Nothing is said for a provider left as it is.
-    assert not any(k.startswith("model_provider_options.plain") for k in cfg)
+    # Nothing else is said for a provider left as it is; none of them gets
+    # Codex's turn metadata header (DeepSeek thinks on it).
+    assert [k for k in cfg if k.startswith("model_provider_options.plain")] == [
+        "model_provider_options.plain.omit_turn_metadata"
+    ]
+    assert cfg["model_provider_options.plain.omit_turn_metadata"] is True
     assert "model_provider_options.go.wire" not in cfg
 
 
@@ -292,7 +296,9 @@ def test_a_chat_provider_goes_over_the_chat_wire(tmp_path):
         "stop": ["END"],
     }
     assert cfg["model_provider_options.go.extra_body_remove"] == ["reasoning_effort"]
-    assert not any(k.startswith("model_provider_options.r") for k in cfg)
+    assert [k for k in cfg if k.startswith("model_provider_options.r.")] == [
+        "model_provider_options.r.omit_turn_metadata"
+    ]
     assert "model_providers.plain.http_headers" not in cfg
 
 

@@ -38,9 +38,13 @@ class FakeChat(VoiceChat):
         self.asked: list[str] = []
         self.answer: str | None = "It is three."
         self.persona = "Speak like a pirate."
+        self.memory: dict = {}
 
     async def voice_persona(self) -> str:
         return self.persona
+
+    def memory_config(self) -> dict:
+        return self.memory
 
     async def ask(self, body: str) -> str | None:
         self.asked.append(body)
@@ -217,10 +221,13 @@ async def eventually(check) -> None:
     assert check()
 
 
-async def open_session(engine, private: bool = True, started: bool = True):
+async def open_session(
+    engine, private: bool = True, started: bool = True, memory: dict | None = None
+):
     t = SimpleNamespace(
         media=FakeMedia(), chat=FakeChat(private), closed=[], failures=[]
     )
+    t.chat.memory = memory or {}
     t.session = new_voice_session(
         key="server",
         scope_id="test:voice:server",
@@ -265,6 +272,45 @@ def test_the_configured_backend_picks_the_session(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_platforms_context_goes_with_the_start_then_as_context(engine):
+    t = SimpleNamespace(media=FakeMedia(), chat=FakeChat(False), closed=[], failures=[])
+    t.session = new_voice_session(
+        key="room",
+        scope_id="test:voice:room",
+        prompt="You are Jarvis, in a room.",
+        options=VoiceOptions(name="Jarvis", aliases=[]),
+        media=t.media,
+        on_closed=t.closed.append,
+        chat=t.chat,
+    )
+    # Before the start: it goes with the start.
+    await t.session.set_context("(Room: Home; here: Alice)")
+    t.session.launch(t.failures.append)
+    await eventually(lambda: engine.rt.started or t.failures)
+    assert engine.rt.started[0]["realtime_start_instructions"].endswith(
+        "(Room: Home; here: Alice)"
+    )
+    assert engine.rt.texts == []
+    # Later: as context, for the next input.
+    await t.session.set_context("(Room: Home; here: Alice, Bob)")
+    assert engine.rt.texts == [("(Room: Home; here: Alice, Bob)", "context")]
+    await t.session.close("done")
+
+
+@pytest.mark.asyncio
+async def test_the_voice_thread_keeps_the_chats_memories(engine):
+    memory = {
+        "features.memories": True,
+        "memories.scope_key": "test:GroupMessage:server",
+        "memories.may_write_global": False,
+    }
+    await open_session(engine, private=False, memory=memory)
+    config = engine.params["config"]
+    # The chat's memory settings win over the voice thread's default (off).
+    assert {k: config[k] for k in memory} == memory
+
+
+@pytest.mark.asyncio
 async def test_the_voice_thread_talks_on_the_chosen_model(engine):
     t = await open_session(engine, private=False)
     params = engine.params
@@ -274,7 +320,10 @@ async def test_the_voice_thread_talks_on_the_chosen_model(engine):
     assert "You are Jarvis, on a call." in params["base_instructions"]
     assert params["base_instructions"].endswith("Speak like a pirate.")
     assert "Today is" not in params["base_instructions"]
-    assert [tool["name"] for tool in params["dynamic_tools"]] == ["backend_task"]
+    assert [tool["name"] for tool in params["dynamic_tools"]] == [
+        "backend_task",
+        "stay_silent",
+    ]
     config = params["config"]
     assert config["realtime.backend"] == "local_multimodal_infra"
     assert config["realtime.local_infra.url"] == "ws://127.0.0.1:17890/v1/realtime"
@@ -291,6 +340,8 @@ async def test_the_voice_thread_talks_on_the_chosen_model(engine):
     assert config["model_provider"] == "deepseek"
     assert config["model"] == "deepseek-v4.1-flash"
     assert config["model_reasoning_effort"] == "none"
+    # No memories when the runner keeps none.
+    assert config["features.memories"] is False
     assert config["model_tool_mode"] == "direct"
     assert "realtime.host_routes_handoffs" not in config
     # Its own thread, apart from the realtime one.
@@ -358,6 +409,121 @@ async def test_a_backend_task_runs_in_the_chat_and_its_answer_is_told(engine):
     assert role == "developer"
     unknown = await t.pump.tool_handler({"tool": "shell", "arguments": {}})
     assert unknown["success"] is False
+    await t.session.close("done")
+
+
+@pytest.mark.asyncio
+async def test_a_platform_tool_is_done_at_once(engine):
+    calls: list[dict] = []
+
+    async def wave(arguments: dict) -> str:
+        calls.append(arguments)
+        return "Waved."
+
+    async def broken(arguments: dict) -> str:
+        raise RuntimeError("no avatar")
+
+    spec = {
+        "type": "function",
+        "name": "wave",
+        "description": "Wave.",
+        "inputSchema": {},
+    }
+    t = SimpleNamespace(media=FakeMedia(), chat=FakeChat(False), closed=[], failures=[])
+    t.session = new_voice_session(
+        key="room",
+        scope_id="test:voice:room",
+        prompt="You are Jarvis, in a room.",
+        options=VoiceOptions(name="Jarvis", aliases=[]),
+        media=t.media,
+        on_closed=t.closed.append,
+        chat=t.chat,
+        tools=[
+            voice.VoiceTool(spec=spec, run=wave),
+            voice.VoiceTool(spec={**spec, "name": "broken"}, run=broken),
+            voice.VoiceTool(spec={**spec, "name": "jump"}, run=wave, ends_turn=True),
+        ],
+    )
+    t.session.launch(t.failures.append)
+    await eventually(lambda: engine.rt.started or t.failures)
+    pump = engine.pumps["t1"]
+    assert [tool["name"] for tool in engine.params["dynamic_tools"]] == [
+        "backend_task",
+        "stay_silent",
+        "wave",
+        "broken",
+        "jump",
+    ]
+    result = await pump.tool_handler({"tool": "wave", "arguments": {"hand": "left"}})
+    assert result == {
+        "contentItems": [{"type": "inputText", "text": "Waved."}],
+        "success": True,
+    }
+    assert calls == [{"hand": "left"}]
+    # Not handed to the chat.
+    assert t.chat.asked == []
+    failed = await pump.tool_handler({"tool": "broken", "arguments": {}})
+    assert failed["success"] is False
+    assert "no avatar" in failed["contentItems"][0]["text"]
+    # The action is the whole answer: the turn ends, saying its say.
+    assert await pump.tool_handler(
+        {"tool": "jump", "arguments": {"say": " Watch this! "}}
+    ) == {
+        "contentItems": [{"type": "inputText", "text": "Waved."}],
+        "success": True,
+        "endTurn": True,
+        "speak": "Watch this!",
+    }
+    # The model may keep the turn going.
+    assert await pump.tool_handler(
+        {"tool": "jump", "arguments": {"say": "Hop.", "end_turn": False}}
+    ) == {"contentItems": [{"type": "inputText", "text": "Waved."}], "success": True}
+    # ... or end it with a tool that does not by default.
+    assert (await pump.tool_handler({"tool": "wave", "arguments": {"end_turn": True}}))[
+        "endTurn"
+    ] is True
+    assert await pump.tool_handler({"tool": "stay_silent", "arguments": {}}) == {
+        "contentItems": [{"type": "inputText", "text": "Silent."}],
+        "success": True,
+        "endTurn": True,
+    }
+    assert t.chat.asked == []
+    await t.session.close("done")
+
+
+@pytest.mark.asyncio
+async def test_a_platform_tool_may_answer_with_a_picture(engine):
+    picture = [
+        {"type": "inputText", "text": "The view now."},
+        {"type": "inputImage", "imageUrl": "data:image/jpeg;base64,AAAA"},
+    ]
+
+    async def look(arguments: dict) -> list[dict]:
+        return picture
+
+    spec = {
+        "type": "function",
+        "name": "look",
+        "description": "Look.",
+        "inputSchema": {},
+    }
+    t = SimpleNamespace(media=FakeMedia(), chat=FakeChat(False), closed=[], failures=[])
+    t.session = new_voice_session(
+        key="room",
+        scope_id="test:voice:room",
+        prompt="You are Jarvis, in a room.",
+        options=VoiceOptions(name="Jarvis", aliases=[]),
+        media=t.media,
+        on_closed=t.closed.append,
+        chat=t.chat,
+        tools=[voice.VoiceTool(spec=spec, run=look)],
+    )
+    t.session.launch(t.failures.append)
+    await eventually(lambda: engine.rt.started or t.failures)
+    assert await engine.pumps["t1"].tool_handler({"tool": "look", "arguments": {}}) == {
+        "contentItems": picture,
+        "success": True,
+    }
     await t.session.close("done")
 
 

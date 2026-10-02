@@ -77,7 +77,7 @@ TAIL_GAP = 0.2
 INFRA_INSTRUCTIONS = """You are the voice in a live voice conversation. What people say reaches you as transcripts (speech recognition may mishear words); everything you write is spoken aloud by speech synthesis.
 
 - Speak naturally and briefly, usually one to three short sentences, in the speaker's language. Never use Markdown, lists, links, code or emoji.
-- To stay silent, reply exactly <silence> and nothing else.
+- To stay silent, call stay_silent and write nothing.
 - To delegate to the backend, call backend_task with the whole task in one sentence, then say in a few words that you are on it. The result comes back later as a message; tell it then, briefly and in your own words.
 - Text in parentheses comes from the system, not from anyone speaking."""
 START_INSTRUCTIONS = "A voice conversation has started."
@@ -86,6 +86,14 @@ END_INSTRUCTIONS = "The voice conversation ended at {now}; nothing said now is h
 # A handed-off task's answer, for the voice thread to tell.
 RESULT_PROMPT = """(The backend finished "{task}": {answer}
 Tell the listener briefly, in your own words.)"""
+# Ends the turn without a word (instead of a "<silence>" reply, which Codex
+# still takes as silence).
+STAY_SILENT_TOOL = {
+    "type": "function",
+    "name": "stay_silent",
+    "description": "Says nothing: call it instead of replying whenever you stay silent.",
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
 BACKEND_TASK_TOOL = {
     "type": "function",
     "name": "backend_task",
@@ -258,8 +266,8 @@ class InfraVoiceSession(VoiceSession):
 
     def _thread_params(self) -> dict:
         """The voice thread: the voice instructions and persona, the
-        ``backend_task`` tool, the chosen model, and the server (Codex
-        connects to it when the conversation starts)."""
+        ``backend_task`` tool and the platform's tools, the chosen model, and
+        the server (Codex connects to it when the conversation starts)."""
         settings = realtime_voice_config()
         if problem := infra_settings_error(settings):
             raise ValueError(problem)
@@ -278,7 +286,7 @@ class InfraVoiceSession(VoiceSession):
                 for key, value in VOICE_THREAD_CONFIG.items()
                 if key != "realtime.host_routes_handoffs"
             },
-            # The voice thread's only tool is a plain function.
+            # The voice thread's tools are plain functions.
             "model_tool_mode": "direct",
             "features.shell_tool": False,
             "web_search": "disabled",
@@ -289,6 +297,8 @@ class InfraVoiceSession(VoiceSession):
                 settings["idle_compact_percent"]
             ),
         }
+        # Its turns are its own: the chat's memory tools and rights too.
+        config.update(self.chat.memory_config())
         if token := str(settings["infra_token"]).strip():
             config["realtime.local_infra.token"] = token
         if path := ref_audio_path(settings):
@@ -317,7 +327,11 @@ class InfraVoiceSession(VoiceSession):
             # Kept the same from call to call: the thread's prompt prefix
             # stays cached (the time goes with each call's start).
             "base_instructions": f"{INFRA_INSTRUCTIONS}\n\n{self.prompt}",
-            "dynamic_tools": [BACKEND_TASK_TOOL],
+            "dynamic_tools": [
+                BACKEND_TASK_TOOL,
+                STAY_SILENT_TOOL,
+                *(tool.spec for tool in self.tools),
+            ],
             "no_environment": True,
             "config": config,
         }
@@ -327,13 +341,63 @@ class InfraVoiceSession(VoiceSession):
 
     async def _backend_task(self, msg: dict) -> dict:
         """Runs a ``backend_task`` call as a turn of the paired chat; the
-        voice thread gets its answer later (``RESULT_PROMPT``)."""
-        if msg.get("tool") != "backend_task":
-            return {
-                "contentItems": [{"type": "inputText", "text": "Unknown tool."}],
-                "success": False,
-            }
+        voice thread gets its answer later (``RESULT_PROMPT``). A platform
+        tool (``VoiceTool``) is done at once and answered with its result;
+        ``stay_silent`` and a platform tool that ends the turn end it (no
+        model round follows), the latter saying its ``say`` argument."""
         arguments = msg.get("arguments")
+        if msg.get("tool") == "stay_silent":
+            return {
+                "contentItems": [{"type": "inputText", "text": "Silent."}],
+                "success": True,
+                "endTurn": True,
+            }
+        if msg.get("tool") != "backend_task":
+            tool = next(
+                (t for t in self.tools if t.spec["name"] == msg.get("tool")), None
+            )
+            if tool is None:
+                return {
+                    "contentItems": [{"type": "inputText", "text": "Unknown tool."}],
+                    "success": False,
+                }
+            logger.info(
+                "%s voice %s: tool %s %s",
+                self.label,
+                self.key,
+                msg.get("tool"),
+                arguments,
+            )
+            try:
+                result = await tool.run(
+                    arguments if isinstance(arguments, dict) else {}
+                )
+                success = True
+            except Exception as exc:  # noqa: BLE001 - told to the model
+                logger.warning(
+                    "%s voice %s: tool failed: %s", self.label, self.key, exc
+                )
+                result, success = f"Failed: {exc}", False
+            # A text, or content items (``inputText`` / ``inputImage``).
+            response: dict = {
+                "contentItems": [{"type": "inputText", "text": result}]
+                if isinstance(result, str)
+                else result,
+                "success": success,
+            }
+            # The call's end_turn argument overrides the tool's default; a
+            # failed action is the model's to tell.
+            ends_turn = (
+                arguments.get("end_turn", tool.ends_turn)
+                if isinstance(arguments, dict)
+                else tool.ends_turn
+            )
+            if ends_turn is True and success:
+                response["endTurn"] = True
+                say = arguments.get("say") if isinstance(arguments, dict) else None
+                if isinstance(say, str) and say.strip():
+                    response["speak"] = say.strip()
+            return response
         task = str(
             (arguments.get("task") if isinstance(arguments, dict) else None)
             or self._heard
@@ -365,7 +429,12 @@ class InfraVoiceSession(VoiceSession):
             json.dumps(
                 {
                     "transport": {"type": "websocket"},
-                    "realtime_start_instructions": f"{START_INSTRUCTIONS}\n\n{time_prompt()}",
+                    # The platform's context so far (set_context) goes with the start.
+                    "realtime_start_instructions": "\n\n".join(
+                        part
+                        for part in (START_INSTRUCTIONS, time_prompt(), self._context)
+                        if part
+                    ),
                     "realtime_end_instructions": END_INSTRUCTIONS,
                 }
             ),

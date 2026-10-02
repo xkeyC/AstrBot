@@ -161,6 +161,39 @@ class VoiceChat:
         event.set_extra(VOICE_TURN_EXTRA, True)
         return event
 
+    def memory_config(self) -> dict:
+        """Codex memory settings for a voice thread that runs its own turns:
+        those of the chat's thread (its store, its speaker's rights), so the
+        voice model reads and writes the same memories as the chat, as far
+        as the chat may.
+
+        Returns:
+            Codex config overrides; empty when the runner keeps no memories.
+        """
+        from astrbot.core import astrbot_config
+        from astrbot.core.agent.runners.codex.codex_agent_runner import (
+            memory_thread_config,
+        )
+        from astrbot.core.config.agent_runner import normalize_agent_runner
+        from astrbot.core.permission_rules import (
+            CONFIG_KEY,
+            EVENT_EXTRA_KEY,
+            policy_for_event,
+        )
+        from astrbot.core.star.context import current_context
+
+        cfg = normalize_agent_runner(astrbot_config.get("agent_runner"))["config"]
+        ctx = current_context()
+        if not cfg.get("memory_enabled") or ctx is None:
+            return {}
+        # The speaker's rules, as the chat's turns read them.
+        event = self._event(ctx, "")
+        event.set_extra(
+            EVENT_EXTRA_KEY,
+            policy_for_event(event, astrbot_config.get(CONFIG_KEY) or []),
+        )
+        return memory_thread_config(cfg, self.umo, event)
+
     async def voice_persona(self) -> str:
         """The voice persona of the chat's active persona: short instructions
         for the voice model, or empty when there are none.

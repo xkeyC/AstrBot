@@ -216,6 +216,9 @@ def model_provider_overrides(providers: T.Any) -> JsonObject:
         out[f"{prefix}.name"] = str(p.get("name") or pid)
         out[f"{prefix}.base_url"] = base_url
         out[f"{prefix}.wire_api"] = "responses"
+        # Codex's turn metadata header is an OpenAI convention; DeepSeek takes
+        # a request carrying it as Codex's and thinks whatever the effort.
+        out[f"model_provider_options.{pid}.omit_turn_metadata"] = True
         if str(p.get("wire_api") or "") == "chat":
             out[f"model_provider_options.{pid}.wire"] = "chat"
             extra_body = p.get("extra_body")
