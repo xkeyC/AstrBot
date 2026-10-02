@@ -70,6 +70,8 @@ EMOTIONS = (
 # stopped when nothing arrived for TAIL_GAP: well over the server's 20 ms
 # frame period and its jitter, well under its 300 ms lead.
 TAIL_FRAMES = 15
+# A platform tool's longest run: the voice turn waits for it.
+VOICE_TOOL_TIMEOUT = 30.0
 TAIL_GAP = 0.2
 
 # How the voice thread's model takes part, ahead of the platform's prompt
@@ -246,6 +248,36 @@ class SpeechTrack(MediaStreamTrack):
             return frame
 
 
+def tool_content(result) -> list[dict]:
+    """A platform tool's result as Codex content items: a text, or well-formed
+    ``inputText`` / ``inputImage`` items as they are; anything else (a
+    ``run`` returning nothing or a mapping) as text, so Codex always gets an
+    answer it can read (a malformed one would leave the voice turn waiting).
+    """
+    if isinstance(result, str):
+        return [{"type": "inputText", "text": result}]
+    if (
+        isinstance(result, list)
+        and result
+        and all(
+            isinstance(item, dict)
+            and (
+                (item.get("type") == "inputText" and isinstance(item.get("text"), str))
+                or (
+                    item.get("type") == "inputImage"
+                    and isinstance(item.get("imageUrl"), str)
+                )
+            )
+            for item in result
+        )
+    ):
+        return [
+            {key: item[key] for key in ("type", "text", "imageUrl") if key in item}
+            for item in result
+        ]
+    return [{"type": "inputText", "text": "Done." if result is None else str(result)}]
+
+
 class InfraVoiceSession(VoiceSession):
     """A voice conversation on a local-multimodal-infra server, the voice
     thread's model doing the talking."""
@@ -259,6 +291,18 @@ class InfraVoiceSession(VoiceSession):
                 realtime one.
         """
         super().__init__(*args, **kwargs)
+        # A platform tool named as a built-in one is left out.
+        reserved = {BACKEND_TASK_TOOL["name"], STAY_SILENT_TOOL["name"]}
+        if dropped := [
+            t.spec.get("name") for t in self.tools if t.spec.get("name") in reserved
+        ]:
+            logger.warning(
+                "%s voice %s: platform tools %s left out (built-in names)",
+                self.label,
+                self.key,
+                ", ".join(dropped),
+            )
+            self.tools = [t for t in self.tools if t.spec.get("name") not in reserved]
         self.thread_key = f"{self.thread_key}_infra"
         self._track = SpeechTrack()
         # The last utterance heard (what a handed-off task was asked with).
@@ -354,7 +398,8 @@ class InfraVoiceSession(VoiceSession):
             }
         if msg.get("tool") != "backend_task":
             tool = next(
-                (t for t in self.tools if t.spec["name"] == msg.get("tool")), None
+                (t for t in self.tools if t.spec["name"] == msg.get("tool")),
+                None,
             )
             if tool is None:
                 return {
@@ -369,20 +414,21 @@ class InfraVoiceSession(VoiceSession):
                 arguments,
             )
             try:
-                result = await tool.run(
-                    arguments if isinstance(arguments, dict) else {}
+                result = await asyncio.wait_for(
+                    tool.run(arguments if isinstance(arguments, dict) else {}),
+                    VOICE_TOOL_TIMEOUT,
                 )
                 success = True
+            except asyncio.TimeoutError:
+                logger.warning("%s voice %s: tool timed out", self.label, self.key)
+                result, success = "Failed: it took too long.", False
             except Exception as exc:  # noqa: BLE001 - told to the model
                 logger.warning(
                     "%s voice %s: tool failed: %s", self.label, self.key, exc
                 )
                 result, success = f"Failed: {exc}", False
-            # A text, or content items (``inputText`` / ``inputImage``).
             response: dict = {
-                "contentItems": [{"type": "inputText", "text": result}]
-                if isinstance(result, str)
-                else result,
+                "contentItems": tool_content(result),
                 "success": success,
             }
             # The call's end_turn argument overrides the tool's default; a
@@ -424,6 +470,7 @@ class InfraVoiceSession(VoiceSession):
         started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._spawn(self._events(events, started), "events")
         self._realtime_requested = True
+        self._context_given = self._context
         await engine.rt.realtime_start(
             self._thread_id,
             json.dumps(
@@ -446,6 +493,7 @@ class InfraVoiceSession(VoiceSession):
         self.media.start()
         self.started_at = time.monotonic()
         self.ready = True
+        await self._give_context()
         logger.info(
             "%s voice session %s started on the voice server in %.1fs (thread %s)",
             self.label,

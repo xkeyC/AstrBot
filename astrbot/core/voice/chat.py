@@ -163,14 +163,26 @@ class VoiceChat:
 
     def memory_config(self) -> dict:
         """Codex memory settings for a voice thread that runs its own turns:
-        those of the chat's thread (its store, its speaker's rights), so the
-        voice model reads and writes the same memories as the chat, as far
-        as the chat may.
+        those of the chat's thread (its config profile, its store, whether
+        its consolidation may reach global memory), so the voice model reads
+        and writes the same memories as the chat. Voice turns carry no
+        permission scopes, so what scopes grant a text turn (writing global
+        memory, deleting) is refused to them: they fail closed. The voice
+        thread runs on the global runner's engine, so its memories live in
+        that engine's ``codex_home``: a profile with a ``codex_home`` of its
+        own keeps its chat's memories apart from its voice's.
 
         Returns:
-            Codex config overrides; empty when the runner keeps no memories.
+            Codex config overrides; empty when the runner keeps no memories
+            or they cannot be worked out.
         """
-        from astrbot.core import astrbot_config
+        try:
+            return self._memory_config()
+        except Exception as exc:  # noqa: BLE001 - no memories rather than no voice
+            logger.warning("Voice: memories of %s left out: %s", self.umo, exc)
+            return {}
+
+    def _memory_config(self) -> dict:
         from astrbot.core.agent.runners.codex.codex_agent_runner import (
             memory_thread_config,
         )
@@ -182,15 +194,19 @@ class VoiceChat:
         )
         from astrbot.core.star.context import current_context
 
-        cfg = normalize_agent_runner(astrbot_config.get("agent_runner"))["config"]
         ctx = current_context()
-        if not cfg.get("memory_enabled") or ctx is None:
+        if ctx is None:
+            return {}
+        # The chat's config profile, as its turns read it.
+        chat_cfg = ctx.get_config(umo=self.umo)
+        cfg = normalize_agent_runner(chat_cfg.get("agent_runner"))["config"]
+        if not cfg.get("memory_enabled"):
             return {}
         # The speaker's rules, as the chat's turns read them.
         event = self._event(ctx, "")
         event.set_extra(
             EVENT_EXTRA_KEY,
-            policy_for_event(event, astrbot_config.get(CONFIG_KEY) or []),
+            policy_for_event(event, chat_cfg.get(CONFIG_KEY) or []),
         )
         return memory_thread_config(cfg, self.umo, event)
 
@@ -202,7 +218,6 @@ class VoiceChat:
         permission rules pick for the speaker, else one forced on the session,
         else the conversation's, else the configured default.
         """
-        from astrbot.core import astrbot_config
         from astrbot.core.event_llm_overrides import get_event_selected_persona_id
         from astrbot.core.permission_rules import CONFIG_KEY, policy_for_event
         from astrbot.core.star.context import current_context
@@ -213,7 +228,9 @@ class VoiceChat:
         try:
             event = self._event(ctx, "")
             # The rules as the chat's turns read them (codex_request).
-            policy = policy_for_event(event, astrbot_config.get(CONFIG_KEY) or [])
+            policy = policy_for_event(
+                event, ctx.get_config(umo=self.umo).get(CONFIG_KEY) or []
+            )
             if policy.persona_id:
                 event.set_selected_persona(policy.persona_id)
             conversation_id = await ctx.conversation_manager.get_curr_conversation_id(

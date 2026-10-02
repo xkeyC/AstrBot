@@ -123,7 +123,10 @@ class PcmMedia:
             else None
         )
         self._trim_silence = trim_silence
-        self._prebuffer = prebuffer_frames
+        self._prebuffer = max(prebuffer_frames, 1)
+        # Frames sent at once when a stretch starts: fewer than are buffered,
+        # or the queue runs dry at once and playback stutters.
+        self._lead = min(LEAD_FRAMES, self._prebuffer - 1)
         self._buffer = bytearray()
         self._playing = False
         # Until the model listens, inbound audio is kept, not handed out.
@@ -177,7 +180,9 @@ class PcmMedia:
                     if self._queue is None:
                         self._send(chunk)
                         continue
-                    if self._trim_silence and len(self._queue) > self._prebuffer:
+                    if self._trim_silence and len(self._queue) > max(
+                        self._prebuffer, PREBUFFER_FRAMES
+                    ):
                         samples = np.frombuffer(chunk, dtype=np.int16).astype(
                             np.float32
                         )
@@ -223,7 +228,7 @@ class PcmMedia:
                     await asyncio.sleep(FRAME_SECONDS)
                     continue
                 playing, waiting_since = True, None
-                next_at = now - LEAD_FRAMES * FRAME_SECONDS
+                next_at = now - self._lead * FRAME_SECONDS
             wait = next_at - loop.time()
             if wait > 0:
                 await asyncio.sleep(wait)

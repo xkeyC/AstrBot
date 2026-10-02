@@ -507,3 +507,31 @@ async def test_a_quick_call_back_keeps_the_thread(engine, monkeypatch):
 
     assert engine.forgotten == []  # the new session's thread stays loaded
     assert engine.pumps["t1"].route.events is new._events_queue
+
+
+@pytest.mark.asyncio
+async def test_the_model_ends_with_the_newest_context(engine):
+    session = make_session([])
+    session._engine, session._thread_id, session.ready = engine, "t1", True
+    session._context = session._context_given = "(Room: A)"
+    sent = []
+
+    async def slow_append(thread_id, text, role="user"):
+        await asyncio.sleep(0.01)
+        sent.append((text, role))
+
+    engine.rt.realtime_append_text = slow_append
+    # Bob comes and goes while the first change is still on its way.
+    await asyncio.gather(
+        session.set_context("(Room: A, Bob)"), session.set_context("(Room: A)")
+    )
+    assert sent[-1] == ("(Room: A)", "context")
+    assert session._context_given == "(Room: A)"
+
+
+@pytest.mark.asyncio
+async def test_context_set_before_the_start_waits_for_it(engine):
+    session = make_session([])
+    await session.set_context("(Room: A)")
+    assert engine.rt.calls == []  # not yet: the start takes it along
+    assert session._context == "(Room: A)"

@@ -118,3 +118,14 @@ async def test_playout_buffer_waits_to_prebuffer_before_speaking(monkeypatch):
     assert sent == []  # still buffering up
     await asyncio.wait_for(task, 5)
     assert len(sent) >= 2  # played out once the track ended
+
+
+@pytest.mark.asyncio
+async def test_a_small_prebuffer_keeps_its_pace(monkeypatch):
+    monkeypatch.setattr(pcm, "FRAME_SECONDS", 0.01)
+    media = PcmMedia(lambda chunk: None, buffer_seconds=3, prebuffer_frames=3)
+    # The start's lead stays under what is buffered: the queue never runs dry
+    # at once.
+    assert media._lead == 2
+    assert PcmMedia(lambda chunk: None, buffer_seconds=3, prebuffer_frames=1)._lead == 0
+    assert PcmMedia(lambda chunk: None, buffer_seconds=3)._lead == pcm.LEAD_FRAMES

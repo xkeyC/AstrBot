@@ -206,3 +206,45 @@ async def test_results_go_to_an_open_voice_conversation_else_to_the_chat(
     await deliver("qq:FriendMessage:2", "")
     assert session.notes[-1] == "late answer"
     assert ctx.sent == [("qq:FriendMessage:2", "late answer")]
+
+
+class ProfileContext(FakeContext):
+    """A chat on its own config profile (memories on, rules of its own)."""
+
+    def __init__(self, memory: bool) -> None:
+        super().__init__()
+        self.memory = memory
+        self.asked = []
+
+    def get_config(self, umo=None):
+        self.asked.append(umo)
+        return {
+            "admins_id": ["42"],
+            "agent_runner": {
+                "runner_type": "codex",
+                "config": {"memory_enabled": self.memory},
+            },
+            permission_rules.CONFIG_KEY: [],
+        }
+
+
+def test_voice_memories_follow_the_chats_config_profile(monkeypatch):
+    ctx = ProfileContext(memory=True)
+    monkeypatch.setattr(star_context, "_current", ctx)
+    chat = VoiceChat(umo="qq:FriendMessage:42", private=True, sender_id="42")
+    config = chat.memory_config()
+    assert config["features.memories"] is True
+    assert "qq:FriendMessage:42" in ctx.asked
+    # Memories off in the chat's profile: none for its voice either.
+    monkeypatch.setattr(star_context, "_current", ProfileContext(memory=False))
+    assert chat.memory_config() == {}
+
+
+def test_voice_memories_fail_closed(monkeypatch):
+    class Broken(FakeContext):
+        def get_config(self, umo=None):
+            raise RuntimeError("no profile")
+
+    monkeypatch.setattr(star_context, "_current", Broken())
+    chat = VoiceChat(umo="qq:FriendMessage:42", private=True, sender_id="42")
+    assert chat.memory_config() == {}

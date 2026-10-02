@@ -290,6 +290,8 @@ async def test_the_platforms_context_goes_with_the_start_then_as_context(engine)
     assert engine.rt.started[0]["realtime_start_instructions"].endswith(
         "(Room: Home; here: Alice)"
     )
+    await engine.pumps["t1"].queue.put({"type": "realtime_conversation_started"})
+    await eventually(lambda: t.session.ready)
     assert engine.rt.texts == []
     # Later: as context, for the next input.
     await t.session.set_context("(Room: Home; here: Alice, Bob)")
@@ -735,3 +737,105 @@ async def test_the_next_call_keeps_the_conversation_and_a_cut_turn_counts(
     assert conv.content == [{"role": "user", "content": "hello"}]
     [row] = await _stat_rows(voice_db)
     assert (row.status, row.token_input_other, row.token_output) == ("aborted", 500, 20)
+
+
+@pytest.mark.asyncio
+async def test_any_tool_result_reaches_codex_in_time(engine, monkeypatch):
+    monkeypatch.setattr(infra_module, "VOICE_TOOL_TIMEOUT", 0.05)
+
+    async def nothing(arguments: dict):
+        return None
+
+    async def mapping(arguments: dict):
+        return {"ok": True}
+
+    async def slow(arguments: dict) -> str:
+        await asyncio.sleep(5)
+        return "late"
+
+    spec = {
+        "type": "function",
+        "name": "nothing",
+        "description": ".",
+        "inputSchema": {},
+    }
+    t = SimpleNamespace(media=FakeMedia(), chat=FakeChat(False), closed=[], failures=[])
+    t.session = new_voice_session(
+        key="room",
+        scope_id="test:voice:room",
+        prompt="You are Jarvis, in a room.",
+        options=VoiceOptions(name="Jarvis", aliases=[]),
+        media=t.media,
+        on_closed=t.closed.append,
+        chat=t.chat,
+        tools=[
+            voice.VoiceTool(spec=spec, run=nothing),
+            voice.VoiceTool(spec={**spec, "name": "mapping"}, run=mapping),
+            voice.VoiceTool(spec={**spec, "name": "slow"}, run=slow),
+            # A built-in's name: left out.
+            voice.VoiceTool(spec={**spec, "name": "stay_silent"}, run=slow),
+        ],
+    )
+    t.session.launch(t.failures.append)
+    await eventually(lambda: engine.rt.started or t.failures)
+    names = [tool["name"] for tool in engine.params["dynamic_tools"]]
+    assert names == ["backend_task", "stay_silent", "nothing", "mapping", "slow"]
+    pump = engine.pumps["t1"]
+    assert (await pump.tool_handler({"tool": "nothing", "arguments": {}}))[
+        "contentItems"
+    ] == [{"type": "inputText", "text": "Done."}]
+    assert (await pump.tool_handler({"tool": "mapping", "arguments": {}}))[
+        "contentItems"
+    ] == [{"type": "inputText", "text": "{'ok': True}"}]
+    late = await pump.tool_handler({"tool": "slow", "arguments": {}})
+    assert late["success"] is False
+    # The built-in, not the platform's tool of that name.
+    assert (await pump.tool_handler({"tool": "stay_silent", "arguments": {}}))[
+        "endTurn"
+    ] is True
+    await t.session.close("done")
+
+
+def test_malformed_content_items_become_text():
+    assert infra_module.tool_content([{"type": "inputImage", "image_url": "x"}]) == [
+        {"type": "inputText", "text": "[{'type': 'inputImage', 'image_url': 'x'}]"}
+    ]
+    assert infra_module.tool_content([]) == [{"type": "inputText", "text": "[]"}]
+    good = [{"type": "inputText", "text": "a", "extra": 1}]
+    assert infra_module.tool_content(good) == [{"type": "inputText", "text": "a"}]
+
+
+@pytest.mark.asyncio
+async def test_context_set_while_starting_is_given_once_open(engine):
+    t = SimpleNamespace(media=FakeMedia(), chat=FakeChat(False), closed=[], failures=[])
+    t.session = new_voice_session(
+        key="room",
+        scope_id="test:voice:room",
+        prompt="You are Jarvis, in a room.",
+        options=VoiceOptions(name="Jarvis", aliases=[]),
+        media=t.media,
+        on_closed=t.closed.append,
+        chat=t.chat,
+    )
+    await t.session.set_context("(Room: Home; here: Alice)")
+    start = engine.rt.realtime_start
+
+    async def realtime_start(thread_id, request):
+        # Changed after the start was asked, before it is open.
+        await t.session.set_context("(Room: Home; here: Alice, Bob)")
+        await start(thread_id, request)
+
+    engine.rt.realtime_start = realtime_start
+    t.session.launch(t.failures.append)
+    await eventually(lambda: engine.rt.started or t.failures)
+    assert engine.rt.started[0]["realtime_start_instructions"].endswith(
+        "(Room: Home; here: Alice)"
+    )
+    assert engine.rt.texts == []
+    await engine.pumps["t1"].queue.put({"type": "realtime_conversation_started"})
+    await eventually(lambda: engine.rt.texts)
+    assert engine.rt.texts == [("(Room: Home; here: Alice, Bob)", "context")]
+    # The same again: not repeated.
+    await t.session.set_context("(Room: Home; here: Alice, Bob)")
+    assert len(engine.rt.texts) == 1
+    await t.session.close("done")

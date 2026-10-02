@@ -322,6 +322,10 @@ class VoiceSession:
         self._thread_released = False
         # The platform's latest context for the voice model (``set_context``).
         self._context = ""
+        # The context the model has (with the start, or given since); one
+        # sender at a time, so the newest is what it ends with.
+        self._context_given = ""
+        self._context_lock = asyncio.Lock()
         # The transcript and stats of the thread (see record.py).
         self._record: VoiceRecord | None = None
         self._pc: RTCPeerConnection | None = None
@@ -530,9 +534,13 @@ class VoiceSession:
             # The answers come from the paired chat and are spoken here.
             "client_managed_handoffs": True,
             "include_startup_context": False,
-            # The realtime model has no clock of its own.
-            "prompt": f"{self.prompt}\n\n{time_prompt()}",
+            # The realtime model has no clock of its own; the platform's
+            # context so far (set_context) goes with the start.
+            "prompt": "\n\n".join(
+                part for part in (self.prompt, time_prompt(), self._context) if part
+            ),
         }
+        self._context_given = self._context
         settings = realtime_voice_config()
         if voice := str(settings["voice"]).strip():
             request["voice"] = voice
@@ -577,6 +585,7 @@ class VoiceSession:
         self.media.start()
         self.started_at = time.monotonic()
         self.ready = True
+        await self._give_context()
         logger.info(
             "%s voice session %s started in %.1fs (thread %s)",
             self.label,
@@ -727,19 +736,32 @@ class VoiceSession:
         its next input, a newer one replacing it. Not a turn of its own.
         """
         self._context = text
-        if (
-            not self._realtime_requested
-            or self._engine is None
-            or self._thread_id is None
-            or self._closed
-        ):
-            return  # the start takes it along
-        try:
-            await self._engine.rt.realtime_append_text(self._thread_id, text, "context")
-        except Exception as exc:  # noqa: BLE001 - the conversation goes on
-            logger.warning(
-                "%s voice %s: context not given: %s", self.label, self.key, exc
-            )
+        if self.ready:
+            # Else the start takes it along, or it is given once the
+            # conversation is open.
+            await self._give_context()
+
+    async def _give_context(self) -> None:
+        """Gives the model the latest context if it has not got it yet (a
+        newer one set meanwhile follows at once)."""
+        async with self._context_lock:
+            while (
+                self._context != self._context_given
+                and self._engine is not None
+                and self._thread_id is not None
+                and not self._closed
+            ):
+                text = self._context
+                try:
+                    await self._engine.rt.realtime_append_text(
+                        self._thread_id, text, "context"
+                    )
+                except Exception as exc:  # noqa: BLE001 - the conversation goes on
+                    logger.warning(
+                        "%s voice %s: context not given: %s", self.label, self.key, exc
+                    )
+                    return
+                self._context_given = text
 
     async def note(self, text: str) -> None:
         """Adds a note (a result that reached the chat) to the voice model's

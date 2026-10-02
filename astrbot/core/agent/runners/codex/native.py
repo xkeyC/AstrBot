@@ -357,6 +357,20 @@ class ThreadPump:
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("codex tool response for %s failed: %s", call_id, e)
+            # Codex waits for an answer: one it can read, else the turn hangs.
+            with contextlib.suppress(Exception):
+                await self.engine.rt.dynamic_tool_response(
+                    self.thread_id,
+                    call_id,
+                    json.dumps(
+                        {
+                            "contentItems": [
+                                {"type": "inputText", "text": "error: no result"}
+                            ],
+                            "success": False,
+                        }
+                    ),
+                )
 
 
 class CodexEngine:
