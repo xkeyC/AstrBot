@@ -429,7 +429,7 @@ async def test_a_platform_tool_is_done_at_once(engine):
         "type": "function",
         "name": "wave",
         "description": "Wave.",
-        "inputSchema": {},
+        "inputSchema": {"type": "object", "properties": {"end_turn": {}, "say": {}}},
     }
     t = SimpleNamespace(media=FakeMedia(), chat=FakeChat(False), closed=[], failures=[])
     t.session = new_voice_session(
@@ -444,6 +444,7 @@ async def test_a_platform_tool_is_done_at_once(engine):
             voice.VoiceTool(spec=spec, run=wave),
             voice.VoiceTool(spec={**spec, "name": "broken"}, run=broken),
             voice.VoiceTool(spec={**spec, "name": "jump"}, run=wave, ends_turn=True),
+            voice.VoiceTool(spec={**spec, "name": "walk", "inputSchema": {}}, run=wave),
         ],
     )
     t.session.launch(t.failures.append)
@@ -455,6 +456,7 @@ async def test_a_platform_tool_is_done_at_once(engine):
         "wave",
         "broken",
         "jump",
+        "walk",
     ]
     result = await pump.tool_handler({"tool": "wave", "arguments": {"hand": "left"}})
     assert result == {
@@ -484,6 +486,11 @@ async def test_a_platform_tool_is_done_at_once(engine):
     assert (await pump.tool_handler({"tool": "wave", "arguments": {"end_turn": True}}))[
         "endTurn"
     ] is True
+    # A tool that does not offer end_turn is not ended by it: its result is
+    # for the model to see.
+    assert "endTurn" not in await pump.tool_handler(
+        {"tool": "walk", "arguments": {"end_turn": True}}
+    )
     assert await pump.tool_handler({"tool": "stay_silent", "arguments": {}}) == {
         "contentItems": [{"type": "inputText", "text": "Silent."}],
         "success": True,

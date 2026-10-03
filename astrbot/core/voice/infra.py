@@ -431,11 +431,15 @@ class InfraVoiceSession(VoiceSession):
                 "contentItems": tool_content(result),
                 "success": success,
             }
-            # The call's end_turn argument overrides the tool's default; a
-            # failed action is the model's to tell.
+            # The call's end_turn argument overrides the tool's default when
+            # the tool offers it (a tool that does not, the model must see the
+            # result of); a failed action is the model's to tell.
+            offers_end_turn = "end_turn" in (
+                tool.spec.get("inputSchema", {}).get("properties") or {}
+            )
             ends_turn = (
                 arguments.get("end_turn", tool.ends_turn)
-                if isinstance(arguments, dict)
+                if offers_end_turn and isinstance(arguments, dict)
                 else tool.ends_turn
             )
             if ends_turn is True and success:
