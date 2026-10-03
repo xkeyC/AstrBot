@@ -354,12 +354,10 @@ async def test_proactive_agent_respects_runtime_and_safety_settings(
     assert "send_message_to_user" in tool_names
     assert "future_task" in tool_names
     assert ("astrbot_execute_python" in tool_names) == (runtime == "local")
+    assert "astrbot_execute_ipython" not in tool_names
     if runtime == "sandbox":
-        assert "astrbot_execute_ipython" in tool_names
         assert "astrbot_cua_screenshot" in tool_names
         assert "CUA Desktop Control" in _dynamic_context_text(request)
-    else:
-        assert "astrbot_execute_ipython" not in tool_names
     assert ("astrbot_execute_shell" in tool_names) == (runtime in {"local", "sandbox"})
     assert (
         ama.LLM_SAFETY_MODE_SYSTEM_PROMPT.strip() in _dynamic_context_text(request)
@@ -2985,7 +2983,7 @@ class TestApplySandboxTools:
 
         tool_names = req.func_tool.names()
         assert "astrbot_execute_shell" in tool_names
-        assert "astrbot_execute_ipython" in tool_names
+        assert "astrbot_execute_ipython" not in tool_names
         assert "astrbot_upload_file" in tool_names
         assert "astrbot_download_file" in tool_names
 

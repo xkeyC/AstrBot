@@ -7,7 +7,7 @@ from astrbot.api import FunctionTool
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext, AstrMessageEvent
-from astrbot.core.computer.computer_client import get_booter, get_local_booter
+from astrbot.core.computer.computer_client import get_local_booter
 from astrbot.core.message.message_event_result import MessageChain
 
 from ..registry import builtin_tool
@@ -18,9 +18,6 @@ from .util import (
 )
 
 _OS_NAME = platform.system()
-_SANDBOX_PYTHON_TOOL_CONFIG = {
-    "provider_settings.computer_use_runtime": "sandbox",
-}
 _LOCAL_PYTHON_TOOL_CONFIG = {
     "provider_settings.computer_use_runtime": "local",
 }
@@ -76,42 +73,6 @@ async def handle_result(result: dict, event: AstrMessageEvent) -> ToolExecResult
         resp.content.append(mcp.types.TextContent(type="text", text="No output."))
 
     return resp
-
-
-@builtin_tool(config=_SANDBOX_PYTHON_TOOL_CONFIG)
-@dataclass
-class PythonTool(FunctionTool):
-    name: str = "astrbot_execute_ipython"
-    description: str = f"Run codes in an IPython shell. Current OS: {_OS_NAME}."
-    parameters: dict = field(default_factory=lambda: param_schema)
-
-    async def call(
-        self,
-        context: ContextWrapper[AstrAgentContext],
-        code: str,
-        silent: bool = False,
-        timeout: int = 30,
-    ) -> ToolExecResult:
-        if permission_error := check_admin_permission(context, "Python execution"):
-            return permission_error
-        sb = await get_booter(
-            context.context.context,
-            context.context.event.unified_msg_origin,
-        )
-        effective_timeout = (
-            min(timeout, context.tool_call_timeout)
-            if timeout > 0
-            else context.tool_call_timeout
-        )
-        try:
-            result = await sb.python.exec(
-                code,
-                timeout=effective_timeout,
-                silent=silent,
-            )
-            return await handle_result(result, context.context.event)
-        except Exception as e:
-            return f"Error executing code: {str(e)}"
 
 
 @builtin_tool(config=_LOCAL_PYTHON_TOOL_CONFIG)

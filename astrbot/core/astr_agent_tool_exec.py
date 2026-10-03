@@ -43,7 +43,6 @@ from astrbot.core.tools.computer_tools import (
     GrepTool,
     LocalExecuteShellTool,
     LocalPythonTool,
-    PythonTool,
     ShellSessionTool,
 )
 from astrbot.core.tools.message_tools import SendMessageToUserTool
@@ -197,7 +196,6 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         booter = "" if booter is None else str(booter).lower()
         if runtime == "sandbox":
             shell_tool = tool_mgr.get_builtin_tool(ExecuteShellTool)
-            python_tool = tool_mgr.get_builtin_tool(PythonTool)
             upload_tool = tool_mgr.get_builtin_tool(FileUploadTool)
             download_tool = tool_mgr.get_builtin_tool(FileDownloadTool)
             read_tool = tool_mgr.get_builtin_tool(FileReadTool)
@@ -206,7 +204,6 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             grep_tool = tool_mgr.get_builtin_tool(GrepTool)
             tools = {
                 shell_tool.name: shell_tool,
-                python_tool.name: python_tool,
                 upload_tool.name: upload_tool,
                 download_tool.name: download_tool,
                 read_tool.name: read_tool,

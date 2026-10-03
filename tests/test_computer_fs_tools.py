@@ -735,3 +735,76 @@ async def test_file_read_tool_rejects_directory_with_clear_message(
     assert "is a directory, not a file" in result
     assert "my-directory" in result
     assert "'astrbot_execute_shell'" in result
+
+
+class _HeredocPythonShell:
+    """Runs the python heredoc a sandbox shell command carries, locally."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def exec(self, command: str, **_kwargs: Any) -> dict[str, Any]:
+        import asyncio
+        import subprocess
+        import sys
+
+        self.commands.append(command)
+        script = command.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-"],
+            input=script,
+            capture_output=True,
+            text=True,
+        )
+        return {
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "exit_code": proc.returncode,
+            "success": proc.returncode == 0,
+        }
+
+
+@pytest.mark.asyncio
+async def test_sandbox_file_read_runs_python_through_shell(tmp_path):
+    target = tmp_path / "notes.txt"
+    target.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    shell = _HeredocPythonShell()
+    python = SimpleNamespace(exec=AsyncMock())
+    booter = SimpleNamespace(shell=shell, python=python)
+
+    result = await file_read_utils.read_file_tool_result(
+        booter,
+        local_mode=False,
+        path=str(target),
+        offset=1,
+        limit=1,
+    )
+
+    assert "line2" in str(result)
+    assert "line1" not in str(result)
+    assert len(shell.commands) == 2
+    python.exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_file_read_reports_shell_failure():
+    shell = SimpleNamespace(
+        exec=AsyncMock(
+            return_value={
+                "stdout": "",
+                "stderr": "FileNotFoundError: missing.txt",
+                "exit_code": 1,
+                "success": False,
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="file probe failed: FileNotFoundError"):
+        await file_read_utils.read_file_tool_result(
+            SimpleNamespace(shell=shell),
+            local_mode=False,
+            path="missing.txt",
+            offset=None,
+            limit=None,
+        )

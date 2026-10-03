@@ -75,9 +75,7 @@ def test_build_handoff_toolset_keeps_permission_guards_for_default_tools(runtime
     assert (toolset.get_tool("astrbot_execute_python") is not None) == (
         runtime == "local"
     )
-    assert (toolset.get_tool("astrbot_execute_ipython") is not None) == (
-        runtime == "sandbox"
-    )
+    assert toolset.get_tool("astrbot_execute_ipython") is None
     assert (toolset.get_tool("astrbot_execute_shell") is not None) == (
         runtime in {"local", "sandbox"}
     )

@@ -242,24 +242,34 @@ async def read_local_text_range(
     )
 
 
+def _build_python_shell_command(script: str) -> str:
+    return (
+        "if command -v python3 >/dev/null 2>&1; then PYBIN=python3; "
+        "elif command -v python >/dev/null 2>&1; then PYBIN=python; "
+        "else echo 'python not found in sandbox' >&2; exit 127; fi; "
+        "$PYBIN - <<'PY'\n"
+        f"{script}\n"
+        "PY"
+    )
+
+
 async def _exec_python_json(
     booter: ComputerBooter,
     script: str,
     *,
     action: str,
 ) -> dict:
-    result = await booter.python.exec(script)
-    data = result.get("data") if isinstance(result.get("data"), dict) else {}
-    if not isinstance(data, dict):
+    result = await booter.shell.exec(_build_python_shell_command(script))
+    if not isinstance(result, dict):
         raise RuntimeError(f"{action} failed: invalid result format")
-    output = data.get("output") if isinstance(data.get("output"), dict) else {}
-    if not isinstance(output, dict):
-        raise RuntimeError(f"{action} failed: invalid output format")
-    error_text = str(data.get("error", "") or result.get("error", "") or "").strip()
-    if error_text:
-        raise RuntimeError(f"{action} failed: {error_text}")
+    exit_code = result.get("exit_code")
+    if result.get("success") is False or exit_code not in (0, None):
+        error_text = str(result.get("stderr", "") or result.get("error", "") or "")
+        raise RuntimeError(
+            f"{action} failed: {error_text.strip() or f'exit code {exit_code}'}"
+        )
 
-    text = str(output.get("text", "") or "").strip()
+    text = str(result.get("stdout", "") or "").strip()
     if not text:
         raise RuntimeError(f"{action} failed: empty output")
 

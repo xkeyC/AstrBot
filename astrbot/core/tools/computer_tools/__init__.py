@@ -12,7 +12,7 @@ from .fs import (
     FileWriteTool,
     GrepTool,
 )
-from .python import LocalPythonTool, PythonTool
+from .python import LocalPythonTool
 from .shell import ExecuteShellTool, LocalExecuteShellTool, ShellSessionTool
 from .shipyard_neo import (
     AnnotateExecutionTool,
@@ -57,7 +57,6 @@ __all__ = [
     "LocalExecuteShellTool",
     "LocalPythonTool",
     "PromoteSkillCandidateTool",
-    "PythonTool",
     "RollbackSkillReleaseTool",
     "RunBrowserSkillTool",
     "ShellSessionTool",

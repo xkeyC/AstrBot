@@ -77,7 +77,6 @@ from astrbot.core.tools.computer_tools import (
     LocalExecuteShellTool,
     LocalPythonTool,
     PromoteSkillCandidateTool,
-    PythonTool,
     RollbackSkillReleaseTool,
     RunBrowserSkillTool,
     ShellSessionTool,
@@ -1270,7 +1269,6 @@ def _apply_sandbox_tools(
 
     tool_mgr = llm_tools
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(ExecuteShellTool))
-    req.func_tool.add_tool(tool_mgr.get_builtin_tool(PythonTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileUploadTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileDownloadTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileReadTool))
