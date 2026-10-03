@@ -85,7 +85,7 @@ dependencies = [
   # requirement that names an immutable revision, so a branch here would
   # rebuild the whole Rust workspace on every install. Bump this SHA when the
   # binding changes.
-  "codex-astrbot @ git+https://github.com/xkeyC/codex_for_astrbot@71ea8fada32a6d558882810b64e39ef7dc8504a1#subdirectory=codex-rs/astrbot-py",
+  "codex-astrbot @ git+https://github.com/xkeyC/codex_for_astrbot@2458632829820b0adec46a062f2a48c24feb6001#subdirectory=codex-rs/astrbot-py",
 ]
 
 [dependency-groups]
