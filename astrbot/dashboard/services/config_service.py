@@ -785,7 +785,6 @@ class ConfigDisplayService:
     def __init__(self, core_lifecycle: AstrBotCoreLifecycle) -> None:
         self.core_lifecycle = core_lifecycle
         self.config = core_lifecycle.astrbot_config
-        self._logo_token_cache: dict[str, str] = {}
 
     async def get_configs(self, plugin_name: str | None = None) -> dict:
         if not plugin_name:
@@ -875,17 +874,10 @@ class ConfigDisplayService:
         if not platform.logo_path:
             return
 
+        # A file token is spent by its first download, so every config read
+        # registers a fresh one; a cached token showed a broken image after
+        # the logo had been loaded once.
         try:
-            cache_key = f"{platform.name}:{platform.logo_path}"
-            if cache_key in self._logo_token_cache:
-                self._set_platform_logo_token(
-                    platform_default_tmpl,
-                    platform.name,
-                    self._logo_token_cache[cache_key],
-                )
-                logger.debug(f"Using cached logo token for platform {platform.name}")
-                return
-
             platform_cls = platform_cls_map.get(platform.name)
             if not platform_cls:
                 logger.warning(f"Platform class not found for {platform.name}")
@@ -910,7 +902,6 @@ class ConfigDisplayService:
                 platform.name,
                 logo_token,
             )
-            self._logo_token_cache[cache_key] = logo_token
             logger.debug(f"Logo token registered for platform {platform.name}")
 
         except (ImportError, AttributeError) as exc:
