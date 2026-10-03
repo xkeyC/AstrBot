@@ -75,7 +75,6 @@ from astrbot.core.tools.computer_tools import (
     ListSkillCandidatesTool,
     ListSkillReleasesTool,
     LocalExecuteShellTool,
-    LocalPythonTool,
     PromoteSkillCandidateTool,
     RollbackSkillReleaseTool,
     RunBrowserSkillTool,
@@ -566,7 +565,6 @@ def _apply_local_env_tools(
     tool_mgr = plugin_context.get_llm_tool_manager()
     req.func_tool.add_tool(LocalExecuteShellTool())
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(ShellSessionTool))
-    req.func_tool.add_tool(tool_mgr.get_builtin_tool(LocalPythonTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileReadTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileWriteTool))
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FileEditTool))
@@ -1912,8 +1910,8 @@ async def build_main_agent(
             )
             tool_prompt += (
                 f"\nCurrent workspace: `{workspace_root}`. "
-                "`astrbot_execute_shell` and `astrbot_execute_python` use it as "
-                "their working directory. `astrbot_file_read_tool`, "
+                "`astrbot_execute_shell` uses it as its working directory. "
+                "`astrbot_file_read_tool`, "
                 "`astrbot_file_write_tool`, `astrbot_file_edit_tool`, and "
                 "`astrbot_grep_tool` resolve relative paths from it. Prefer relative "
                 "paths within the workspace; do not assume this behavior for other "

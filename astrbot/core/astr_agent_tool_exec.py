@@ -42,7 +42,6 @@ from astrbot.core.tools.computer_tools import (
     FileWriteTool,
     GrepTool,
     LocalExecuteShellTool,
-    LocalPythonTool,
     ShellSessionTool,
 )
 from astrbot.core.tools.message_tools import SendMessageToUserTool
@@ -226,7 +225,6 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         if runtime == "local":
             shell_tool = LocalExecuteShellTool()
             shell_session_tool = tool_mgr.get_builtin_tool(ShellSessionTool)
-            python_tool = tool_mgr.get_builtin_tool(LocalPythonTool)
             read_tool = tool_mgr.get_builtin_tool(FileReadTool)
             write_tool = tool_mgr.get_builtin_tool(FileWriteTool)
             edit_tool = tool_mgr.get_builtin_tool(FileEditTool)
@@ -234,7 +232,6 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             return {
                 shell_tool.name: shell_tool,
                 shell_session_tool.name: shell_session_tool,
-                python_tool.name: python_tool,
                 read_tool.name: read_tool,
                 write_tool.name: write_tool,
                 edit_tool.name: edit_tool,

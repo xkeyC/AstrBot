@@ -72,9 +72,7 @@ def test_build_handoff_toolset_keeps_permission_guards_for_default_tools(runtime
     assert toolset is not None
     assert isinstance(toolset.get_tool("admin_only_mcp"), _PermissionGuardedTool)
     assert toolset.get_tool("transfer_to_child") is None
-    assert (toolset.get_tool("astrbot_execute_python") is not None) == (
-        runtime == "local"
-    )
+    assert toolset.get_tool("astrbot_execute_python") is None
     assert toolset.get_tool("astrbot_execute_ipython") is None
     assert (toolset.get_tool("astrbot_execute_shell") is not None) == (
         runtime in {"local", "sandbox"}

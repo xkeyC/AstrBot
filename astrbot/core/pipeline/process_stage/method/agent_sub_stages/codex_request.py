@@ -183,9 +183,7 @@ async def prepare_codex_request(
         # barred from the host does not conclude that nothing can run.
         offered = {tool.name for tool in (req.func_tool.tools if req.func_tool else [])}
         sandbox_tools = tuple(
-            name
-            for name in ("exec_command", "write_stdin", "astrbot_execute_python")
-            if name in offered
+            name for name in ("exec_command", "write_stdin") if name in offered
         )
         summary = policy.summary(
             host_exec=bool(runner_config.get("native_exec_tools")),

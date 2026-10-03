@@ -353,7 +353,7 @@ async def test_proactive_agent_respects_runtime_and_safety_settings(
     tool_names = request.func_tool.names()
     assert "send_message_to_user" in tool_names
     assert "future_task" in tool_names
-    assert ("astrbot_execute_python" in tool_names) == (runtime == "local")
+    assert "astrbot_execute_python" not in tool_names
     assert "astrbot_execute_ipython" not in tool_names
     if runtime == "sandbox":
         assert "astrbot_cua_screenshot" in tool_names
@@ -1575,7 +1575,7 @@ class TestEnsurePersonaAndSkills:
             tool_names = result.provider_request.func_tool.names()
             assert "astrbot_execute_shell" in tool_names
             assert "astrbot_shell_session" in tool_names
-            assert "astrbot_execute_python" in tool_names
+            assert "astrbot_execute_python" not in tool_names
             shell_tool = result.provider_request.func_tool.get_tool(
                 "astrbot_execute_shell"
             )
